@@ -4349,6 +4349,16 @@ def test_run_stores_resolved_config_without_secrets(repo, tmp_path, monkeypatch)
     assert "secrets" not in stored and "raw" not in stored
     assert stored["strategy"]["ema_rsi"]["min_stop_pct"] == 0.1
     assert "should-not-leak" not in repo.get_run("t1")["config_json"]
+
+
+def test_day_whose_bars_end_early_still_squares_off_intraday(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    d = date(2026, 9, 14)
+    cutoff = ist_epoch(d, "12:00")
+    candles = [c for c in _candles() if not (date_of(c.ts) == d and c.ts >= cutoff)]  # day 1 data stops at noon
+    _run(repo, cfg, candles)
+    for r in repo.list_positions("t1"):
+        assert date_of(r["closed_at"]) == date_of(r["opened_at"])
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -4471,6 +4481,12 @@ class BacktestEngine:
         self._day = _DayCounters(unrealised_at_open=self._unrealised_now())
 
     def _end_day(self, d: date, ts: int) -> None:
+        # A day whose bar stream ends before the square-off bar must still not carry MIS overnight.
+        leftovers = self.broker.square_off(ts, {}, last_prices=self._last_close)
+        if leftovers:
+            log.warning("day %s ended before square-off; closed %d intraday position(s) at last price",
+                        d, len(leftovers))
+            self._record(leftovers)
         # Entries queued on the last bar must not fill against tomorrow's open on a stale signal.
         self._record(self.broker.cancel_pending(ts, "day_end"))
         self.repo.upsert_daily_pnl(self.run_id, d.isoformat(), self._day.realised, self._unrealised_today(),
@@ -4558,6 +4574,7 @@ class BacktestEngine:
             res = evaluate(sig, state, self.cfg.risk, self.lot_sizes.get(sig.symbol, 1), margin, kill)
             if isinstance(res, Rejection):
                 self.repo.insert_risk_decision(self.run_id, sid, False, res.reason, 0)
+                log.info("signal %s %s rejected: %s", sig.direction, sig.symbol, res.reason, extra={"symbol": sig.symbol})
                 continue
             self.repo.insert_risk_decision(self.run_id, sid, True, "ok", res.quantity)
             # Deliberately conservative within the bar: a risk-approved candidate holds its slot,
@@ -4584,6 +4601,9 @@ class BacktestEngine:
                                    order.signal.entry_price, "PENDING", ts)
             self.broker.place_entry(order)
             self._day.entries_placed += 1
+            log.info("entry %s %s x%d @ %.2f stop %.2f target %s", side, order.signal.symbol, order.quantity,
+                     order.signal.entry_price, order.signal.stop_price, order.signal.target_price,
+                     extra={"symbol": order.signal.symbol, "client_id": order.client_id})
 
     def _flatten(self, ts: int, candles: dict[str, Candle]) -> None:
         self._record(self.broker.square_off(ts, candles, products=("MIS", "CNC"), reason="FLATTEN",
@@ -4602,6 +4622,8 @@ class BacktestEngine:
                 else:
                     self.repo.insert_fill(oid, ev.position.quantity, ev.position.avg_price, ev.ts)
                 self._day.fills += 1
+                log.info("filled %s x%d @ %.2f", ev.position.symbol, ev.position.quantity, ev.position.avg_price,
+                         extra={"symbol": ev.position.symbol, "client_id": ev.order.client_id})
             elif isinstance(ev, Unfilled):
                 self.repo.update_order(self.run_id, ev.order.client_id, "UNFILLED", ev.ts)
                 log.info("unfilled %s %s: %s", ev.order.signal.symbol, ev.order.client_id, ev.reason)
@@ -4610,6 +4632,8 @@ class BacktestEngine:
                 if p.db_id is not None:
                     self.repo.close_position(p.db_id, p.closed_ts, p.exit_price, p.exit_reason, p.pnl)
                 self._day.realised += p.pnl or 0.0
+                log.info("closed %s %s @ %.2f pnl %.2f", p.symbol, p.exit_reason, p.exit_price or 0.0, p.pnl or 0.0,
+                         extra={"symbol": p.symbol, "client_id": p.client_id})
                 if p.exit_reason == "STOP":
                     # Wall-clock cooldown: an overnight gap absorbs it, which is intended (intraday rule).
                     self._cooldown_until[p.symbol] = p.closed_ts + self.cfg.risk.cooldown_bars * self.interval_sec
@@ -4618,10 +4642,10 @@ class BacktestEngine:
 - [ ] **Step 5: Run tests; first run of the golden test writes the fixture**
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 21 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
+Expected: 22 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 22 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
+Expected: 23 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
 
 - [ ] **Step 6: Commit**
 
@@ -5329,13 +5353,13 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     if cfg.execution.interval_minutes not in CHUNK_DAYS:
         raise click.ClickException(f"unsupported candle interval: {cfg.execution.interval_minutes} minutes")
     adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret)  # fails fast without creds
+    setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
     path = Path(cfg.paths.instruments)
     if not _instruments_fresh(path):
         click.echo("downloading instrument master")
         download_instruments(path)
     symbols, _, exchange = _symbols_and_lots(cfg, require_instruments=True)
     repo = Repo(connect(cfg.paths.db))
-    setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
     had_data = any(repo.latest_candle_ts(s, cfg.execution.interval_minutes) is not None for s in symbols)
     failures: list = []
 

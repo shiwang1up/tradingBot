@@ -352,3 +352,13 @@ def test_run_stores_resolved_config_without_secrets(repo, tmp_path, monkeypatch)
     assert "secrets" not in stored and "raw" not in stored
     assert stored["strategy"]["ema_rsi"]["min_stop_pct"] == 0.1
     assert "should-not-leak" not in repo.get_run("t1")["config_json"]
+
+
+def test_day_whose_bars_end_early_still_squares_off_intraday(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    d = date(2026, 9, 14)
+    cutoff = ist_epoch(d, "12:00")
+    candles = [c for c in _candles() if not (date_of(c.ts) == d and c.ts >= cutoff)]  # day 1 data stops at noon
+    _run(repo, cfg, candles)
+    for r in repo.list_positions("t1"):
+        assert date_of(r["closed_at"]) == date_of(r["opened_at"])

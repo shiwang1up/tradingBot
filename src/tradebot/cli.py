@@ -102,13 +102,13 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     if cfg.execution.interval_minutes not in CHUNK_DAYS:
         raise click.ClickException(f"unsupported candle interval: {cfg.execution.interval_minutes} minutes")
     adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret)  # fails fast without creds
+    setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
     path = Path(cfg.paths.instruments)
     if not _instruments_fresh(path):
         click.echo("downloading instrument master")
         download_instruments(path)
     symbols, _, exchange = _symbols_and_lots(cfg, require_instruments=True)
     repo = Repo(connect(cfg.paths.db))
-    setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
     had_data = any(repo.latest_candle_ts(s, cfg.execution.interval_minutes) is not None for s in symbols)
     failures: list = []
 

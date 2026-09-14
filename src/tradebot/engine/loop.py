@@ -110,6 +110,12 @@ class BacktestEngine:
         self._day = _DayCounters(unrealised_at_open=self._unrealised_now())
 
     def _end_day(self, d: date, ts: int) -> None:
+        # A day whose bar stream ends before the square-off bar must still not carry MIS overnight.
+        leftovers = self.broker.square_off(ts, {}, last_prices=self._last_close)
+        if leftovers:
+            log.warning("day %s ended before square-off; closed %d intraday position(s) at last price",
+                        d, len(leftovers))
+            self._record(leftovers)
         # Entries queued on the last bar must not fill against tomorrow's open on a stale signal.
         self._record(self.broker.cancel_pending(ts, "day_end"))
         self.repo.upsert_daily_pnl(self.run_id, d.isoformat(), self._day.realised, self._unrealised_today(),
@@ -197,6 +203,7 @@ class BacktestEngine:
             res = evaluate(sig, state, self.cfg.risk, self.lot_sizes.get(sig.symbol, 1), margin, kill)
             if isinstance(res, Rejection):
                 self.repo.insert_risk_decision(self.run_id, sid, False, res.reason, 0)
+                log.info("signal %s %s rejected: %s", sig.direction, sig.symbol, res.reason, extra={"symbol": sig.symbol})
                 continue
             self.repo.insert_risk_decision(self.run_id, sid, True, "ok", res.quantity)
             # Deliberately conservative within the bar: a risk-approved candidate holds its slot,
@@ -223,6 +230,9 @@ class BacktestEngine:
                                    order.signal.entry_price, "PENDING", ts)
             self.broker.place_entry(order)
             self._day.entries_placed += 1
+            log.info("entry %s %s x%d @ %.2f stop %.2f target %s", side, order.signal.symbol, order.quantity,
+                     order.signal.entry_price, order.signal.stop_price, order.signal.target_price,
+                     extra={"symbol": order.signal.symbol, "client_id": order.client_id})
 
     def _flatten(self, ts: int, candles: dict[str, Candle]) -> None:
         self._record(self.broker.square_off(ts, candles, products=("MIS", "CNC"), reason="FLATTEN",
@@ -241,6 +251,8 @@ class BacktestEngine:
                 else:
                     self.repo.insert_fill(oid, ev.position.quantity, ev.position.avg_price, ev.ts)
                 self._day.fills += 1
+                log.info("filled %s x%d @ %.2f", ev.position.symbol, ev.position.quantity, ev.position.avg_price,
+                         extra={"symbol": ev.position.symbol, "client_id": ev.order.client_id})
             elif isinstance(ev, Unfilled):
                 self.repo.update_order(self.run_id, ev.order.client_id, "UNFILLED", ev.ts)
                 log.info("unfilled %s %s: %s", ev.order.signal.symbol, ev.order.client_id, ev.reason)
@@ -249,6 +261,8 @@ class BacktestEngine:
                 if p.db_id is not None:
                     self.repo.close_position(p.db_id, p.closed_ts, p.exit_price, p.exit_reason, p.pnl)
                 self._day.realised += p.pnl or 0.0
+                log.info("closed %s %s @ %.2f pnl %.2f", p.symbol, p.exit_reason, p.exit_price or 0.0, p.pnl or 0.0,
+                         extra={"symbol": p.symbol, "client_id": p.client_id})
                 if p.exit_reason == "STOP":
                     # Wall-clock cooldown: an overnight gap absorbs it, which is intended (intraday rule).
                     self._cooldown_until[p.symbol] = p.closed_ts + self.cfg.risk.cooldown_bars * self.interval_sec
