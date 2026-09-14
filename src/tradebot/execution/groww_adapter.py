@@ -10,21 +10,34 @@ from typing import Any
 from tradebot.engine.clock import IST, to_ist
 from tradebot.types import Candle
 
-NO_RETRY_MARKERS = ("Authentication", "Authorisation", "BadRequest")
+# Errors that must never be retried (spec 11): auth, authorisation, bad request, not found.
+# The SDK raises the generic GrowwAPIException for Groww's {"status": "FAILURE"} bodies, so
+# we match on the HTTP-style error code as well as the exception class name.
+NO_RETRY_MARKERS = ("Authentication", "Authorisation", "Authorization", "BadRequest", "NotFound")
+NO_RETRY_CODES = {"400", "401", "403", "404"}
+
+
+def is_non_retryable(e: BaseException) -> bool:
+    name = type(e).__name__
+    if any(m in name for m in NO_RETRY_MARKERS):
+        return True
+    code = getattr(e, "code", None)
+    return code is not None and str(code) in NO_RETRY_CODES
 
 
 def with_retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 1.0,
                sleep: Callable[[float], None] = time.sleep) -> Any:
-    """Exponential backoff. Auth/authorisation/bad-request errors are never retried."""
+    """Exponential backoff (1s, 2s, ...). Non-retryable errors propagate on the first attempt."""
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
     for i in range(attempts):
         try:
             return fn()
-        except Exception as e:  # noqa: BLE001 - SDK exceptions vary; we inspect the class name
-            name = type(e).__name__
-            if any(m in name for m in NO_RETRY_MARKERS) or i == attempts - 1:
+        except Exception as e:  # noqa: BLE001 - SDK exceptions vary; classified by is_non_retryable
+            if is_non_retryable(e) or i == attempts - 1:
                 raise
             sleep(base_delay * (2 ** i))
-    raise RuntimeError("unreachable")
+    raise AssertionError("unreachable")
 
 
 def _to_epoch(v: Any) -> int:
@@ -34,16 +47,21 @@ def _to_epoch(v: Any) -> int:
     s = str(v).strip()
     if s.isdigit():
         return _to_epoch(int(s))
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"  # 3.9's fromisoformat does not accept a Z suffix
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=IST)
+        dt = dt.replace(tzinfo=IST)  # Groww returns naive IST wall-clock strings
     return int(dt.timestamp())
 
 
 def parse_candles(symbol: str, resp: dict | None) -> list[Candle]:
+    """Rows are [ts, o, h, l, c, volume, ...]; V2 appends open interest, which is ignored."""
     rows = (resp or {}).get("candles") or []
     out = []
     for r in rows:
+        if not isinstance(r, (list, tuple)) or len(r) < 6:
+            raise ValueError(f"{symbol}: malformed candle row {r!r}")
         out.append(Candle(symbol, _to_epoch(r[0]), float(r[1]), float(r[2]), float(r[3]),
                           float(r[4]), int(float(r[5] or 0))))
     return out
@@ -96,14 +114,18 @@ class GrowwAdapter:
         V2 rows are [iso_timestamp, o, h, l, c, volume, open_interest]; parse_candles reads the
         first six and treats naive timestamps as IST.
         """
+        client = self.client  # auth happens here, outside the retry loop, so it is never retried
+        interval_name = candle_interval_name(interval)
+        gsym = groww_symbol(exchange, symbol)
+
         def call():
-            return self.client.get_historical_candles(
+            return client.get_historical_candles(
                 exchange=exchange,
-                segment=self.client.SEGMENT_CASH,
-                groww_symbol=groww_symbol(exchange, symbol),
+                segment=client.SEGMENT_CASH,
+                groww_symbol=gsym,
                 start_time=_fmt_ist(start_ts),
                 end_time=_fmt_ist(end_ts),
-                candle_interval=candle_interval_name(interval),
+                candle_interval=interval_name,
                 timeout=30,
             )
 

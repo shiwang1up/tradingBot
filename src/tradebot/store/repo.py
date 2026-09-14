@@ -39,6 +39,14 @@ class Repo:
         self.conn.commit()
         return self.conn.total_changes - before
 
+    def delete_candles(self, symbol: str, interval: int, start_ts: int, end_ts: int) -> int:
+        cur = self.conn.execute(
+            "DELETE FROM candles WHERE symbol=? AND interval=? AND ts BETWEEN ? AND ?",
+            (symbol, interval, start_ts, end_ts),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def latest_candle_ts(self, symbol: str, interval: int) -> int | None:
         row = self.conn.execute(
             "SELECT MAX(ts) AS ts FROM candles WHERE symbol=? AND interval=?", (symbol, interval)
