@@ -4,7 +4,7 @@ import pytest
 
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.engine.clock import ist_epoch
-from tradebot.execution.groww_adapter import parse_candles, with_retry
+from tradebot.execution.groww_adapter import GrowwAdapter, candle_interval_name, groww_symbol, parse_candles, with_retry
 from tradebot.types import Candle
 
 DAY = 86400
@@ -21,6 +21,46 @@ def test_parse_candles_accepts_epoch_seconds_millis_and_iso():
     assert out[1].volume == 2000
     assert out[1].close == 101.0
     assert all(c.symbol == "RELIANCE" and c.source == "official" for c in out)
+
+
+def test_parse_candles_v2_rows_with_open_interest_and_naive_ist_timestamp():
+    resp = {"candles": [["2026-09-14T09:15:00", 100, 101, 99, 100.5, 1000, None]]}
+    out = parse_candles("RELIANCE", resp)
+    assert out[0].ts == 1789357500 and out[0].volume == 1000
+
+
+def test_interval_names_and_groww_symbol():
+    assert candle_interval_name(5) == "5minute"
+    assert candle_interval_name(1440) == "1day"
+    assert groww_symbol("NSE", "RELIANCE") == "NSE-RELIANCE"
+    with pytest.raises(ValueError):
+        candle_interval_name(7)
+
+
+def test_fetch_candles_calls_v2_endpoint_with_ist_strings():
+    calls = []
+
+    class FakeClient:
+        SEGMENT_CASH = "CASH"
+
+        def get_historical_candles(self, **kw):
+            calls.append(kw)
+            return {"candles": [["2026-09-14T09:15:00", 1, 2, 0.5, 1.5, 10, None]]}
+
+    adapter = GrowwAdapter("key", "secret")
+    adapter._client = FakeClient()  # bypass TOTP auth
+    out = adapter.fetch_candles("RELIANCE", "NSE", 1789357500, 1789357500 + 3600, 5)
+    assert calls[0]["groww_symbol"] == "NSE-RELIANCE"
+    assert calls[0]["candle_interval"] == "5minute"
+    assert calls[0]["start_time"] == "2026-09-14 09:15:00"
+    assert calls[0]["end_time"] == "2026-09-14 10:15:00"
+    assert calls[0]["segment"] == "CASH"
+    assert out[0].ts == 1789357500
+
+
+def test_adapter_requires_credentials():
+    with pytest.raises(ValueError):
+        GrowwAdapter("", "")
 
 
 def test_parse_candles_empty():

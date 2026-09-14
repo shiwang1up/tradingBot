@@ -6,8 +6,10 @@ from collections.abc import Callable
 from tradebot.store.repo import Repo
 from tradebot.types import Candle
 
-# Groww's max window per request, by interval in minutes (spec 4.2).
-CHUNK_DAYS = {1: 7, 5: 15, 10: 30, 60: 150, 240: 365, 1440: 1080}
+# Request window per interval in minutes: half of Groww's documented maximum for
+# get_historical_candles (1-5m: 30 days, 10-30m: 90 days, 1h+: 180 days), so a
+# window that is inclusive on both ends can never trip the limit (spec 4.2).
+CHUNK_DAYS = {1: 15, 2: 15, 3: 15, 5: 15, 10: 45, 15: 45, 30: 45, 60: 90, 240: 90, 1440: 90}
 DAY = 86400
 
 Fetcher = Callable[[str, str, int, int, int], list[Candle]]  # (symbol, exchange, start, end, interval)

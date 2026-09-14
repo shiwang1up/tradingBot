@@ -1959,14 +1959,13 @@ git commit -m "feat: universe loading and instrument master resolution"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_historical.py
 from datetime import date
 
 import pytest
 
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.engine.clock import ist_epoch
-from tradebot.execution.groww_adapter import parse_candles, with_retry
+from tradebot.execution.groww_adapter import GrowwAdapter, candle_interval_name, groww_symbol, parse_candles, with_retry
 from tradebot.types import Candle
 
 DAY = 86400
@@ -1983,6 +1982,46 @@ def test_parse_candles_accepts_epoch_seconds_millis_and_iso():
     assert out[1].volume == 2000
     assert out[1].close == 101.0
     assert all(c.symbol == "RELIANCE" and c.source == "official" for c in out)
+
+
+def test_parse_candles_v2_rows_with_open_interest_and_naive_ist_timestamp():
+    resp = {"candles": [["2026-09-14T09:15:00", 100, 101, 99, 100.5, 1000, None]]}
+    out = parse_candles("RELIANCE", resp)
+    assert out[0].ts == 1789357500 and out[0].volume == 1000
+
+
+def test_interval_names_and_groww_symbol():
+    assert candle_interval_name(5) == "5minute"
+    assert candle_interval_name(1440) == "1day"
+    assert groww_symbol("NSE", "RELIANCE") == "NSE-RELIANCE"
+    with pytest.raises(ValueError):
+        candle_interval_name(7)
+
+
+def test_fetch_candles_calls_v2_endpoint_with_ist_strings():
+    calls = []
+
+    class FakeClient:
+        SEGMENT_CASH = "CASH"
+
+        def get_historical_candles(self, **kw):
+            calls.append(kw)
+            return {"candles": [["2026-09-14T09:15:00", 1, 2, 0.5, 1.5, 10, None]]}
+
+    adapter = GrowwAdapter("key", "secret")
+    adapter._client = FakeClient()  # bypass TOTP auth
+    out = adapter.fetch_candles("RELIANCE", "NSE", 1789357500, 1789357500 + 3600, 5)
+    assert calls[0]["groww_symbol"] == "NSE-RELIANCE"
+    assert calls[0]["candle_interval"] == "5minute"
+    assert calls[0]["start_time"] == "2026-09-14 09:15:00"
+    assert calls[0]["end_time"] == "2026-09-14 10:15:00"
+    assert calls[0]["segment"] == "CASH"
+    assert out[0].ts == 1789357500
+
+
+def test_adapter_requires_credentials():
+    with pytest.raises(ValueError):
+        GrowwAdapter("", "")
 
 
 def test_parse_candles_empty():
@@ -2147,6 +2186,23 @@ def _fmt_ist(ts: int) -> str:
     return to_ist(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# Interval in minutes -> Groww V2 candle_interval string (matches GrowwAPI.CANDLE_INTERVAL_* constants).
+_INTERVAL_NAMES = {1: "1minute", 2: "2minute", 3: "3minute", 5: "5minute", 10: "10minute", 15: "15minute",
+                   30: "30minute", 60: "1hour", 240: "4hour", 1440: "1day", 10080: "1week"}
+
+
+def candle_interval_name(interval_minutes: int) -> str:
+    try:
+        return _INTERVAL_NAMES[interval_minutes]
+    except KeyError as e:
+        raise ValueError(f"unsupported candle interval: {interval_minutes} minutes") from e
+
+
+def groww_symbol(exchange: str, trading_symbol: str) -> str:
+    """Groww's symbol form for cash equities, e.g. NSE-RELIANCE."""
+    return f"{exchange}-{trading_symbol}"
+
+
 class GrowwAdapter:
     def __init__(self, api_key: str, totp_secret: str):
         if not api_key or not totp_secret:
@@ -2168,14 +2224,20 @@ class GrowwAdapter:
         return self._client
 
     def fetch_candles(self, symbol: str, exchange: str, start_ts: int, end_ts: int, interval: int) -> list[Candle]:
+        """Cash-segment candles via the V2 endpoint (get_historical_candle_data is deprecated).
+
+        V2 rows are [iso_timestamp, o, h, l, c, volume, open_interest]; parse_candles reads the
+        first six and treats naive timestamps as IST.
+        """
         def call():
-            return self.client.get_historical_candle_data(
-                trading_symbol=symbol,
+            return self.client.get_historical_candles(
                 exchange=exchange,
                 segment=self.client.SEGMENT_CASH,
+                groww_symbol=groww_symbol(exchange, symbol),
                 start_time=_fmt_ist(start_ts),
                 end_time=_fmt_ist(end_ts),
-                interval_in_minutes=interval,
+                candle_interval=candle_interval_name(interval),
+                timeout=30,
             )
 
         return parse_candles(symbol, with_retry(call))
@@ -2192,8 +2254,10 @@ from collections.abc import Callable
 from tradebot.store.repo import Repo
 from tradebot.types import Candle
 
-# Groww's max window per request, by interval in minutes (spec 4.2).
-CHUNK_DAYS = {1: 7, 5: 15, 10: 30, 60: 150, 240: 365, 1440: 1080}
+# Request window per interval in minutes: half of Groww's documented maximum for
+# get_historical_candles (1-5m: 30 days, 10-30m: 90 days, 1h+: 180 days), so a
+# window that is inclusive on both ends can never trip the limit (spec 4.2).
+CHUNK_DAYS = {1: 15, 2: 15, 3: 15, 5: 15, 10: 45, 15: 45, 30: 45, 60: 90, 240: 90, 1440: 90}
 DAY = 86400
 
 Fetcher = Callable[[str, str, int, int, int], list[Candle]]  # (symbol, exchange, start, end, interval)
@@ -2244,7 +2308,7 @@ class HistoricalSource:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_historical.py -v`
-Expected: 9 passed
+Expected: 13 passed
 
 - [ ] **Step 6: Commit**
 
