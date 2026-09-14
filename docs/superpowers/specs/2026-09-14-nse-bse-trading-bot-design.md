@@ -82,27 +82,56 @@ for point-in-time constituents later.
 
 `fetch-data` pulls candles from `get_historical_candle_data` in chunks that
 respect Groww's per-interval max duration (5-minute: 15 days per call, 3 months
-total) and writes them to the `candles` table. Backtests read only from SQLite.
+lookback) and writes them to the `candles` table. Backtests read only from
+SQLite.
+
+Groww only serves three months of intraday history, which is a thin backtest
+window. `fetch-data` is therefore incremental and idempotent: for each symbol
+and interval it reads the latest stored `ts`, fetches from there to now, and
+inserts with `INSERT OR IGNORE` on the unique key. Running it weekly grows the
+local cache past Groww's window indefinitely. A `--full` flag refetches the
+whole available window for repairs.
 
 ### 4.3 Live source (paper and live)
 
 Subscribes to `GrowwFeed.subscribe_ltp` for all universe tokens (limit 1000).
-Aggregates ticks into 5-minute bars. At each bar close it fetches the official
-candle via REST and replaces the tick-built bar. If the REST call fails after
-retries, the tick-built bar is used and flagged `tick_built`.
+Aggregates ticks into 5-minute bars flagged `tick_built`. Strategies run on
+these bars for every symbol.
 
-Rules:
+Official-bar confirmation. Fetching ~200 REST candles every bar would exceed
+Groww's rate limits and the per-bar deadline, so the official candle is fetched
+only for symbols that need it:
 
-- A strategy that consumed a `tick_built` bar has its indicator state recomputed
-  from the official bar once it arrives, before the next cycle.
-- Bars flagged `tick_built` never generate new entries. Exits are unaffected
-  because they are broker-side.
+- every symbol whose strategy produced a signal on the tick-built bar, and
+- every symbol with an open position or pending entry.
+
+Fetches run with bounded concurrency (`data.official_fetch_concurrency`,
+default 5) and share the per-bar deadline. For each fetched symbol the engine
+replaces the bar with the official one, calls `Strategy.recompute`, and re-runs
+`on_candle`. Only a signal that survives the official bar proceeds to risk. If
+the REST call fails after retries, the bar stays `tick_built`, the signal is
+dropped with reason `unconfirmed_bar`, and the position's indicator state is
+recomputed on the next successful fetch. All other symbols keep their
+tick-built bar; because they produced no signal, the small drift is harmless
+and self-corrects when they next need confirmation.
+
+Entries are therefore only ever placed from signals confirmed against an
+official bar. Exits are unaffected because they are broker-side.
 
 ### 4.4 Clock
 
 `Clock` abstraction with two implementations. `BacktestClock` advances through
 stored candle timestamps. `WallClock` uses real time. Both expose the NSE session
 (09:15–15:30 IST), the square-off trigger time, and a holiday list from config.
+
+### 4.5 Timestamps
+
+Every `ts` in code, SQLite, and cache keys is an integer UTC epoch in seconds,
+matching what Groww returns. A candle's `ts` is its open time. Only `Clock`
+converts to and from IST, and only for session logic: market open, close,
+square-off, and holiday checks. Config times are written in IST. Log lines show
+both the epoch and an ISO-8601 IST string. No naive `datetime` objects anywhere;
+tests assert that `Clock` maps 09:15 IST on a given date to the expected epoch.
 
 ## 5. Strategy
 
@@ -135,7 +164,8 @@ Every rejection is stored with a reason code. Checks in order:
 2. Daily loss cap: realised plus unrealised PnL for the day must be above
    `-risk.daily_loss_cap_pct * capital`. Once breached, no new entries for the
    day and, if `risk.flatten_on_daily_cap` is true, square off everything.
-3. Daily order-count cap: `risk.max_orders_per_day`.
+3. Daily entry-count cap: `risk.max_entries_per_day`. Counts entry orders only.
+   Exits, square-offs, and flatten are never blocked by this cap.
 4. Max open positions: `risk.max_open_positions`.
 5. Symbol already has an open position or pending entry: reject.
 6. Symbol cooldown: after a stop-out, no entries on that symbol for
@@ -193,9 +223,12 @@ run ID so reports can attribute PnL to the filter.
 ### 8.2 Backtest backend
 
 Fills entries at the next bar's open plus `slippage_pct`. Exits are simulated
-each bar against high/low using the stop-first rule. Intraday positions are
-closed at the last bar before `SQUARE_OFF_TIME` at that bar's close. Tracks a
-simulated cash balance.
+each bar against high/low using the stop-first rule, including the entry bar
+itself: after filling at that bar's open, the same bar's high and low are
+checked against stop and target. Intraday positions are closed at the close of
+the last bar ending at or before `SQUARE_OFF_TIME`, with `slippage_pct` applied
+against the position so backtest square-off stays comparable to the live
+market order. Tracks a simulated cash balance.
 
 ### 8.3 Paper backend
 
@@ -213,10 +246,15 @@ Entry sequence per approved order:
 1. Place a marketable limit order (`ORDER_TYPE_LIMIT`, `VALIDITY_DAY`) with
    `order_reference_id` set to the client ID.
 2. Wait for fill via `subscribe_equity_order_updates`.
-3. On fill, place exits: OCO (`create_smart_order` with `SMART_ORDER_TYPE_OCO`,
-   product MIS) for intraday; GTT stop (`SMART_ORDER_TYPE_GTT`, product CNC)
-   for swing. Store exit IDs on the position.
-4. If unfilled at the next bar, cancel the entry and record `unfilled`.
+3. On the first fill event, full or partial, place exits for the filled
+   quantity: OCO (`create_smart_order` with `SMART_ORDER_TYPE_OCO`, product
+   MIS) for intraday; GTT stop (`SMART_ORDER_TYPE_GTT`, product CNC) for
+   swing. Store exit IDs on the position. Further partial fills before the
+   next bar call `modify_smart_order` to raise the exit quantity to match.
+4. At the next bar, if any quantity remains unfilled, cancel the remainder.
+   If nothing filled, record the order `unfilled`. If some filled, record the
+   position at the final filled quantity with status `partial` and confirm the
+   exit quantity matches it.
 
 Fill rate is logged per day (`fills / entries_placed`) so it can be compared
 against the backtest's fill-at-next-open assumption.
@@ -242,7 +280,11 @@ On startup and every 15 minutes, `reconcile.py`:
 - Fetches open orders, smart orders, and positions from Groww.
 - Never re-places an entry whose client ID already exists at the broker.
 - Adopts orphaned open orders and positions into engine state, tagging them
-  `adopted`. Adopted positions without exits get exits placed immediately.
+  `adopted`. The signal that opened an orphan is usually unknown, so an adopted
+  position without exits gets a stop at `risk.adopted_stop_pct` from its
+  average price (default 1.5%) and no target, placed immediately as OCO with
+  only the stop leg for MIS or as GTT for CNC. Reports exclude adopted
+  positions from strategy statistics but include them in account PnL.
 - Logs every discrepancy.
 
 ### 8.6 Per-bar time budget
@@ -264,7 +306,7 @@ SQLite at `data/tradebot.db`. Schema in `store/schema.sql`. Tables:
 - `ai_cache(symbol, bar_ts, prompt_hash, response_json, created_at)` primary key on the first three
 - `orders(id, run_id, client_id, signal_id, broker_order_id, kind, side, qty, limit_price, status, placed_at, updated_at)`
 - `fills(id, order_id, qty, price, ts)`
-- `positions(id, run_id, symbol, product, qty, avg_price, stop, target, exit_ids_json, opened_at, closed_at, pnl, adopted)`
+- `positions(id, run_id, symbol, product, qty, avg_price, stop, target, exit_ids_json, opened_at, closed_at, pnl, fill_status, adopted)`
 - `daily_pnl(run_id, date, realised, unrealised, fills, entries_placed, fill_rate)`
 
 Every run stores its resolved config so reports are reproducible.
@@ -319,11 +361,17 @@ is the only module wrapping the SDK, and a `FakeBroker` replaces it in tests.
   during warm-up; state after `recompute`.
 - Risk: table-driven tests for every check in section 6, including both sizing
   limits and lot rounding.
-- Backtest backend: next-open fills, slippage, stop-first rule, end-of-day
-  square-off.
-- Live backend against `FakeBroker`: entry-then-OCO, marketable limit pricing,
-  cancel-confirm-then-square-off ordering, client ID derivation, orphan adoption,
-  deadline enforcement.
+- Backtest backend: next-open fills, slippage, stop-first rule, entry-bar
+  exits (stop hit on the fill bar, target hit on the fill bar, both hit on the
+  fill bar resolving to stop), end-of-day square-off with slippage.
+- Live backend against `FakeBroker`: entry-then-OCO, partial fill then exit
+  quantity modify then remainder cancel, marketable limit pricing,
+  cancel-confirm-then-square-off ordering, client ID derivation, orphan adoption
+  with fallback stop, deadline enforcement.
+- Live data source: official-bar confirmation only for signal and position
+  symbols, signal dropped when confirmation fails, bounded concurrency.
+- `fetch-data`: incremental resume from latest stored `ts`, idempotent re-run
+  inserts nothing.
 - AI filter with fake Claude client: batch prompt shape, parsing, failure
   policy, cache hits.
 - Engine: end-to-end backtest on a fixture dataset asserting the exact trade
