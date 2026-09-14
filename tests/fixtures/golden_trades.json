@@ -1,0 +1,24 @@
+[
+  {
+    "symbol": "B",
+    "direction": "SHORT",
+    "opened_at": 1789368000,
+    "closed_at": 1789374300,
+    "exit_reason": "STOP",
+    "qty": 323,
+    "avg_price": 100.7,
+    "exit_price": 103.95,
+    "pnl": -1049.75
+  },
+  {
+    "symbol": "B",
+    "direction": "SHORT",
+    "opened_at": 1789458300,
+    "closed_at": 1789464300,
+    "exit_reason": "STOP",
+    "qty": 294,
+    "avg_price": 102.25,
+    "exit_price": 105.6,
+    "pnl": -984.9
+  }
+]
