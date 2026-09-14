@@ -4244,6 +4244,44 @@ def test_disabled_strategy_is_reset_before_next_day(repo, tmp_path):
     early = [r for r in repo.conn.execute("SELECT bar_ts FROM signals WHERE run_id='t1'").fetchall()
              if day2_open <= r["bar_ts"] < day2_open + 20 * 300]
     assert not early
+
+
+def test_run_survives_unquoted_holiday_dates_in_config(repo, tmp_path):
+    cfg = make_config(tmp_path, session={"holidays": [date(2026, 10, 2)]})  # YAML date, not a string
+    assert cfg.raw["session"]["holidays"][0].__class__.__name__ == "date"
+    _run(repo, cfg, _candles())
+    assert repo.get_run("t1")["ended_at"] is not None
+
+
+def test_daily_cap_flatten_fires_after_entry_cutoff_unit(repo, tmp_path):
+    from tradebot.types import ApprovedOrder, Signal
+    cfg = make_config(tmp_path, risk={"flatten_on_daily_cap": True})
+    broker = BacktestBroker(cfg.capital, 0.0, 5.0)
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    d = date(2026, 9, 14)
+    sig = Signal("ema_rsi", "A", "LONG", 100.0, 90.0, 120.0, "MIS", ist_epoch(d, "14:40"))
+    order = ApprovedOrder(sig, 10, "cidcidcidcidcid2")
+    repo.insert_order("t1", order.client_id, repo.insert_signal("t1", sig), "ENTRY", "BUY", 10, 100.0, "PENDING", sig.bar_ts)
+    broker.place_entry(order)
+    eng._start_day()
+    t1 = ist_epoch(d, "14:45")
+    eng.process_bar(t1, {"A": Candle("A", t1, 100.0, 100.5, 99.5, 100.0, 1)})  # fills; after the cutoff
+    assert set(broker.open_positions()) == {"A"}
+    eng._day.realised = -0.5 * cfg.capital  # a huge loss booked earlier in the day
+    t2 = ist_epoch(d, "14:50")
+    eng.process_bar(t2, {"A": Candle("A", t2, 100.0, 100.5, 99.5, 100.0, 1)})
+    assert broker.open_positions() == {}
+    assert repo.list_positions("t1")[0]["exit_reason"] == "FLATTEN"
+
+
+def test_end_run_is_written_even_if_day_end_bookkeeping_fails(repo, tmp_path, monkeypatch):
+    cfg = make_config(tmp_path)
+    monkeypatch.setattr(repo, "upsert_daily_pnl", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full")))
+    with pytest.raises(RuntimeError, match="disk full"):  # the mid-run day boundary propagates it
+        _run(repo, cfg, _candles())
+    assert repo.get_run("t1")["ended_at"] is not None  # but the run is still closed
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -4336,13 +4374,18 @@ class BacktestEngine:
                         self._end_day(current, last_ts)
                     self._start_day()
                     current = d
+                last_ts = ts  # set before processing so a failure mid-bar still stamps this bar
                 self.process_bar(ts, self.source.candles_at(ts))
-                last_ts = ts
         finally:
-            # A mid-run exception still leaves a closed run and the last day's row for the report.
-            if current is not None:
-                self._end_day(current, last_ts)
-            self.repo.end_run(self.run_id, int(time.time()))
+            # A mid-run exception still leaves a closed run and, where possible, the last day's row.
+            # Cleanup must never mask the original exception or skip end_run.
+            try:
+                if current is not None:
+                    self._end_day(current, last_ts)
+            except Exception:  # noqa: BLE001
+                log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
+            finally:
+                self.repo.end_run(self.run_id, int(time.time()))
         return self.run_id
 
     def _start_day(self) -> None:
@@ -4379,6 +4422,8 @@ class BacktestEngine:
             self._record(self.broker.square_off(ts, candles))
             self._day.squared_off = True
 
+        # Both flatten triggers share one per-day latch. Safe: once the cap is breached every entry
+        # is rejected for the day, so nothing can be opened after a cap flatten for a kill flatten to close.
         if (self.cfg.risk.flatten_on_daily_cap and not self._day.flattened
                 and self._state().daily_loss_breached(self.cfg.risk)):
             log.warning("daily loss cap breached at %s; flattening", ts)
@@ -4498,10 +4543,10 @@ class BacktestEngine:
 - [ ] **Step 5: Run tests; first run of the golden test writes the fixture**
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 16 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
+Expected: 19 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 17 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
+Expected: 20 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
 
 - [ ] **Step 6: Commit**
 

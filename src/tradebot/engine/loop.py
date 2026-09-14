@@ -80,13 +80,18 @@ class BacktestEngine:
                         self._end_day(current, last_ts)
                     self._start_day()
                     current = d
+                last_ts = ts  # set before processing so a failure mid-bar still stamps this bar
                 self.process_bar(ts, self.source.candles_at(ts))
-                last_ts = ts
         finally:
-            # A mid-run exception still leaves a closed run and the last day's row for the report.
-            if current is not None:
-                self._end_day(current, last_ts)
-            self.repo.end_run(self.run_id, int(time.time()))
+            # A mid-run exception still leaves a closed run and, where possible, the last day's row.
+            # Cleanup must never mask the original exception or skip end_run.
+            try:
+                if current is not None:
+                    self._end_day(current, last_ts)
+            except Exception:  # noqa: BLE001
+                log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
+            finally:
+                self.repo.end_run(self.run_id, int(time.time()))
         return self.run_id
 
     def _start_day(self) -> None:
@@ -123,6 +128,8 @@ class BacktestEngine:
             self._record(self.broker.square_off(ts, candles))
             self._day.squared_off = True
 
+        # Both flatten triggers share one per-day latch. Safe: once the cap is breached every entry
+        # is rejected for the day, so nothing can be opened after a cap flatten for a kill flatten to close.
         if (self.cfg.risk.flatten_on_daily_cap and not self._day.flattened
                 and self._state().daily_loss_breached(self.cfg.risk)):
             log.warning("daily loss cap breached at %s; flattening", ts)
