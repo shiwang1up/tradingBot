@@ -329,3 +329,26 @@ def test_end_run_is_written_even_if_day_end_bookkeeping_fails(repo, tmp_path, mo
     with pytest.raises(RuntimeError, match="disk full"):  # the mid-run day boundary propagates it
         _run(repo, cfg, _candles())
     assert repo.get_run("t1")["ended_at"] is not None  # but the run is still closed
+
+
+def test_mis_position_squared_off_even_when_its_symbol_lacks_the_square_off_bar(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    candles = _candles()
+    d = date(2026, 9, 14)
+    hole = {ist_epoch(d, t) for t in ("15:05", "15:10", "15:15", "15:20", "15:25")}
+    candles = [c for c in candles if not (c.symbol == "A" and c.ts in hole)]  # A goes quiet after 15:00
+    _run(repo, cfg, candles)
+    for r in repo.list_positions("t1"):
+        assert r["closed_at"] is not None and date_of(r["closed_at"]) == date_of(r["opened_at"])
+        if r["symbol"] == "A" and date_of(r["opened_at"]) == d and r["exit_reason"] == "SQUARE_OFF":
+            assert r["closed_at"] == ist_epoch(d, "15:05")  # closed at A's last known price on B's bar
+
+
+def test_run_stores_resolved_config_without_secrets(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("GROWW_API_KEY", "should-not-leak")
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles())
+    stored = json.loads(repo.get_run("t1")["config_json"])
+    assert "secrets" not in stored and "raw" not in stored
+    assert stored["strategy"]["ema_rsi"]["min_stop_pct"] == 0.1
+    assert "should-not-leak" not in repo.get_run("t1")["config_json"]

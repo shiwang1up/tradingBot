@@ -210,3 +210,12 @@ def test_cash_and_unrealised():
     b.on_bar(1600, {"X": _c(101.0, 102.5, 100.9, 102.0)})
     assert b.cash == pytest.approx(100_020.0)
     assert b.unrealised_pnl({"X": 50.0}) == 0.0
+
+
+def test_square_off_uses_last_price_when_symbol_has_no_candle():
+    b = _broker()
+    b.place_entry(_order(sym="M", product="MIS"))
+    b.on_bar(1300, {"M": _c(100.0, 100.1, 99.9, 100.0, sym="M")})
+    assert b.square_off(1600, {}) == []                       # no candle, no fallback: stays open
+    ev = b.square_off(1600, {}, last_prices={"M": 101.0})
+    assert ev[0].position.exit_price == 101.0 and ev[0].position.exit_reason == "SQUARE_OFF"

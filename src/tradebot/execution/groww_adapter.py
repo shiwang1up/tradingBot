@@ -26,9 +26,15 @@ def is_non_retryable(e: BaseException) -> bool:
     return code is not None and str(code) in NO_RETRY_CODES
 
 
+def is_rate_limited(e: BaseException) -> bool:
+    return "RateLimit" in type(e).__name__ or str(getattr(e, "code", "")) == "429"
+
+
 def with_retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 1.0,
-               sleep: Callable[[float], None] = time.sleep) -> Any:
-    """Exponential backoff (1s, 2s, ...). Non-retryable errors propagate on the first attempt."""
+               sleep: Callable[[float], None] = time.sleep, rate_limit_delay: float = 10.0) -> Any:
+    """Exponential backoff (1s, 2s, ...). Non-retryable errors propagate on the first attempt.
+    A rate limit (429) waits `rate_limit_delay` * attempt instead, since Groww's window is
+    seconds to a minute, not milliseconds."""
     if attempts < 1:
         raise ValueError("attempts must be >= 1")
     for i in range(attempts):
@@ -37,7 +43,7 @@ def with_retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 1.0
         except Exception as e:  # noqa: BLE001 - SDK exceptions vary; classified by is_non_retryable
             if is_non_retryable(e) or i == attempts - 1:
                 raise
-            sleep(base_delay * (2 ** i))
+            sleep(rate_limit_delay * (i + 1) if is_rate_limited(e) else base_delay * (2 ** i))
     raise AssertionError("unreachable")
 
 

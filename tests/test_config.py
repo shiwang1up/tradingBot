@@ -74,7 +74,7 @@ def test_load_config_reads_all_sections(tmp_path):
     assert cfg.ai.filter == "stub"
     assert cfg.execution.interval_minutes == 5
     assert cfg.session.holidays == ("2026-10-02",)
-    assert cfg.paths.kill_switch == "KILL"
+    assert cfg.paths.kill_switch == str(tmp_path / "KILL")  # relative paths resolve against the config dir
     assert cfg.data.official_fetch_concurrency == 5
     assert cfg.secrets.groww_api_key == "k"
     assert cfg.raw["capital"] == 100000
@@ -127,3 +127,13 @@ def test_strategy_params_are_not_aliased_to_raw(tmp_path):
     cfg = load_config(_write(tmp_path), tmp_path / "x.env")
     cfg.strategy["ema_rsi"]["fast"] = 999
     assert cfg.raw["strategy"]["ema_rsi"]["fast"] == 9
+
+
+def test_relative_paths_resolve_against_config_directory(tmp_path):
+    sub = tmp_path / "cfg"
+    sub.mkdir()
+    cfg = load_config(_write(sub), sub / "x.env")
+    assert cfg.paths.db == str(sub / "data" / "tradebot.db")
+    assert cfg.paths.universe == str(sub / "universe.yaml")
+    absolute = YAML.replace("db: data/tradebot.db", "db: /abs/elsewhere.db")
+    assert load_config(_write(sub, absolute), sub / "x.env").paths.db == "/abs/elsewhere.db"

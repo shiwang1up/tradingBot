@@ -28,7 +28,7 @@ def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
     else:
         stop_hit = c.high >= pos.stop_price
         target_hit = pos.target_price is not None and c.low <= pos.target_price
-    if stop_hit and (STOP_FIRST_ON_SAME_BAR or not target_hit):
+    if stop_hit and (STOP_FIRST_ON_SAME_BAR or not target_hit):  # flip the constant to model target-first
         return "STOP", (min(c.open, pos.stop_price) if long else max(c.open, pos.stop_price))
     if target_hit:
         return "TARGET", (max(c.open, pos.target_price) if long else min(c.open, pos.target_price))
@@ -105,13 +105,19 @@ class BacktestBroker:
         return events
 
     def square_off(self, ts: int, candles: dict[str, Candle], products: tuple[str, ...] = ("MIS",),
-                   reason: str = "SQUARE_OFF") -> list[Closed]:
+                   reason: str = "SQUARE_OFF", last_prices: dict[str, float] | None = None) -> list[Closed]:
+        """Close every position in `products` at this bar's close. A symbol with no candle this
+        bar closes at its last known price (`last_prices`) so a data hole cannot carry an
+        intraday position overnight; with no price at all it stays open and the caller retries."""
         out: list[Closed] = []
         for sym, pos in list(self._positions.items()):
-            c = candles.get(sym)
-            if pos.product not in products or c is None:
+            if pos.product not in products:
                 continue
-            self._close(pos, ts, self._exit_price(pos.direction, c.close), reason)
+            c = candles.get(sym)
+            ref = c.close if c is not None else (last_prices or {}).get(sym)
+            if ref is None:
+                continue
+            self._close(pos, ts, self._exit_price(pos.direction, ref), reason)
             out.append(Closed(pos))
         return out
 

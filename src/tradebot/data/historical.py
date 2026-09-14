@@ -9,7 +9,7 @@ from tradebot.types import Candle
 # Request window per interval in minutes: half of Groww's documented maximum for
 # get_historical_candles (1-5m: 30 days, 10-30m: 90 days, 1h+: 180 days), so a
 # window that is inclusive on both ends can never trip the limit (spec 4.2).
-CHUNK_DAYS = {1: 15, 2: 15, 3: 15, 5: 15, 10: 45, 15: 45, 30: 45, 60: 90, 240: 90, 1440: 90}
+CHUNK_DAYS = {1: 15, 2: 15, 3: 15, 5: 15, 10: 45, 15: 45, 30: 45, 60: 90, 240: 90, 1440: 90, 10080: 90}
 DAY = 86400
 
 Fetcher = Callable[[str, str, int, int, int], list[Candle]]  # (symbol, exchange, start, end, interval)

@@ -462,7 +462,7 @@ def test_load_config_reads_all_sections(tmp_path):
     assert cfg.ai.filter == "stub"
     assert cfg.execution.interval_minutes == 5
     assert cfg.session.holidays == ("2026-10-02",)
-    assert cfg.paths.kill_switch == "KILL"
+    assert cfg.paths.kill_switch == str(tmp_path / "KILL")  # relative paths resolve against the config dir
     assert cfg.data.official_fetch_concurrency == 5
     assert cfg.secrets.groww_api_key == "k"
     assert cfg.raw["capital"] == 100000
@@ -515,6 +515,16 @@ def test_strategy_params_are_not_aliased_to_raw(tmp_path):
     cfg = load_config(_write(tmp_path), tmp_path / "x.env")
     cfg.strategy["ema_rsi"]["fast"] = 999
     assert cfg.raw["strategy"]["ema_rsi"]["fast"] == 9
+
+
+def test_relative_paths_resolve_against_config_directory(tmp_path):
+    sub = tmp_path / "cfg"
+    sub.mkdir()
+    cfg = load_config(_write(sub), sub / "x.env")
+    assert cfg.paths.db == str(sub / "data" / "tradebot.db")
+    assert cfg.paths.universe == str(sub / "universe.yaml")
+    absolute = YAML.replace("db: data/tradebot.db", "db: /abs/elsewhere.db")
+    assert load_config(_write(sub, absolute), sub / "x.env").paths.db == "/abs/elsewhere.db"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -712,6 +722,10 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         session_raw = dict(raw["session"])
         session_raw["holidays"] = tuple(h if h is None else str(h) for h in session_raw["holidays"])  # dates -> ISO
         raw_for_session = {**raw, "session": session_raw}
+    paths = _section(raw, "paths", PathsConfig)
+    base = p.parent
+    paths = PathsConfig(**{f.name: str(base / getattr(paths, f.name)) if not Path(getattr(paths, f.name)).is_absolute()
+                           else getattr(paths, f.name) for f in dataclasses.fields(PathsConfig)})
     cfg = Config(
         capital=capital,
         risk=_section(raw, "risk", RiskConfig),
@@ -720,7 +734,7 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         execution=_section(raw, "execution", ExecutionConfig),
         session=_section(raw_for_session, "session", SessionConfig),
         data=_section(raw, "data", DataConfig),
-        paths=_section(raw, "paths", PathsConfig),
+        paths=paths,  # relative entries are resolved against the config file's directory, not the CWD
         secrets=Secrets(
             groww_api_key=os.environ.get("GROWW_API_KEY", ""),
             groww_totp_secret=os.environ.get("GROWW_TOTP_SECRET", ""),
@@ -730,12 +744,21 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
     )
     _validate(cfg)
     return cfg
+
+
+def resolved_config(cfg: Config) -> dict:
+    """The config as actually used (defaults applied, paths resolved), minus secrets and raw YAML.
+    Stored with every run so a report is reproducible (spec 9)."""
+    d = dataclasses.asdict(cfg)
+    d.pop("secrets", None)
+    d.pop("raw", None)
+    return d
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_config.py -v`
-Expected: 22 passed
+Expected: 23 passed
 
 - [ ] **Step 5: Write the real `config.yaml` at project root**
 
@@ -2242,9 +2265,15 @@ def is_non_retryable(e: BaseException) -> bool:
     return code is not None and str(code) in NO_RETRY_CODES
 
 
+def is_rate_limited(e: BaseException) -> bool:
+    return "RateLimit" in type(e).__name__ or str(getattr(e, "code", "")) == "429"
+
+
 def with_retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 1.0,
-               sleep: Callable[[float], None] = time.sleep) -> Any:
-    """Exponential backoff (1s, 2s, ...). Non-retryable errors propagate on the first attempt."""
+               sleep: Callable[[float], None] = time.sleep, rate_limit_delay: float = 10.0) -> Any:
+    """Exponential backoff (1s, 2s, ...). Non-retryable errors propagate on the first attempt.
+    A rate limit (429) waits `rate_limit_delay` * attempt instead, since Groww's window is
+    seconds to a minute, not milliseconds."""
     if attempts < 1:
         raise ValueError("attempts must be >= 1")
     for i in range(attempts):
@@ -2253,7 +2282,7 @@ def with_retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 1.0
         except Exception as e:  # noqa: BLE001 - SDK exceptions vary; classified by is_non_retryable
             if is_non_retryable(e) or i == attempts - 1:
                 raise
-            sleep(base_delay * (2 ** i))
+            sleep(rate_limit_delay * (i + 1) if is_rate_limited(e) else base_delay * (2 ** i))
     raise AssertionError("unreachable")
 
 
@@ -2365,7 +2394,7 @@ from tradebot.types import Candle
 # Request window per interval in minutes: half of Groww's documented maximum for
 # get_historical_candles (1-5m: 30 days, 10-30m: 90 days, 1h+: 180 days), so a
 # window that is inclusive on both ends can never trip the limit (spec 4.2).
-CHUNK_DAYS = {1: 15, 2: 15, 3: 15, 5: 15, 10: 45, 15: 45, 30: 45, 60: 90, 240: 90, 1440: 90}
+CHUNK_DAYS = {1: 15, 2: 15, 3: 15, 5: 15, 10: 45, 15: 45, 30: 45, 60: 90, 240: 90, 1440: 90, 10080: 90}
 DAY = 86400
 
 Fetcher = Callable[[str, str, int, int, int], list[Candle]]  # (symbol, exchange, start, end, interval)
@@ -3634,6 +3663,15 @@ def test_cash_and_unrealised():
     b.on_bar(1600, {"X": _c(101.0, 102.5, 100.9, 102.0)})
     assert b.cash == pytest.approx(100_020.0)
     assert b.unrealised_pnl({"X": 50.0}) == 0.0
+
+
+def test_square_off_uses_last_price_when_symbol_has_no_candle():
+    b = _broker()
+    b.place_entry(_order(sym="M", product="MIS"))
+    b.on_bar(1300, {"M": _c(100.0, 100.1, 99.9, 100.0, sym="M")})
+    assert b.square_off(1600, {}) == []                       # no candle, no fallback: stays open
+    ev = b.square_off(1600, {}, last_prices={"M": 101.0})
+    assert ev[0].position.exit_price == 101.0 and ev[0].position.exit_reason == "SQUARE_OFF"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -3682,7 +3720,7 @@ class Broker(Protocol):
     def cancel_pending(self, ts: int, reason: str = "cancelled") -> list[Unfilled]:
         """Withdraw every queued entry (day end, shutdown). Returns one Unfilled per order."""
     def square_off(self, ts: int, candles: dict[str, Candle], products: tuple[str, ...] = ("MIS",),
-                   reason: str = "SQUARE_OFF") -> list[Closed]: ...
+                   reason: str = "SQUARE_OFF", last_prices: dict[str, float] | None = None) -> list[Closed]: ...
     def open_positions(self) -> dict[str, Position]: ...
     def pending_symbols(self) -> set[str]: ...
     def available_margin(self, product: str) -> float: ...
@@ -3722,7 +3760,7 @@ def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
     else:
         stop_hit = c.high >= pos.stop_price
         target_hit = pos.target_price is not None and c.low <= pos.target_price
-    if stop_hit and (STOP_FIRST_ON_SAME_BAR or not target_hit):
+    if stop_hit and (STOP_FIRST_ON_SAME_BAR or not target_hit):  # flip the constant to model target-first
         return "STOP", (min(c.open, pos.stop_price) if long else max(c.open, pos.stop_price))
     if target_hit:
         return "TARGET", (max(c.open, pos.target_price) if long else min(c.open, pos.target_price))
@@ -3799,13 +3837,19 @@ class BacktestBroker:
         return events
 
     def square_off(self, ts: int, candles: dict[str, Candle], products: tuple[str, ...] = ("MIS",),
-                   reason: str = "SQUARE_OFF") -> list[Closed]:
+                   reason: str = "SQUARE_OFF", last_prices: dict[str, float] | None = None) -> list[Closed]:
+        """Close every position in `products` at this bar's close. A symbol with no candle this
+        bar closes at its last known price (`last_prices`) so a data hole cannot carry an
+        intraday position overnight; with no price at all it stays open and the caller retries."""
         out: list[Closed] = []
         for sym, pos in list(self._positions.items()):
-            c = candles.get(sym)
-            if pos.product not in products or c is None:
+            if pos.product not in products:
                 continue
-            self._close(pos, ts, self._exit_price(pos.direction, c.close), reason)
+            c = candles.get(sym)
+            ref = c.close if c is not None else (last_prices or {}).get(sym)
+            if ref is None:
+                continue
+            self._close(pos, ts, self._exit_price(pos.direction, ref), reason)
             out.append(Closed(pos))
         return out
 
@@ -3853,7 +3897,7 @@ class BacktestBroker:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_backtest_broker.py -v`
-Expected: 21 passed
+Expected: 22 passed
 
 - [ ] **Step 6: Commit**
 
@@ -4282,6 +4326,29 @@ def test_end_run_is_written_even_if_day_end_bookkeeping_fails(repo, tmp_path, mo
     with pytest.raises(RuntimeError, match="disk full"):  # the mid-run day boundary propagates it
         _run(repo, cfg, _candles())
     assert repo.get_run("t1")["ended_at"] is not None  # but the run is still closed
+
+
+def test_mis_position_squared_off_even_when_its_symbol_lacks_the_square_off_bar(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    candles = _candles()
+    d = date(2026, 9, 14)
+    hole = {ist_epoch(d, t) for t in ("15:05", "15:10", "15:15", "15:20", "15:25")}
+    candles = [c for c in candles if not (c.symbol == "A" and c.ts in hole)]  # A goes quiet after 15:00
+    _run(repo, cfg, candles)
+    for r in repo.list_positions("t1"):
+        assert r["closed_at"] is not None and date_of(r["closed_at"]) == date_of(r["opened_at"])
+        if r["symbol"] == "A" and date_of(r["opened_at"]) == d and r["exit_reason"] == "SQUARE_OFF":
+            assert r["closed_at"] == ist_epoch(d, "15:05")  # closed at A's last known price on B's bar
+
+
+def test_run_stores_resolved_config_without_secrets(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("GROWW_API_KEY", "should-not-leak")
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles())
+    stored = json.loads(repo.get_run("t1")["config_json"])
+    assert "secrets" not in stored and "raw" not in stored
+    assert stored["strategy"]["ema_rsi"]["min_stop_pct"] == 0.1
+    assert "should-not-leak" not in repo.get_run("t1")["config_json"]
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -4315,9 +4382,9 @@ from dataclasses import dataclass
 from datetime import date
 
 from tradebot.ai.filter import AIFilter
-from tradebot.config import Config
+from tradebot.config import Config, resolved_config
 from tradebot.data.historical import HistoricalSource
-from tradebot.engine.clock import SessionClock, date_of
+from tradebot.engine.clock import SessionClock, date_of, iso_ist
 from tradebot.execution.broker import Broker, BrokerEvent, Closed, Filled, Unfilled
 from tradebot.risk.engine import PortfolioState, evaluate
 from tradebot.risk.killswitch import KillState, read_kill_switch
@@ -4361,11 +4428,14 @@ class BacktestEngine:
 
     # -- lifecycle -------------------------------------------------------------
     def run(self) -> str:
-        self.repo.create_run(self.run_id, self.mode, int(time.time()), json.dumps(self.cfg.raw, default=str))
+        self.repo.create_run(self.run_id, self.mode, int(time.time()), json.dumps(resolved_config(self.cfg), default=str))
         current: date | None = None
         last_ts = 0
+        bars = self.source.bar_timestamps()
+        log.info("run %s (%s) started: %d bars, strategies=%s", self.run_id, self.mode, len(bars),
+                 [s.name for s in self.strategies])
         try:
-            for ts in self.source.bar_timestamps():
+            for ts in bars:
                 d = date_of(ts)
                 if not self.clock.is_trading_day(d):
                     continue
@@ -4386,6 +4456,8 @@ class BacktestEngine:
                 log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
             finally:
                 self.repo.end_run(self.run_id, int(time.time()))
+                log.info("run %s ended: realised %.2f on last day, %d closed positions",
+                         self.run_id, self._day.realised, len(getattr(self.broker, "closed", [])))
         return self.run_id
 
     def _start_day(self) -> None:
@@ -4418,15 +4490,17 @@ class BacktestEngine:
 
         self._record(self.broker.on_bar(ts, candles))
         if not self._day.squared_off and self.clock.square_off_due(ts):
-            # Latched per day: a missing bar at exactly the square-off time cannot skip it.
-            self._record(self.broker.square_off(ts, candles))
-            self._day.squared_off = True
+            # Latched per day only once every intraday position is gone: a symbol with no candle at
+            # the square-off bar closes at its last known price, and anything still open is retried.
+            self._record(self.broker.square_off(ts, candles, last_prices=self._last_close))
+            if not any(p.product == "MIS" for p in self.broker.open_positions().values()):
+                self._day.squared_off = True
 
         # Both flatten triggers share one per-day latch. Safe: once the cap is breached every entry
         # is rejected for the day, so nothing can be opened after a cap flatten for a kill flatten to close.
         if (self.cfg.risk.flatten_on_daily_cap and not self._day.flattened
                 and self._state().daily_loss_breached(self.cfg.risk)):
-            log.warning("daily loss cap breached at %s; flattening", ts)
+            log.warning("daily loss cap breached at %s (%s); flattening", ts, iso_ist(ts))
             self._flatten(ts, candles)
 
         kill = read_kill_switch(self.cfg.paths.kill_switch)
@@ -4512,7 +4586,8 @@ class BacktestEngine:
             self._day.entries_placed += 1
 
     def _flatten(self, ts: int, candles: dict[str, Candle]) -> None:
-        self._record(self.broker.square_off(ts, candles, products=("MIS", "CNC"), reason="FLATTEN"))
+        self._record(self.broker.square_off(ts, candles, products=("MIS", "CNC"), reason="FLATTEN",
+                                            last_prices=self._last_close))
         self._day.flattened = True
 
     # -- persistence of broker events ------------------------------------------
@@ -4543,10 +4618,10 @@ class BacktestEngine:
 - [ ] **Step 5: Run tests; first run of the golden test writes the fixture**
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 19 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
+Expected: 21 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 20 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
+Expected: 22 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
 
 - [ ] **Step 6: Commit**
 
@@ -4804,8 +4879,92 @@ git commit -m "feat: run summary report"
 ### Task 15: CLI
 
 **Files:**
+- Create: `src/tradebot/engine/logsetup.py` (JSONL log file per spec 13; see block below)
 - Create: `src/tradebot/cli.py`
+- Test: `tests/test_logsetup.py`
 - Test: `tests/test_cli.py`
+
+- [ ] **Step 0: Write `src/tradebot/engine/logsetup.py` and `tests/test_logsetup.py`**
+
+```python
+"""Logging per spec 13: JSON lines to <logs>/YYYY-MM-DD.jsonl (daily file) plus readable console.
+Every line carries the run id, the epoch and an ISO-8601 IST timestamp."""
+from __future__ import annotations
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Optional, Union
+
+from tradebot.engine.clock import iso_ist, date_of
+
+
+class _JsonFormatter(logging.Formatter):
+    def __init__(self, run_id: str):
+        super().__init__()
+        self.run_id = run_id
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = int(record.created)
+        line = {
+            "ts": ts, "time": iso_ist(ts), "level": record.levelname, "logger": record.name,
+            "run_id": self.run_id, "msg": record.getMessage(),
+        }
+        for key in ("symbol", "client_id"):
+            if hasattr(record, key):
+                line[key] = getattr(record, key)
+        if record.exc_info:
+            line["exc"] = self.formatException(record.exc_info)
+        return json.dumps(line, default=str)
+
+
+def setup_logging(logs_dir: Union[str, Path, None], run_id: str, console_level: int = logging.INFO) -> Optional[Path]:
+    """Install the console handler and, when `logs_dir` is given, today's JSONL file handler.
+    Returns the log file path. Idempotent per process: earlier handlers are replaced."""
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.setLevel(logging.INFO)
+    console = logging.StreamHandler()
+    console.setLevel(console_level)
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root.addHandler(console)
+    if not logs_dir:
+        return None
+    d = Path(logs_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{date_of(int(time.time())).isoformat()}.jsonl"
+    fh = logging.FileHandler(path, encoding="utf-8")
+    fh.setFormatter(_JsonFormatter(run_id))
+    root.addHandler(fh)
+    return path
+```
+
+```python
+# tests/test_logsetup.py
+import json
+import logging
+
+from tradebot.engine.logsetup import setup_logging
+
+
+def test_jsonl_file_carries_run_id_epoch_and_ist_time(tmp_path):
+    path = setup_logging(tmp_path / "logs", run_id="run-x")
+    log = logging.getLogger("tradebot.test")
+    log.info("hello %s", "world", extra={"symbol": "RELIANCE", "client_id": "abc"})
+    logging.getLogger().handlers[-1].flush()
+    line = json.loads(path.read_text().splitlines()[-1])
+    assert line["run_id"] == "run-x" and line["msg"] == "hello world"
+    assert isinstance(line["ts"], int) and line["time"].endswith("+05:30")
+    assert line["symbol"] == "RELIANCE" and line["client_id"] == "abc"
+    assert path.name.endswith(".jsonl")
+
+
+def test_setup_without_dir_is_console_only(tmp_path):
+    assert setup_logging(None, run_id="r") is None
+    assert len(logging.getLogger().handlers) == 1
+```
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4969,8 +5128,8 @@ def test_env_is_read_next_to_config_or_from_override(tmp_path, monkeypatch):
         def __init__(self, k, s):
             seen["key"] = k
 
-        def fetch_candles(self, *a):
-            return []
+        def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
+            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
 
     (cfg_dir / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
     (cfg_dir / "instruments.csv").write_text(
@@ -5017,6 +5176,45 @@ def test_fetch_data_uses_adapter_and_instruments(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     assert calls and all(c[0] == "RELIANCE" and c[1] == "NSE" and c[2] == 5 for c in calls)
     assert "dropping NOSUCH: not_found" in res.output
+
+
+def test_first_fetch_with_no_candles_at_all_is_an_error(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    (tmp_path / "instruments.csv").write_text(
+        "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+        "NSE,1,A,CASH,EQ,1,0.05,1,1\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+
+    class Empty:
+        def __init__(self, k, s):
+            pass
+
+        def fetch_candles(self, *a):
+            return []
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Empty)
+    res = _invoke(tmp_path, "fetch-data", "--days", "5", "--sleep", "0")
+    assert res.exit_code == 1 and "no candles were returned" in res.output
+
+
+def test_missing_credentials_fail_before_any_download(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: False)
+    monkeypatch.setattr(cli, "download_instruments", lambda p: (_ for _ in ()).throw(AssertionError("downloaded")))
+    res = _invoke(tmp_path, "fetch-data")
+    assert res.exit_code == 1 and "GROWW_API_KEY" in res.output and "downloaded" not in res.output
+
+
+def test_backtest_writes_a_jsonl_log_and_warns_without_instruments(tmp_path):
+    _setup(tmp_path)
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "logged")
+    assert res.exit_code == 0, res.output
+    assert "WARNING: instrument master missing" in res.output
+    logs = list((tmp_path / "logs").glob("*.jsonl"))
+    assert logs and any('"run_id": "logged"' in ln for ln in logs[0].read_text().splitlines())
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -5030,7 +5228,6 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradebot.cli'`
 """Command-line entry point: fetch-data, backtest, report. Paper/live/flatten arrive in Plan 3."""
 from __future__ import annotations
 
-import logging
 import sqlite3
 import time
 from datetime import date, datetime
@@ -5046,6 +5243,7 @@ from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_increme
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
 from tradebot.data.universe import load_universe
 from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.engine.logsetup import setup_logging
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.execution.groww_adapter import GrowwAdapter, is_non_retryable
@@ -5093,8 +5291,8 @@ class _FriendlyGroup(click.Group):
 @click.option("--env", "env_path", default=None, help="Path to the .env file with GROWW_* and ANTHROPIC_* keys.")
 @click.pass_context
 def main(ctx: click.Context, config_path: str, env_path: Optional[str]) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     ctx.obj = load_config(config_path, env_path or Path(config_path).parent / ".env")
+    setup_logging(None, run_id="cli")  # commands that create a run swap in the JSONL file handler
 
 
 def _instruments_fresh(path: Path) -> bool:
@@ -5107,6 +5305,8 @@ def _symbols_and_lots(cfg: Config, require_instruments: bool) -> tuple:
     if not path.exists():
         if require_instruments:
             raise click.ClickException(f"instrument master missing at {path}")
+        click.echo(f"WARNING: instrument master missing at {path}; assuming lot size 1 and skipping "
+                   f"tradeability checks for {len(uni.symbols)} symbols. Run fetch-data to download it.", err=True)
         return list(uni.symbols), {s: 1 for s in uni.symbols}, uni.exchange
     resolved, dropped = resolve_universe(uni, load_instruments(path))
     for sym, why in dropped:
@@ -5120,21 +5320,23 @@ def _symbols_and_lots(cfg: Config, require_instruments: bool) -> tuple:
 @main.command("fetch-data")
 @click.option("--days", default=90, show_default=True, help="Lookback for symbols with no stored candles")
 @click.option("--full", is_flag=True, help="Ignore stored candles and refetch the whole window")
-@click.option("--sleep", "pause", default=0.25, show_default=True, help="Seconds to pause between API requests")
+@click.option("--sleep", "pause", default=0.5, show_default=True, help="Seconds to pause between API requests")
 @click.pass_obj
 def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     """Incrementally download candles for the universe into SQLite. Run weekly to grow the cache.
 
     One bad symbol does not stop the others: failures are listed at the end and the exit code is 1."""
+    if cfg.execution.interval_minutes not in CHUNK_DAYS:
+        raise click.ClickException(f"unsupported candle interval: {cfg.execution.interval_minutes} minutes")
+    adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret)  # fails fast without creds
     path = Path(cfg.paths.instruments)
     if not _instruments_fresh(path):
         click.echo("downloading instrument master")
         download_instruments(path)
-    if cfg.execution.interval_minutes not in CHUNK_DAYS:
-        raise click.ClickException(f"unsupported candle interval: {cfg.execution.interval_minutes} minutes")
     symbols, _, exchange = _symbols_and_lots(cfg, require_instruments=True)
-    adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret)
     repo = Repo(connect(cfg.paths.db))
+    setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
+    had_data = any(repo.latest_candle_ts(s, cfg.execution.interval_minutes) is not None for s in symbols)
     failures: list = []
 
     def throttled(symbol, exch, start_ts, end_ts, interval):
@@ -5160,6 +5362,9 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     click.echo(f"inserted {total} candles across {len(symbols) - len(failures)} symbols")
     if failures:
         raise click.ClickException(f"{len(failures)} symbol(s) failed: " + ", ".join(s for s, _ in failures))
+    if total == 0 and not had_data:
+        raise click.ClickException("no candles were returned for any symbol on a first fetch; "
+                                   "check the date range, the universe, and the Groww response format")
 
 
 @main.command()
@@ -5184,6 +5389,7 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     run_id = run_id or f"bt-{datetime.now():%Y%m%d-%H%M%S}"
     if repo.get_run(run_id) is not None:
         raise click.ClickException(f"run '{run_id}' already exists; pick another --run-id")
+    log_path = setup_logging(cfg.paths.logs, run_id=run_id)
     strategy = build_strategy(strategy_name, cfg.strategy[strategy_name])
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
     engine = BacktestEngine(cfg, repo, source, [strategy], broker,
@@ -5191,6 +5397,8 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
                             SessionClock(cfg.session, interval), lots, run_id)
     rid = engine.run()
     click.echo(format_summary(build_summary(repo, rid)))
+    if log_path:
+        click.echo(f"log: {log_path}")
 
 
 @main.command()
@@ -5207,7 +5415,7 @@ def report(cfg: Config, run_id: str) -> None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_cli.py -v`
-Expected: 10 passed
+Expected: 13 passed
 
 - [ ] **Step 5: Run the full suite**
 
@@ -5287,4 +5495,4 @@ git commit -m "docs: README with setup and backtest workflow"
 
 - Spec coverage for milestones 1–4: store (Task 4), config (3), instruments and universe with `as_of` hook (6), incremental idempotent fetch with chunking (7), backtest broker with stop-first, entry-bar exits, square-off slippage, margin with leverage (12), indicators and strategy with `ready` and `recompute` (8, 9), every risk check in spec order including entries-only cap, cooldown, kill switch file semantics, short-requires-MIS (10), AI filter interface with stub and batched review (11), engine loop with strategy-disable-for-day, daily rollover, cooldown bookkeeping, flatten-on-cap (13), report with survivorship note, adopted exclusion, rejection counts (14), CLI (15).
 - Deferred to Plan 2: `ClaudeFilter`, `CachedClaudeFilter`, `ai_cache` writes, `report --compare`.
-- Deferred to Plan 3: live candle source, official-bar confirmation, paper and live brokers, marketable limits, OCO/GTT, partial fills, reconciliation, adoption, square-off cancel sequence, per-bar deadline, `flatten` command, JSON logging, signal handling.
+- Deferred to Plan 3: live candle source, official-bar confirmation, paper and live brokers, marketable limits, OCO/GTT, partial fills, reconciliation, adoption, square-off cancel sequence, per-bar deadline, `flatten` command, signal handling. (JSONL logging landed in Task 15 after the final review.)

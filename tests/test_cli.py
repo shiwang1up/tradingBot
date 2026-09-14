@@ -157,8 +157,8 @@ def test_env_is_read_next_to_config_or_from_override(tmp_path, monkeypatch):
         def __init__(self, k, s):
             seen["key"] = k
 
-        def fetch_candles(self, *a):
-            return []
+        def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
+            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
 
     (cfg_dir / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
     (cfg_dir / "instruments.csv").write_text(
@@ -205,3 +205,42 @@ def test_fetch_data_uses_adapter_and_instruments(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     assert calls and all(c[0] == "RELIANCE" and c[1] == "NSE" and c[2] == 5 for c in calls)
     assert "dropping NOSUCH: not_found" in res.output
+
+
+def test_first_fetch_with_no_candles_at_all_is_an_error(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    (tmp_path / "instruments.csv").write_text(
+        "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+        "NSE,1,A,CASH,EQ,1,0.05,1,1\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+
+    class Empty:
+        def __init__(self, k, s):
+            pass
+
+        def fetch_candles(self, *a):
+            return []
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Empty)
+    res = _invoke(tmp_path, "fetch-data", "--days", "5", "--sleep", "0")
+    assert res.exit_code == 1 and "no candles were returned" in res.output
+
+
+def test_missing_credentials_fail_before_any_download(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: False)
+    monkeypatch.setattr(cli, "download_instruments", lambda p: (_ for _ in ()).throw(AssertionError("downloaded")))
+    res = _invoke(tmp_path, "fetch-data")
+    assert res.exit_code == 1 and "GROWW_API_KEY" in res.output and "downloaded" not in res.output
+
+
+def test_backtest_writes_a_jsonl_log_and_warns_without_instruments(tmp_path):
+    _setup(tmp_path)
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "logged")
+    assert res.exit_code == 0, res.output
+    assert "WARNING: instrument master missing" in res.output
+    logs = list((tmp_path / "logs").glob("*.jsonl"))
+    assert logs and any('"run_id": "logged"' in ln for ln in logs[0].read_text().splitlines())

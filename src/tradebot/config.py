@@ -185,6 +185,10 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         session_raw = dict(raw["session"])
         session_raw["holidays"] = tuple(h if h is None else str(h) for h in session_raw["holidays"])  # dates -> ISO
         raw_for_session = {**raw, "session": session_raw}
+    paths = _section(raw, "paths", PathsConfig)
+    base = p.parent
+    paths = PathsConfig(**{f.name: str(base / getattr(paths, f.name)) if not Path(getattr(paths, f.name)).is_absolute()
+                           else getattr(paths, f.name) for f in dataclasses.fields(PathsConfig)})
     cfg = Config(
         capital=capital,
         risk=_section(raw, "risk", RiskConfig),
@@ -193,7 +197,7 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         execution=_section(raw, "execution", ExecutionConfig),
         session=_section(raw_for_session, "session", SessionConfig),
         data=_section(raw, "data", DataConfig),
-        paths=_section(raw, "paths", PathsConfig),
+        paths=paths,  # relative entries are resolved against the config file's directory, not the CWD
         secrets=Secrets(
             groww_api_key=os.environ.get("GROWW_API_KEY", ""),
             groww_totp_secret=os.environ.get("GROWW_TOTP_SECRET", ""),
@@ -203,3 +207,12 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
     )
     _validate(cfg)
     return cfg
+
+
+def resolved_config(cfg: Config) -> dict:
+    """The config as actually used (defaults applied, paths resolved), minus secrets and raw YAML.
+    Stored with every run so a report is reproducible (spec 9)."""
+    d = dataclasses.asdict(cfg)
+    d.pop("secrets", None)
+    d.pop("raw", None)
+    return d

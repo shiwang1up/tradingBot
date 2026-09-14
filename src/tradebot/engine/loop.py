@@ -21,9 +21,9 @@ from dataclasses import dataclass
 from datetime import date
 
 from tradebot.ai.filter import AIFilter
-from tradebot.config import Config
+from tradebot.config import Config, resolved_config
 from tradebot.data.historical import HistoricalSource
-from tradebot.engine.clock import SessionClock, date_of
+from tradebot.engine.clock import SessionClock, date_of, iso_ist
 from tradebot.execution.broker import Broker, BrokerEvent, Closed, Filled, Unfilled
 from tradebot.risk.engine import PortfolioState, evaluate
 from tradebot.risk.killswitch import KillState, read_kill_switch
@@ -67,11 +67,14 @@ class BacktestEngine:
 
     # -- lifecycle -------------------------------------------------------------
     def run(self) -> str:
-        self.repo.create_run(self.run_id, self.mode, int(time.time()), json.dumps(self.cfg.raw, default=str))
+        self.repo.create_run(self.run_id, self.mode, int(time.time()), json.dumps(resolved_config(self.cfg), default=str))
         current: date | None = None
         last_ts = 0
+        bars = self.source.bar_timestamps()
+        log.info("run %s (%s) started: %d bars, strategies=%s", self.run_id, self.mode, len(bars),
+                 [s.name for s in self.strategies])
         try:
-            for ts in self.source.bar_timestamps():
+            for ts in bars:
                 d = date_of(ts)
                 if not self.clock.is_trading_day(d):
                     continue
@@ -92,6 +95,8 @@ class BacktestEngine:
                 log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
             finally:
                 self.repo.end_run(self.run_id, int(time.time()))
+                log.info("run %s ended: realised %.2f on last day, %d closed positions",
+                         self.run_id, self._day.realised, len(getattr(self.broker, "closed", [])))
         return self.run_id
 
     def _start_day(self) -> None:
@@ -124,15 +129,17 @@ class BacktestEngine:
 
         self._record(self.broker.on_bar(ts, candles))
         if not self._day.squared_off and self.clock.square_off_due(ts):
-            # Latched per day: a missing bar at exactly the square-off time cannot skip it.
-            self._record(self.broker.square_off(ts, candles))
-            self._day.squared_off = True
+            # Latched per day only once every intraday position is gone: a symbol with no candle at
+            # the square-off bar closes at its last known price, and anything still open is retried.
+            self._record(self.broker.square_off(ts, candles, last_prices=self._last_close))
+            if not any(p.product == "MIS" for p in self.broker.open_positions().values()):
+                self._day.squared_off = True
 
         # Both flatten triggers share one per-day latch. Safe: once the cap is breached every entry
         # is rejected for the day, so nothing can be opened after a cap flatten for a kill flatten to close.
         if (self.cfg.risk.flatten_on_daily_cap and not self._day.flattened
                 and self._state().daily_loss_breached(self.cfg.risk)):
-            log.warning("daily loss cap breached at %s; flattening", ts)
+            log.warning("daily loss cap breached at %s (%s); flattening", ts, iso_ist(ts))
             self._flatten(ts, candles)
 
         kill = read_kill_switch(self.cfg.paths.kill_switch)
@@ -218,7 +225,8 @@ class BacktestEngine:
             self._day.entries_placed += 1
 
     def _flatten(self, ts: int, candles: dict[str, Candle]) -> None:
-        self._record(self.broker.square_off(ts, candles, products=("MIS", "CNC"), reason="FLATTEN"))
+        self._record(self.broker.square_off(ts, candles, products=("MIS", "CNC"), reason="FLATTEN",
+                                            last_prices=self._last_close))
         self._day.flattened = True
 
     # -- persistence of broker events ------------------------------------------

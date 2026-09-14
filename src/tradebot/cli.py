@@ -1,7 +1,6 @@
 """Command-line entry point: fetch-data, backtest, report. Paper/live/flatten arrive in Plan 3."""
 from __future__ import annotations
 
-import logging
 import sqlite3
 import time
 from datetime import date, datetime
@@ -17,6 +16,7 @@ from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_increme
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
 from tradebot.data.universe import load_universe
 from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.engine.logsetup import setup_logging
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.execution.groww_adapter import GrowwAdapter, is_non_retryable
@@ -64,8 +64,8 @@ class _FriendlyGroup(click.Group):
 @click.option("--env", "env_path", default=None, help="Path to the .env file with GROWW_* and ANTHROPIC_* keys.")
 @click.pass_context
 def main(ctx: click.Context, config_path: str, env_path: Optional[str]) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     ctx.obj = load_config(config_path, env_path or Path(config_path).parent / ".env")
+    setup_logging(None, run_id="cli")  # commands that create a run swap in the JSONL file handler
 
 
 def _instruments_fresh(path: Path) -> bool:
@@ -78,6 +78,8 @@ def _symbols_and_lots(cfg: Config, require_instruments: bool) -> tuple:
     if not path.exists():
         if require_instruments:
             raise click.ClickException(f"instrument master missing at {path}")
+        click.echo(f"WARNING: instrument master missing at {path}; assuming lot size 1 and skipping "
+                   f"tradeability checks for {len(uni.symbols)} symbols. Run fetch-data to download it.", err=True)
         return list(uni.symbols), {s: 1 for s in uni.symbols}, uni.exchange
     resolved, dropped = resolve_universe(uni, load_instruments(path))
     for sym, why in dropped:
@@ -91,21 +93,23 @@ def _symbols_and_lots(cfg: Config, require_instruments: bool) -> tuple:
 @main.command("fetch-data")
 @click.option("--days", default=90, show_default=True, help="Lookback for symbols with no stored candles")
 @click.option("--full", is_flag=True, help="Ignore stored candles and refetch the whole window")
-@click.option("--sleep", "pause", default=0.25, show_default=True, help="Seconds to pause between API requests")
+@click.option("--sleep", "pause", default=0.5, show_default=True, help="Seconds to pause between API requests")
 @click.pass_obj
 def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     """Incrementally download candles for the universe into SQLite. Run weekly to grow the cache.
 
     One bad symbol does not stop the others: failures are listed at the end and the exit code is 1."""
+    if cfg.execution.interval_minutes not in CHUNK_DAYS:
+        raise click.ClickException(f"unsupported candle interval: {cfg.execution.interval_minutes} minutes")
+    adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret)  # fails fast without creds
     path = Path(cfg.paths.instruments)
     if not _instruments_fresh(path):
         click.echo("downloading instrument master")
         download_instruments(path)
-    if cfg.execution.interval_minutes not in CHUNK_DAYS:
-        raise click.ClickException(f"unsupported candle interval: {cfg.execution.interval_minutes} minutes")
     symbols, _, exchange = _symbols_and_lots(cfg, require_instruments=True)
-    adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret)
     repo = Repo(connect(cfg.paths.db))
+    setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
+    had_data = any(repo.latest_candle_ts(s, cfg.execution.interval_minutes) is not None for s in symbols)
     failures: list = []
 
     def throttled(symbol, exch, start_ts, end_ts, interval):
@@ -131,6 +135,9 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     click.echo(f"inserted {total} candles across {len(symbols) - len(failures)} symbols")
     if failures:
         raise click.ClickException(f"{len(failures)} symbol(s) failed: " + ", ".join(s for s, _ in failures))
+    if total == 0 and not had_data:
+        raise click.ClickException("no candles were returned for any symbol on a first fetch; "
+                                   "check the date range, the universe, and the Groww response format")
 
 
 @main.command()
@@ -155,6 +162,7 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     run_id = run_id or f"bt-{datetime.now():%Y%m%d-%H%M%S}"
     if repo.get_run(run_id) is not None:
         raise click.ClickException(f"run '{run_id}' already exists; pick another --run-id")
+    log_path = setup_logging(cfg.paths.logs, run_id=run_id)
     strategy = build_strategy(strategy_name, cfg.strategy[strategy_name])
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
     engine = BacktestEngine(cfg, repo, source, [strategy], broker,
@@ -162,6 +170,8 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
                             SessionClock(cfg.session, interval), lots, run_id)
     rid = engine.run()
     click.echo(format_summary(build_summary(repo, rid)))
+    if log_path:
+        click.echo(f"log: {log_path}")
 
 
 @main.command()
