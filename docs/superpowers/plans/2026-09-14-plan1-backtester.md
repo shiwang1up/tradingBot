@@ -805,9 +805,12 @@ git commit -m "feat: typed config loader"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_store.py
 import json
+import sqlite3
 
+import pytest
+
+from tradebot.store.db import SCHEMA_VERSION, SchemaVersionError, connect
 from tradebot.types import Candle, Position, Signal
 
 
@@ -832,7 +835,8 @@ def test_candles_insert_is_idempotent(repo):
     cs = [_candle(ts=1_700_000_000), _candle(ts=1_700_000_300)]
     assert repo.insert_candles(cs, interval=5) == 2
     assert repo.insert_candles(cs, interval=5) == 0
-    assert repo.latest_candle_ts("RELIANCE", 5) == 1_700_000_300
+    assert repo.insert_candles(cs + [_candle(ts=1_700_000_600)], interval=5) == 1  # mixed batch
+    assert repo.latest_candle_ts("RELIANCE", 5) == 1_700_000_600
     assert repo.latest_candle_ts("TCS", 5) is None
 
 
@@ -881,6 +885,47 @@ def test_daily_pnl_upsert(repo):
     assert len(rows) == 1
     assert rows[0]["realised"] == 15.0
     assert rows[0]["fill_rate"] == 1.0
+
+
+def test_duplicate_client_id_is_rejected_and_original_survives(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    repo.insert_order("r1", "dupdupdupdupdup1", None, "ENTRY", "BUY", 10, 100.0, "PENDING", 5)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_order("r1", "dupdupdupdupdup1", None, "ENTRY", "BUY", 99, 1.0, "PENDING", 6)
+    assert repo.order_status("r1", "dupdupdupdupdup1") == "PENDING"
+    assert repo.order_id("r1", "nope") is None
+    assert repo.order_status("r1", "nope") is None
+
+
+def test_foreign_keys_enforced(repo):
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_fill(999_999, 1, 1.0, 1)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_signal("no-such-run", _signal())
+
+
+def test_close_position_accepts_null_pnl(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    pid = repo.insert_position("r1", Position("X", "MIS", "LONG", 1, 1.0, 0.5, None, 1, "c", "s"))
+    repo.close_position(pid, closed_ts=2, exit_price=None, exit_reason=None, pnl=None)
+    assert repo.list_positions("r1")[0]["pnl"] is None
+
+
+def test_file_backed_connect_uses_wal_persists_and_versions(tmp_path):
+    path = tmp_path / "nested" / "dir" / "t.db"
+    conn = connect(path)
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    conn.execute("INSERT INTO runs(run_id, mode, started_at, config_json) VALUES ('r','backtest',0,'{}')")
+    conn.commit()
+    conn.close()
+    conn2 = connect(path)  # schema re-applied idempotently, data intact
+    assert conn2.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    conn2.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn2.commit()
+    conn2.close()
+    with pytest.raises(SchemaVersionError):
+        connect(path)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -891,6 +936,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradebot.store.db'`
 - [ ] **Step 3: Write `src/tradebot/store/schema.sql`**
 
 ```sql
+-- Schema version: bump SCHEMA_VERSION in db.py and add a migration whenever this file changes.
 CREATE TABLE IF NOT EXISTS runs (
   run_id      TEXT PRIMARY KEY,
   mode        TEXT NOT NULL,
@@ -911,7 +957,7 @@ CREATE TABLE IF NOT EXISTS candles (
 
 CREATE TABLE IF NOT EXISTS signals (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id    TEXT NOT NULL,
+  run_id    TEXT NOT NULL REFERENCES runs(run_id),
   strategy  TEXT NOT NULL,
   symbol    TEXT NOT NULL,
   bar_ts    INTEGER NOT NULL,
@@ -924,8 +970,8 @@ CREATE TABLE IF NOT EXISTS signals (
 
 CREATE TABLE IF NOT EXISTS risk_decisions (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id    TEXT NOT NULL,
-  signal_id INTEGER NOT NULL,
+  run_id    TEXT NOT NULL REFERENCES runs(run_id),
+  signal_id INTEGER NOT NULL REFERENCES signals(id),
   approved  INTEGER NOT NULL,
   reason    TEXT NOT NULL,
   quantity  INTEGER NOT NULL
@@ -933,8 +979,8 @@ CREATE TABLE IF NOT EXISTS risk_decisions (
 
 CREATE TABLE IF NOT EXISTS ai_decisions (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id      TEXT NOT NULL,
-  signal_id   INTEGER NOT NULL,
+  run_id      TEXT NOT NULL REFERENCES runs(run_id),
+  signal_id   INTEGER NOT NULL REFERENCES signals(id),
   filter_kind TEXT NOT NULL,
   approved    INTEGER NOT NULL,
   reason      TEXT NOT NULL,
@@ -954,9 +1000,9 @@ CREATE TABLE IF NOT EXISTS ai_cache (
 
 CREATE TABLE IF NOT EXISTS orders (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id          TEXT NOT NULL,
+  run_id          TEXT NOT NULL REFERENCES runs(run_id),
   client_id       TEXT NOT NULL,
-  signal_id       INTEGER,
+  signal_id       INTEGER REFERENCES signals(id),
   broker_order_id TEXT,
   kind            TEXT NOT NULL,   -- ENTRY | EXIT | SQUARE_OFF
   side            TEXT NOT NULL,   -- BUY | SELL
@@ -970,7 +1016,7 @@ CREATE TABLE IF NOT EXISTS orders (
 
 CREATE TABLE IF NOT EXISTS fills (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id INTEGER NOT NULL,
+  order_id INTEGER NOT NULL REFERENCES orders(id),
   qty      INTEGER NOT NULL,
   price    REAL NOT NULL,
   ts       INTEGER NOT NULL
@@ -978,12 +1024,12 @@ CREATE TABLE IF NOT EXISTS fills (
 
 CREATE TABLE IF NOT EXISTS positions (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id        TEXT NOT NULL,
+  run_id        TEXT NOT NULL REFERENCES runs(run_id),
   symbol        TEXT NOT NULL,
   product       TEXT NOT NULL,
   direction     TEXT NOT NULL,
-  strategy      TEXT NOT NULL,
-  client_id     TEXT NOT NULL,
+  strategy      TEXT NOT NULL,   -- 'adopted' sentinel for positions with no known signal (live)
+  client_id     TEXT NOT NULL,   -- '' for adopted positions
   qty           INTEGER NOT NULL,
   avg_price     REAL NOT NULL,
   stop          REAL NOT NULL,
@@ -999,7 +1045,7 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 
 CREATE TABLE IF NOT EXISTS daily_pnl (
-  run_id         TEXT NOT NULL,
+  run_id         TEXT NOT NULL REFERENCES runs(run_id),
   date           TEXT NOT NULL,
   realised       REAL NOT NULL,
   unrealised     REAL NOT NULL,
@@ -1008,29 +1054,52 @@ CREATE TABLE IF NOT EXISTS daily_pnl (
   fill_rate      REAL NOT NULL,
   PRIMARY KEY (run_id, date)
 );
+
+CREATE INDEX IF NOT EXISTS idx_signals_run   ON signals(run_id);
+CREATE INDEX IF NOT EXISTS idx_risk_run      ON risk_decisions(run_id, approved);
+CREATE INDEX IF NOT EXISTS idx_ai_run        ON ai_decisions(run_id, approved);
+CREATE INDEX IF NOT EXISTS idx_fills_order   ON fills(order_id);
+CREATE INDEX IF NOT EXISTS idx_positions_run ON positions(run_id);
 ```
 
 - [ ] **Step 4: Write `src/tradebot/store/db.py`**
 
 ```python
-"""SQLite connection factory. Applies schema.sql on every connect (idempotent)."""
+"""SQLite connection factory. Applies schema.sql on every connect (idempotent) and
+refuses to open a database written by a different schema version."""
 from __future__ import annotations
 
 import sqlite3
 from importlib import resources
 from pathlib import Path
+from typing import Union
+
+SCHEMA_VERSION = 1
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
-    if str(path) != ":memory:":
+class SchemaVersionError(RuntimeError):
+    pass
+
+
+def connect(path: Union[str, Path]) -> sqlite3.Connection:
+    is_file = str(path) != ":memory:"
+    if is_file:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    if str(path) != ":memory:":
+    if is_file:
         conn.execute("PRAGMA journal_mode = WAL")
+    found = conn.execute("PRAGMA user_version").fetchone()[0]
+    if found not in (0, SCHEMA_VERSION):
+        conn.close()
+        raise SchemaVersionError(
+            f"{path} has schema version {found}, code expects {SCHEMA_VERSION}; migrate or delete the file"
+        )
     schema = resources.files("tradebot.store").joinpath("schema.sql").read_text()
     conn.executescript(schema)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
     return conn
 ```
 
@@ -1068,6 +1137,8 @@ class Repo:
     # -- candles -----------------------------------------------------------
     def insert_candles(self, candles: Iterable[Candle], interval: int) -> int:
         rows = [(c.symbol, c.ts, interval, c.open, c.high, c.low, c.close, c.volume, c.source) for c in candles]
+        # total_changes is connection-wide; correct here because Repo is single-threaded and
+        # nothing else runs between the two reads. Cursor.rowcount would count ignored rows too.
         before = self.conn.total_changes
         self.conn.executemany(
             "INSERT OR IGNORE INTO candles(symbol, ts, interval, o, h, l, c, v, source) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -1083,6 +1154,9 @@ class Repo:
         return row["ts"]
 
     def load_candles(self, symbols: list[str], interval: int, start_ts: int, end_ts: int) -> list[Candle]:
+        # One bind variable per symbol; SQLite >= 3.32 allows 32766, older builds 999. NIFTY 200 fits either.
+        if len(symbols) > 900:
+            raise ValueError("load_candles: more than 900 symbols; chunk the universe")
         marks = ",".join("?" * len(symbols))
         rows = self.conn.execute(
             f"SELECT * FROM candles WHERE symbol IN ({marks}) AND interval=? AND ts BETWEEN ? AND ? "
@@ -1211,7 +1285,7 @@ class Repo:
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_store.py -v`
-Expected: 7 passed
+Expected: 11 passed
 
 - [ ] **Step 7: Commit**
 
@@ -3064,6 +3138,8 @@ git commit -m "feat: backtest broker with stop-first exit simulation"
 ---
 
 ### Task 13: Engine loop
+
+> Follow-up noted in Task 4 review: `Repo.load_candles` materialises the whole window. For a NIFTY 200 universe over a year of 5-minute bars this is millions of `Candle` objects. Acceptable for the 3-month windows Groww serves today; add a streaming `iter_candles` and a lazily-grouped `HistoricalSource` when the cache grows past that.
 
 **Files:**
 - Create: `src/tradebot/engine/loop.py`

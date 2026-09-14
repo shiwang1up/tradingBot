@@ -1,5 +1,9 @@
 import json
+import sqlite3
 
+import pytest
+
+from tradebot.store.db import SCHEMA_VERSION, SchemaVersionError, connect
 from tradebot.types import Candle, Position, Signal
 
 
@@ -24,7 +28,8 @@ def test_candles_insert_is_idempotent(repo):
     cs = [_candle(ts=1_700_000_000), _candle(ts=1_700_000_300)]
     assert repo.insert_candles(cs, interval=5) == 2
     assert repo.insert_candles(cs, interval=5) == 0
-    assert repo.latest_candle_ts("RELIANCE", 5) == 1_700_000_300
+    assert repo.insert_candles(cs + [_candle(ts=1_700_000_600)], interval=5) == 1  # mixed batch
+    assert repo.latest_candle_ts("RELIANCE", 5) == 1_700_000_600
     assert repo.latest_candle_ts("TCS", 5) is None
 
 
@@ -73,3 +78,44 @@ def test_daily_pnl_upsert(repo):
     assert len(rows) == 1
     assert rows[0]["realised"] == 15.0
     assert rows[0]["fill_rate"] == 1.0
+
+
+def test_duplicate_client_id_is_rejected_and_original_survives(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    repo.insert_order("r1", "dupdupdupdupdup1", None, "ENTRY", "BUY", 10, 100.0, "PENDING", 5)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_order("r1", "dupdupdupdupdup1", None, "ENTRY", "BUY", 99, 1.0, "PENDING", 6)
+    assert repo.order_status("r1", "dupdupdupdupdup1") == "PENDING"
+    assert repo.order_id("r1", "nope") is None
+    assert repo.order_status("r1", "nope") is None
+
+
+def test_foreign_keys_enforced(repo):
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_fill(999_999, 1, 1.0, 1)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_signal("no-such-run", _signal())
+
+
+def test_close_position_accepts_null_pnl(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    pid = repo.insert_position("r1", Position("X", "MIS", "LONG", 1, 1.0, 0.5, None, 1, "c", "s"))
+    repo.close_position(pid, closed_ts=2, exit_price=None, exit_reason=None, pnl=None)
+    assert repo.list_positions("r1")[0]["pnl"] is None
+
+
+def test_file_backed_connect_uses_wal_persists_and_versions(tmp_path):
+    path = tmp_path / "nested" / "dir" / "t.db"
+    conn = connect(path)
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    conn.execute("INSERT INTO runs(run_id, mode, started_at, config_json) VALUES ('r','backtest',0,'{}')")
+    conn.commit()
+    conn.close()
+    conn2 = connect(path)  # schema re-applied idempotently, data intact
+    assert conn2.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    conn2.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn2.commit()
+    conn2.close()
+    with pytest.raises(SchemaVersionError):
+        connect(path)

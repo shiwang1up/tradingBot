@@ -29,6 +29,8 @@ class Repo:
     # -- candles -----------------------------------------------------------
     def insert_candles(self, candles: Iterable[Candle], interval: int) -> int:
         rows = [(c.symbol, c.ts, interval, c.open, c.high, c.low, c.close, c.volume, c.source) for c in candles]
+        # total_changes is connection-wide; correct here because Repo is single-threaded and
+        # nothing else runs between the two reads. Cursor.rowcount would count ignored rows too.
         before = self.conn.total_changes
         self.conn.executemany(
             "INSERT OR IGNORE INTO candles(symbol, ts, interval, o, h, l, c, v, source) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -44,6 +46,9 @@ class Repo:
         return row["ts"]
 
     def load_candles(self, symbols: list[str], interval: int, start_ts: int, end_ts: int) -> list[Candle]:
+        # One bind variable per symbol; SQLite >= 3.32 allows 32766, older builds 999. NIFTY 200 fits either.
+        if len(symbols) > 900:
+            raise ValueError("load_candles: more than 900 symbols; chunk the universe")
         marks = ",".join("?" * len(symbols))
         rows = self.conn.execute(
             f"SELECT * FROM candles WHERE symbol IN ({marks}) AND interval=? AND ts BETWEEN ? AND ? "
