@@ -157,9 +157,9 @@ def repo():
 
 Run:
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -q -e ".[dev]" && .venv/bin/python -c "import tradebot; print('ok')"
+python3 -m venv .venv && .venv/bin/pip install -q -U pip setuptools && .venv/bin/pip install -q -e ".[dev]" && .venv/bin/python -c "import tradebot; print('ok')"
 ```
-Expected: `ok`
+Expected: `ok`. The pip/setuptools upgrade is required: the system Python 3.9 ships pip 21.2, which cannot do editable installs of a pyproject-only package.
 
 - [ ] **Step 6: Commit**
 
