@@ -106,6 +106,13 @@ def test_unquoted_holiday_dates_are_normalised_to_iso_strings(tmp_path):
     (YAML.replace("max_open_positions: 5", "max_open_positions: 2.5"), "risk.max_open_positions"),
     (YAML.replace("flatten_on_daily_cap: false", "flatten_on_daily_cap: nope"), "risk.flatten_on_daily_cap"),
     (YAML.replace("mis_leverage: 5.0", "mis_leverage: 0.5"), "mis_leverage"),
+    (YAML.replace("capital: 100000", "capital: true"), "capital"),
+    (YAML.replace('close: "15:30"', "close: 15:30"), "session.close"),        # PyYAML sexagesimal -> 930
+    (YAML.replace('square_off: "15:10"', 'square_off: "3:10pm"'), "session.square_off"),
+    (YAML.replace('holidays: ["2026-10-02"]', 'holidays: "2026-10-02"'), "session.holidays"),
+    (YAML.replace("interval_minutes: 5", "interval_minutes: 0"), "interval_minutes"),
+    (YAML.replace("on_failure: reject", "on_failure: maybe"), "ai.on_failure"),
+    (YAML.replace("filter: stub", "filter: gpt"), "ai.filter"),
     ("", "capital"),
 ])
 def test_bad_config_fails_at_load_with_key_named(tmp_path, broken, fragment):

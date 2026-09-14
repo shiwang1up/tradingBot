@@ -485,6 +485,13 @@ def test_unquoted_holiday_dates_are_normalised_to_iso_strings(tmp_path):
     (YAML.replace("max_open_positions: 5", "max_open_positions: 2.5"), "risk.max_open_positions"),
     (YAML.replace("flatten_on_daily_cap: false", "flatten_on_daily_cap: nope"), "risk.flatten_on_daily_cap"),
     (YAML.replace("mis_leverage: 5.0", "mis_leverage: 0.5"), "mis_leverage"),
+    (YAML.replace("capital: 100000", "capital: true"), "capital"),
+    (YAML.replace('close: "15:30"', "close: 15:30"), "session.close"),        # PyYAML sexagesimal -> 930
+    (YAML.replace('square_off: "15:10"', 'square_off: "3:10pm"'), "session.square_off"),
+    (YAML.replace('holidays: ["2026-10-02"]', 'holidays: "2026-10-02"'), "session.holidays"),
+    (YAML.replace("interval_minutes: 5", "interval_minutes: 0"), "interval_minutes"),
+    (YAML.replace("on_failure: reject", "on_failure: maybe"), "ai.on_failure"),
+    (YAML.replace("filter: stub", "filter: gpt"), "ai.filter"),
     ("", "capital"),
 ])
 def test_bad_config_fails_at_load_with_key_named(tmp_path, broken, fragment):
@@ -519,6 +526,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Union
@@ -611,12 +619,22 @@ def _coerce(section: str, name: str, type_name: str, value: Any) -> Any:
         if isinstance(value, bool):
             return value
         raise ValueError(f"{where}: expected true/false, got {value!r}")
-    if type_name == "int":
-        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
-            raise ValueError(f"{where}: expected an integer, got {value!r}")
+    if type_name == "str":
+        # Strict: PyYAML turns an unquoted 15:30 into the integer 930 and an empty value into None.
+        if not isinstance(value, str):
+            raise ValueError(f"{where}: expected a quoted string, got {value!r}")
+        return value
+    if type_name == "tuple":
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"{where}: expected a list, got {value!r}")
+        return tuple(value)
+    if isinstance(value, bool):  # int and float must not accept true/false
+        raise ValueError(f"{where}: expected {type_name}, got {value!r}")
+    if type_name == "int" and isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{where}: expected an integer, got {value!r}")
     try:
         return _COERCE[type_name](value)
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError, KeyError) as e:
         raise ValueError(f"{where}: expected {type_name}, got {value!r}") from e
 
 
@@ -634,15 +652,33 @@ def _section(raw: dict, name: str, cls):
     return cls(**{k: _coerce(name, k, fields[k].type, v) for k, v in given.items()})
 
 
-def _validate_risk(r: RiskConfig) -> None:
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+AI_FILTERS = ("stub", "claude", "claude_cached")
+AI_ON_FAILURE = ("reject", "pass_through")
+
+
+def _validate(cfg: "Config") -> None:
+    r, e, s, a, d = cfg.risk, cfg.execution, cfg.session, cfg.ai, cfg.data
     checks = [
         (r.per_trade_pct > 0, "risk.per_trade_pct must be > 0"),
         (r.daily_loss_cap_pct > 0, "risk.daily_loss_cap_pct must be > 0"),
+        (r.adopted_stop_pct > 0, "risk.adopted_stop_pct must be > 0"),
         (r.mis_leverage >= 1, "risk.mis_leverage must be >= 1"),
         (r.max_open_positions >= 1, "risk.max_open_positions must be >= 1"),
         (r.max_entries_per_day >= 1, "risk.max_entries_per_day must be >= 1"),
         (r.cooldown_bars >= 0, "risk.cooldown_bars must be >= 0"),
+        (e.slippage_pct >= 0, "execution.slippage_pct must be >= 0"),
+        (e.entry_buffer_pct >= 0, "execution.entry_buffer_pct must be >= 0"),
+        (e.bar_deadline_sec > 0, "execution.bar_deadline_sec must be > 0"),
+        (e.interval_minutes > 0, "execution.interval_minutes must be > 0"),
+        (d.official_fetch_concurrency >= 1, "data.official_fetch_concurrency must be >= 1"),
+        (a.candles_in_context >= 1, "ai.candles_in_context must be >= 1"),
+        (a.filter in AI_FILTERS, f"ai.filter must be one of {AI_FILTERS}"),
+        (a.on_failure in AI_ON_FAILURE, f"ai.on_failure must be one of {AI_ON_FAILURE}"),
     ]
+    for name in ("open", "close", "square_off", "no_new_entries_after"):
+        checks.append((bool(_HHMM.match(getattr(s, name))), f'session.{name} must be a quoted "HH:MM" time'))
+    checks.append((all(isinstance(h, str) for h in s.holidays), "session.holidays must be a list of ISO date strings"))
     for ok, msg in checks:
         if not ok:
             raise ValueError(f"config.yaml {msg}")
@@ -661,13 +697,11 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
     if capital <= 0:
         raise ValueError("config.yaml capital must be > 0")
     session_raw = dict(raw.get("session") or {})
-    if "holidays" in session_raw:
-        session_raw["holidays"] = tuple(str(h) for h in (session_raw["holidays"] or ()))
-    risk = _section(raw, "risk", RiskConfig)
-    _validate_risk(risk)
-    return Config(
+    if isinstance(session_raw.get("holidays"), (list, tuple)):
+        session_raw["holidays"] = tuple(str(h) for h in session_raw["holidays"])  # unquoted dates -> ISO
+    cfg = Config(
         capital=capital,
-        risk=risk,
+        risk=_section(raw, "risk", RiskConfig),
         strategy=copy.deepcopy(raw.get("strategy") or {}),
         ai=_section(raw, "ai", AIConfig),
         execution=_section(raw, "execution", ExecutionConfig),
@@ -681,12 +715,14 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         ),
         raw=raw,
     )
+    _validate(cfg)
+    return cfg
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_config.py -v`
-Expected: 13 passed
+Expected: 20 passed
 
 - [ ] **Step 5: Write the real `config.yaml` at project root**
 
