@@ -43,10 +43,12 @@ def make_config(tmp_path, **overrides) -> Config:
 
 
 def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int = 7,
-                  bars_per_day: int = 75, noise: float = 1.0) -> list[Candle]:
+                  bars_per_day: int = 75, noise: float = 1.0, gap: float = 0.08) -> list[Candle]:
     """Deterministic wavy price path with LCG noise so some trades stop out.
-    5-minute bars from 09:15, `bars_per_day` per day. Same inputs always give the same candles."""
-    out, i, x = [], 0, seed
+    5-minute bars from 09:15, `bars_per_day` per day. Each bar opens within +/- `gap` of the
+    previous close, like real intraday bars, so the entry buffer does not reject every fill.
+    Same inputs always give the same candles."""
+    out, i, x, prev_close = [], 0, seed, None
 
     def rnd() -> float:  # linear congruential generator, uniform in [0, 1)
         nonlocal x
@@ -58,9 +60,10 @@ def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int =
         for k in range(bars_per_day):
             base = 100.0 + 6.0 * math.sin((i + phase) / 7.0) + 0.02 * i
             c = round(base + (rnd() - 0.5) * 2 * noise, 2)
-            o = round(base - 0.3 * math.cos(i / 5.0), 2)
+            o = round(c if prev_close is None else prev_close + (rnd() - 0.5) * 2 * gap, 2)
             h = round(max(o, c) + 0.2 + rnd() * noise, 2)
             l = round(min(o, c) - 0.2 - rnd() * noise, 2)
             out.append(Candle(symbol, open_ts + k * 300, o, h, l, c, 1000))
+            prev_close = c
             i += 1
     return out

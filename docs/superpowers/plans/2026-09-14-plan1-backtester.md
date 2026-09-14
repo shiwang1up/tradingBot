@@ -3864,6 +3864,7 @@ git commit -m "feat: backtest broker with stop-first exit simulation"
 **Files:**
 - Create: `src/tradebot/engine/loop.py`
 - Create: `tests/helpers.py`
+- Create: `tests/__init__.py` (empty; makes `from tests.helpers import ...` resolvable)
 - Test: `tests/test_engine.py`
 
 - [ ] **Step 1: Write `tests/helpers.py`**
@@ -3914,10 +3915,12 @@ def make_config(tmp_path, **overrides) -> Config:
 
 
 def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int = 7,
-                  bars_per_day: int = 75, noise: float = 1.0) -> list[Candle]:
+                  bars_per_day: int = 75, noise: float = 1.0, gap: float = 0.08) -> list[Candle]:
     """Deterministic wavy price path with LCG noise so some trades stop out.
-    5-minute bars from 09:15, `bars_per_day` per day. Same inputs always give the same candles."""
-    out, i, x = [], 0, seed
+    5-minute bars from 09:15, `bars_per_day` per day. Each bar opens within +/- `gap` of the
+    previous close, like real intraday bars, so the entry buffer does not reject every fill.
+    Same inputs always give the same candles."""
+    out, i, x, prev_close = [], 0, seed, None
 
     def rnd() -> float:  # linear congruential generator, uniform in [0, 1)
         nonlocal x
@@ -3929,10 +3932,11 @@ def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int =
         for k in range(bars_per_day):
             base = 100.0 + 6.0 * math.sin((i + phase) / 7.0) + 0.02 * i
             c = round(base + (rnd() - 0.5) * 2 * noise, 2)
-            o = round(base - 0.3 * math.cos(i / 5.0), 2)
+            o = round(c if prev_close is None else prev_close + (rnd() - 0.5) * 2 * gap, 2)
             h = round(max(o, c) + 0.2 + rnd() * noise, 2)
             l = round(min(o, c) - 0.2 - rnd() * noise, 2)
             out.append(Candle(symbol, open_ts + k * 300, o, h, l, c, 1000))
+            prev_close = c
             i += 1
     return out
 ```
@@ -3940,7 +3944,6 @@ def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int =
 - [ ] **Step 2: Write the failing tests**
 
 ```python
-# tests/test_engine.py
 import json
 from datetime import date
 from pathlib import Path
@@ -3972,7 +3975,7 @@ def _run(repo, cfg, candles, run_id="t1", ai=None):
 
 
 def _candles():
-    return synth_candles("A", DAYS, phase=0.0) + synth_candles("B", DAYS, phase=2.0, seed=99)
+    return synth_candles("A", DAYS, phase=0.0) + synth_candles("B", DAYS, phase=4.0, seed=99)
 
 
 def test_engine_invariants(repo, tmp_path):
@@ -4285,15 +4288,15 @@ class BacktestEngine:
 - [ ] **Step 5: Run tests; first run of the golden test writes the fixture**
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 6 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 9 trades with both TARGET and STOP exits and prices near 100, then:
+Expected: 6 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 7 passed. The fixture should show 9 trades: 7 TARGET and 2 STOP exits.
+Expected: 7 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/tradebot/engine/loop.py tests/helpers.py tests/test_engine.py tests/fixtures/golden_trades.json
+git add src/tradebot/engine/loop.py tests/__init__.py tests/helpers.py tests/test_engine.py tests/fixtures/golden_trades.json
 git commit -m "feat: backtest engine loop with golden trade fixture"
 ```
 
@@ -4506,7 +4509,7 @@ def _setup(tmp_path):
     (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A, B]\n")
     repo = Repo(connect(cfg.paths.db))
     days = [date(2026, 9, 14), date(2026, 9, 15)]
-    repo.insert_candles(synth_candles("A", days) + synth_candles("B", days, phase=2.0, seed=99), interval=5)
+    repo.insert_candles(synth_candles("A", days) + synth_candles("B", days, phase=4.0, seed=99), interval=5)
     repo.conn.close()
     return cfg
 

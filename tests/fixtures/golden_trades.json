@@ -2,23 +2,78 @@
   {
     "symbol": "B",
     "direction": "SHORT",
-    "opened_at": 1789368000,
-    "closed_at": 1789374300,
+    "opened_at": 1789367700,
+    "closed_at": 1789373400,
     "exit_reason": "STOP",
-    "qty": 323,
-    "avg_price": 100.7,
-    "exit_price": 103.95,
-    "pnl": -1049.75
+    "qty": 285,
+    "avg_price": 99.9,
+    "exit_price": 103.5,
+    "pnl": -1026.0
+  },
+  {
+    "symbol": "A",
+    "direction": "SHORT",
+    "opened_at": 1789368900,
+    "closed_at": 1789375200,
+    "exit_reason": "STOP",
+    "qty": 280,
+    "avg_price": 100.05,
+    "exit_price": 103.65,
+    "pnl": -1008.0
   },
   {
     "symbol": "B",
     "direction": "SHORT",
-    "opened_at": 1789458300,
-    "closed_at": 1789464300,
+    "opened_at": 1789444200,
+    "closed_at": 1789451400,
     "exit_reason": "STOP",
+    "qty": 278,
+    "avg_price": 102.55,
+    "exit_price": 106.2,
+    "pnl": -1014.7
+  },
+  {
+    "symbol": "A",
+    "direction": "SHORT",
+    "opened_at": 1789445400,
+    "closed_at": 1789452300,
+    "exit_reason": "STOP",
+    "qty": 293,
+    "avg_price": 102.4,
+    "exit_price": 105.85,
+    "pnl": -1010.85
+  },
+  {
+    "symbol": "B",
+    "direction": "SHORT",
+    "opened_at": 1789457700,
+    "closed_at": 1789460400,
+    "exit_reason": "TARGET",
+    "qty": 299,
+    "avg_price": 103.1,
+    "exit_price": 96.5,
+    "pnl": 1973.4
+  },
+  {
+    "symbol": "A",
+    "direction": "SHORT",
+    "opened_at": 1789458600,
+    "closed_at": 1789464900,
+    "exit_reason": "SQUARE_OFF",
+    "qty": 299,
+    "avg_price": 102.95,
+    "exit_price": 103.75,
+    "pnl": -239.2
+  },
+  {
+    "symbol": "B",
+    "direction": "LONG",
+    "opened_at": 1789463700,
+    "closed_at": 1789464900,
+    "exit_reason": "SQUARE_OFF",
     "qty": 294,
-    "avg_price": 102.25,
-    "exit_price": 105.6,
-    "pnl": -984.9
+    "avg_price": 103.4,
+    "exit_price": 108.5,
+    "pnl": 1499.4
   }
 ]

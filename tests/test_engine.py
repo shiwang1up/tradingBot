@@ -29,7 +29,7 @@ def _run(repo, cfg, candles, run_id="t1", ai=None):
 
 
 def _candles():
-    return synth_candles("A", DAYS, phase=0.0) + synth_candles("B", DAYS, phase=2.0, seed=99)
+    return synth_candles("A", DAYS, phase=0.0) + synth_candles("B", DAYS, phase=4.0, seed=99)
 
 
 def test_engine_invariants(repo, tmp_path):
