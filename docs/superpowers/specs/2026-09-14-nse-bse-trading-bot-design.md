@@ -36,7 +36,7 @@ Candle source ──> Strategy(s) ──> Signal ──> Risk engine ──> AI 
     paper / live)     └── indicators            daily loss)
 ```
 
-Single Python 3.11 process. A CLI mode flag selects the candle source and the
+Single Python process (3.9+, matching the Groww SDK's floor and the Mac's system Python). A CLI mode flag selects the candle source and the
 execution backend. Everything else is shared.
 
 ### 3.1 Packages
