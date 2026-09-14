@@ -143,6 +143,13 @@ ANTHROPIC_API_KEY=
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clean_secret_env(monkeypatch):
+    """No test may observe credentials leaked into the process by another test."""
+    for name in ("GROWW_API_KEY", "GROWW_TOTP_SECRET", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def repo():
     # Imported lazily: store modules arrive in Task 4, and no earlier test uses this fixture.
@@ -373,6 +380,8 @@ git commit -m "feat: core value types"
 # tests/test_config.py
 import textwrap
 
+import pytest
+
 from tradebot.config import load_config
 
 YAML = textwrap.dedent("""
@@ -424,9 +433,14 @@ paths:
 """)
 
 
+def _write(tmp_path, text=YAML):
+    p = tmp_path / "config.yaml"
+    p.write_text(text)
+    return p
+
+
 def test_load_config_reads_all_sections(tmp_path):
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(YAML)
+    cfg_path = _write(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\nANTHROPIC_API_KEY=a\n")
 
@@ -445,13 +459,44 @@ def test_load_config_reads_all_sections(tmp_path):
     assert cfg.raw["capital"] == 100000
 
 
-def test_missing_env_yields_empty_secrets(tmp_path, monkeypatch):
-    for k in ("GROWW_API_KEY", "GROWW_TOTP_SECRET", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(YAML)
-    cfg = load_config(cfg_path, tmp_path / "missing.env")
+def test_missing_env_yields_empty_secrets(tmp_path):
+    cfg = load_config(_write(tmp_path), tmp_path / "missing.env")
     assert cfg.secrets.groww_api_key == ""
+
+
+def test_process_env_beats_dotenv(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROWW_API_KEY", "from-process")
+    env_path = tmp_path / ".env"
+    env_path.write_text("GROWW_API_KEY=from-file\n")
+    cfg = load_config(_write(tmp_path), env_path)
+    assert cfg.secrets.groww_api_key == "from-process"
+
+
+def test_unquoted_holiday_dates_are_normalised_to_iso_strings(tmp_path):
+    cfg = load_config(_write(tmp_path, YAML.replace('["2026-10-02"]', "[2026-10-02]")), tmp_path / "x.env")
+    assert cfg.session.holidays == ("2026-10-02",)
+
+
+@pytest.mark.parametrize("broken, fragment", [
+    (YAML.replace("cooldown_bars: 3", "cooldown_bar: 3"), "risk"),
+    (YAML.replace("  square_off: \"15:10\"\n", ""), "session"),
+    (YAML.replace("capital: 100000\n", ""), "capital"),
+    (YAML.replace("per_trade_pct: 1.0", "per_trade_pct: one"), "risk.per_trade_pct"),
+    (YAML.replace("max_open_positions: 5", "max_open_positions: 2.5"), "risk.max_open_positions"),
+    (YAML.replace("flatten_on_daily_cap: false", "flatten_on_daily_cap: nope"), "risk.flatten_on_daily_cap"),
+    (YAML.replace("mis_leverage: 5.0", "mis_leverage: 0.5"), "mis_leverage"),
+    ("", "capital"),
+])
+def test_bad_config_fails_at_load_with_key_named(tmp_path, broken, fragment):
+    with pytest.raises(ValueError) as e:
+        load_config(_write(tmp_path, broken), tmp_path / "x.env")
+    assert fragment in str(e.value)
+
+
+def test_strategy_params_are_not_aliased_to_raw(tmp_path):
+    cfg = load_config(_write(tmp_path), tmp_path / "x.env")
+    cfg.strategy["ema_rsi"]["fast"] = 999
+    assert cfg.raw["strategy"]["ema_rsi"]["fast"] == 9
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -462,13 +507,21 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradebot.config'`
 - [ ] **Step 3: Write `src/tradebot/config.py`**
 
 ```python
-"""Typed config loaded from config.yaml plus secrets from .env."""
+"""Typed config loaded from config.yaml plus secrets from .env.
+
+Conventions:
+- Every ``*_pct`` field is a human percent: ``1.0`` means 1%. Divide by 100 at the point of use.
+- Values are type-checked and coerced at load time so a bad config fails here, not mid-session.
+- Process environment wins over ``.env`` so an operator can override credentials per run.
+"""
 from __future__ import annotations
 
+import copy
+import dataclasses
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 import yaml
 from dotenv import load_dotenv
@@ -476,6 +529,7 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class RiskConfig:
+    """``*_pct`` fields are human percents (1.0 == 1%)."""
     per_trade_pct: float
     daily_loss_cap_pct: float
     flatten_on_daily_cap: bool
@@ -496,6 +550,7 @@ class AIConfig:
 
 @dataclass(frozen=True)
 class ExecutionConfig:
+    """``*_pct`` fields are human percents (0.05 == 0.05% == 5 bps)."""
     slippage_pct: float
     entry_buffer_pct: float
     bar_deadline_sec: int
@@ -508,7 +563,7 @@ class SessionConfig:
     close: str
     square_off: str
     no_new_entries_after: str
-    holidays: tuple[str, ...]
+    holidays: tuple  # of ISO date strings
 
 
 @dataclass(frozen=True)
@@ -536,38 +591,87 @@ class Secrets:
 class Config:
     capital: float
     risk: RiskConfig
-    strategy: dict[str, dict[str, Any]]
+    strategy: dict  # strategy name -> params; each strategy validates its own keys
     ai: AIConfig
     execution: ExecutionConfig
     session: SessionConfig
     data: DataConfig
     paths: PathsConfig
     secrets: Secrets
-    raw: dict[str, Any]
+    raw: dict
+
+
+_COERCE = {"float": float, "int": int, "bool": bool, "str": str, "tuple": tuple}
+
+
+def _coerce(section: str, name: str, type_name: str, value: Any) -> Any:
+    """Coerce a YAML scalar to the dataclass field type, or raise a config error naming the key."""
+    where = f"config.yaml {section}.{name}"
+    if type_name == "bool":
+        if isinstance(value, bool):
+            return value
+        raise ValueError(f"{where}: expected true/false, got {value!r}")
+    if type_name == "int":
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+            raise ValueError(f"{where}: expected an integer, got {value!r}")
+    try:
+        return _COERCE[type_name](value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{where}: expected {type_name}, got {value!r}") from e
 
 
 def _section(raw: dict, name: str, cls):
-    try:
-        return cls(**raw[name])
-    except KeyError as e:
-        raise ValueError(f"config.yaml missing section or key: {name} {e}") from e
-    except TypeError as e:
-        raise ValueError(f"config.yaml section '{name}' has wrong keys: {e}") from e
+    if name not in raw or not isinstance(raw[name], dict):
+        raise ValueError(f"config.yaml missing section: {name}")
+    given = dict(raw[name])
+    fields = {f.name: f for f in dataclasses.fields(cls)}
+    unknown = set(given) - set(fields)
+    if unknown:
+        raise ValueError(f"config.yaml section '{name}' has unknown keys: {sorted(unknown)}")
+    missing = set(fields) - set(given)
+    if missing:
+        raise ValueError(f"config.yaml section '{name}' missing keys: {sorted(missing)}")
+    return cls(**{k: _coerce(name, k, fields[k].type, v) for k, v in given.items()})
 
 
-def load_config(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Config:
-    raw = yaml.safe_load(Path(path).read_text())
+def _validate_risk(r: RiskConfig) -> None:
+    checks = [
+        (r.per_trade_pct > 0, "risk.per_trade_pct must be > 0"),
+        (r.daily_loss_cap_pct > 0, "risk.daily_loss_cap_pct must be > 0"),
+        (r.mis_leverage >= 1, "risk.mis_leverage must be >= 1"),
+        (r.max_open_positions >= 1, "risk.max_open_positions must be >= 1"),
+        (r.max_entries_per_day >= 1, "risk.max_entries_per_day must be >= 1"),
+        (r.cooldown_bars >= 0, "risk.cooldown_bars must be >= 0"),
+    ]
+    for ok, msg in checks:
+        if not ok:
+            raise ValueError(f"config.yaml {msg}")
+
+
+def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Path] = ".env") -> Config:
+    p = Path(path)
+    if not p.exists():
+        raise ValueError(f"config file not found: {p}")
+    raw = yaml.safe_load(p.read_text()) or {}
     if Path(env_path).exists():
-        load_dotenv(env_path, override=True)
-    session_raw = dict(raw["session"])
-    session_raw["holidays"] = tuple(session_raw.get("holidays") or ())
+        load_dotenv(env_path)  # process env wins; .env only fills gaps
+    if "capital" not in raw:
+        raise ValueError("config.yaml missing 'capital'")
+    capital = _coerce("(root)", "capital", "float", raw["capital"])
+    if capital <= 0:
+        raise ValueError("config.yaml capital must be > 0")
+    session_raw = dict(raw.get("session") or {})
+    if "holidays" in session_raw:
+        session_raw["holidays"] = tuple(str(h) for h in (session_raw["holidays"] or ()))
+    risk = _section(raw, "risk", RiskConfig)
+    _validate_risk(risk)
     return Config(
-        capital=float(raw["capital"]),
-        risk=_section(raw, "risk", RiskConfig),
-        strategy=dict(raw.get("strategy", {})),
+        capital=capital,
+        risk=risk,
+        strategy=copy.deepcopy(raw.get("strategy") or {}),
         ai=_section(raw, "ai", AIConfig),
         execution=_section(raw, "execution", ExecutionConfig),
-        session=SessionConfig(**session_raw),
+        session=_section({**raw, "session": session_raw}, "session", SessionConfig),
         data=_section(raw, "data", DataConfig),
         paths=_section(raw, "paths", PathsConfig),
         secrets=Secrets(
@@ -582,7 +686,7 @@ def load_config(path: str | Path = "config.yaml", env_path: str | Path = ".env")
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_config.py -v`
-Expected: 2 passed
+Expected: 13 passed
 
 - [ ] **Step 5: Write the real `config.yaml` at project root**
 
@@ -618,7 +722,7 @@ ai:
   on_failure: reject          # reject | pass_through
 
 execution:
-  slippage_pct: 0.05
+  slippage_pct: 0.05           # percent: 0.05 = 5 bps
   entry_buffer_pct: 0.1       # marketable limit buffer (live)
   bar_deadline_sec: 60
   interval_minutes: 5

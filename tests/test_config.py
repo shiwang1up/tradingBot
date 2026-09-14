@@ -1,4 +1,7 @@
+# tests/test_config.py
 import textwrap
+
+import pytest
 
 from tradebot.config import load_config
 
@@ -51,9 +54,14 @@ paths:
 """)
 
 
+def _write(tmp_path, text=YAML):
+    p = tmp_path / "config.yaml"
+    p.write_text(text)
+    return p
+
+
 def test_load_config_reads_all_sections(tmp_path):
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(YAML)
+    cfg_path = _write(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\nANTHROPIC_API_KEY=a\n")
 
@@ -72,10 +80,41 @@ def test_load_config_reads_all_sections(tmp_path):
     assert cfg.raw["capital"] == 100000
 
 
-def test_missing_env_yields_empty_secrets(tmp_path, monkeypatch):
-    for k in ("GROWW_API_KEY", "GROWW_TOTP_SECRET", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(YAML)
-    cfg = load_config(cfg_path, tmp_path / "missing.env")
+def test_missing_env_yields_empty_secrets(tmp_path):
+    cfg = load_config(_write(tmp_path), tmp_path / "missing.env")
     assert cfg.secrets.groww_api_key == ""
+
+
+def test_process_env_beats_dotenv(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROWW_API_KEY", "from-process")
+    env_path = tmp_path / ".env"
+    env_path.write_text("GROWW_API_KEY=from-file\n")
+    cfg = load_config(_write(tmp_path), env_path)
+    assert cfg.secrets.groww_api_key == "from-process"
+
+
+def test_unquoted_holiday_dates_are_normalised_to_iso_strings(tmp_path):
+    cfg = load_config(_write(tmp_path, YAML.replace('["2026-10-02"]', "[2026-10-02]")), tmp_path / "x.env")
+    assert cfg.session.holidays == ("2026-10-02",)
+
+
+@pytest.mark.parametrize("broken, fragment", [
+    (YAML.replace("cooldown_bars: 3", "cooldown_bar: 3"), "risk"),
+    (YAML.replace("  square_off: \"15:10\"\n", ""), "session"),
+    (YAML.replace("capital: 100000\n", ""), "capital"),
+    (YAML.replace("per_trade_pct: 1.0", "per_trade_pct: one"), "risk.per_trade_pct"),
+    (YAML.replace("max_open_positions: 5", "max_open_positions: 2.5"), "risk.max_open_positions"),
+    (YAML.replace("flatten_on_daily_cap: false", "flatten_on_daily_cap: nope"), "risk.flatten_on_daily_cap"),
+    (YAML.replace("mis_leverage: 5.0", "mis_leverage: 0.5"), "mis_leverage"),
+    ("", "capital"),
+])
+def test_bad_config_fails_at_load_with_key_named(tmp_path, broken, fragment):
+    with pytest.raises(ValueError) as e:
+        load_config(_write(tmp_path, broken), tmp_path / "x.env")
+    assert fragment in str(e.value)
+
+
+def test_strategy_params_are_not_aliased_to_raw(tmp_path):
+    cfg = load_config(_write(tmp_path), tmp_path / "x.env")
+    cfg.strategy["ema_rsi"]["fast"] = 999
+    assert cfg.raw["strategy"]["ema_rsi"]["fast"] == 9

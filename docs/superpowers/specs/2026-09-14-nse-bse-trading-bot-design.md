@@ -314,7 +314,8 @@ Every run stores its resolved config so reports are reproducible.
 ## 10. Configuration and secrets
 
 `config.yaml` sections: `capital`, `risk`, `strategy.ema_rsi`, `ai`,
-`execution`, `session`, `paths`. `.env` holds `GROWW_API_KEY`,
+`execution`, `session`, `data`, `paths`. Values are type-checked and range-checked
+at load time. Process environment takes precedence over `.env`. `.env` holds `GROWW_API_KEY`,
 `GROWW_TOTP_SECRET`, `ANTHROPIC_API_KEY`. `.env.example` ships with placeholders.
 `.env`, `data/`, and `KILL` are gitignored.
 

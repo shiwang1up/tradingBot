@@ -29,7 +29,7 @@ ai:
   on_failure: reject          # reject | pass_through
 
 execution:
-  slippage_pct: 0.05
+  slippage_pct: 0.05           # percent: 0.05 = 5 bps
   entry_buffer_pct: 0.1       # marketable limit buffer (live)
   bar_deadline_sec: 60
   interval_minutes: 5
