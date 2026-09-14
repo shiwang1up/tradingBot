@@ -1,0 +1,6 @@
+exchange,exchange_token,trading_symbol,groww_symbol,name,instrument_type,segment,series,isin,underlying_symbol,underlying_exchange_token,expiry_date,strike_price,lot_size,tick_size,freeze_quantity,is_reserved,buy_allowed,sell_allowed,feed_key
+NSE,2885,RELIANCE,NSE-RELIANCE,Reliance Industries,EQ,CASH,EQ,INE002A01018,,,,,1,0.05,,0,1,1,NSE_CASH_2885
+NSE,11536,TCS,NSE-TCS,Tata Consultancy,EQ,CASH,EQ,INE467B01029,,,,,1,0.05,,0,1,1,NSE_CASH_11536
+NSE,99999,SUSPENDED,NSE-SUSPENDED,Suspended Co,EQ,CASH,EQ,INE000000000,,,,,1,0.05,,0,0,0,NSE_CASH_99999
+NSE,35000,NIFTY26SEPFUT,NSE-NIFTY26SEPFUT,Nifty Fut,FUT,FNO,,,NIFTY,,2026-09-24,,75,0.05,,0,1,1,NSE_FNO_35000
+BSE,500325,RELIANCE,BSE-RELIANCE,Reliance Industries,EQ,CASH,A,INE002A01018,,,,,1,0.05,,0,1,1,BSE_CASH_500325
