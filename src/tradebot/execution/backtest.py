@@ -59,6 +59,11 @@ class BacktestBroker:
     def pending_symbols(self) -> set[str]:
         return set(self._pending)
 
+    def cancel_pending(self, ts: int, reason: str = "cancelled") -> list[Unfilled]:
+        out = [Unfilled(order, ts, reason) for order in self._pending.values()]
+        self._pending.clear()
+        return out
+
     def open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
 

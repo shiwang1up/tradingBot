@@ -3679,6 +3679,8 @@ class Broker(Protocol):
     def place_entry(self, order: ApprovedOrder) -> None:
         """Queue an entry. One position or pending entry per symbol: raise ValueError otherwise."""
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]: ...
+    def cancel_pending(self, ts: int, reason: str = "cancelled") -> list[Unfilled]:
+        """Withdraw every queued entry (day end, shutdown). Returns one Unfilled per order."""
     def square_off(self, ts: int, candles: dict[str, Candle], products: tuple[str, ...] = ("MIS",),
                    reason: str = "SQUARE_OFF") -> list[Closed]: ...
     def open_positions(self) -> dict[str, Position]: ...
@@ -3750,6 +3752,11 @@ class BacktestBroker:
 
     def pending_symbols(self) -> set[str]:
         return set(self._pending)
+
+    def cancel_pending(self, ts: int, reason: str = "cancelled") -> list[Unfilled]:
+        out = [Unfilled(order, ts, reason) for order in self._pending.values()]
+        self._pending.clear()
+        return out
 
     def open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
@@ -4083,6 +4090,160 @@ def test_golden_trades(repo, tmp_path):
         GOLDEN.write_text(json.dumps(got, indent=2))
         pytest.fail(f"golden file written to {GOLDEN}; inspect it, commit it, and re-run")
     assert got == json.loads(GOLDEN.read_text())
+
+
+# -- branches the golden run never reaches -----------------------------------------------------
+
+def test_record_entry_bar_stop_inserts_then_closes_same_position(repo, tmp_path):
+    from tradebot.execution.broker import Closed, Filled
+    from tradebot.types import ApprovedOrder, Position, Signal
+    cfg = make_config(tmp_path)
+    src = HistoricalSource([])
+    eng = BacktestEngine(cfg, repo, src, [], BacktestBroker(1e5, 0.0, 5.0), StubFilter(),
+                         SessionClock(cfg.session, 5), {}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    sig = Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 1000)
+    order = ApprovedOrder(sig, 10, "cidcidcidcidcid1")
+    repo.insert_order("t1", order.client_id, repo.insert_signal("t1", sig), "ENTRY", "BUY", 10, 100.0, "PENDING", 1000)
+    pos = Position("A", "MIS", "LONG", 10, 95.0, 99.0, 102.0, 1300, order.client_id, "ema_rsi")
+    pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = 1300, 95.0, "STOP", 0.0
+    eng._record([Filled(pos, order, 1300), Closed(pos)])
+    row = repo.list_positions("t1")[0]
+    assert row["closed_at"] == 1300 and row["exit_reason"] == "STOP"
+    assert repo.order_status("t1", order.client_id) == "FILLED"
+    assert repo.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+    assert eng._cooldown_until["A"] == 1300 + 3 * 300
+
+
+def test_tight_entry_buffer_produces_unfilled_orders(repo, tmp_path):
+    cfg = make_config(tmp_path, execution={"entry_buffer_pct": 0.001})
+    _run(repo, cfg, _candles())
+    n_unfilled = repo.conn.execute("SELECT COUNT(*) FROM orders WHERE status='UNFILLED'").fetchone()[0]
+    n_pending = repo.conn.execute("SELECT COUNT(*) FROM orders WHERE status='PENDING'").fetchone()[0]
+    assert n_unfilled > 0 and n_pending == 0
+    days = repo.daily_pnl("t1")
+    assert any(d["fill_rate"] < 1.0 for d in days)
+
+
+def test_no_order_is_left_pending_at_run_end(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles())
+    assert repo.conn.execute("SELECT COUNT(*) FROM orders WHERE status='PENDING'").fetchone()[0] == 0
+
+
+def test_ai_rejection_records_decision_and_places_nothing(repo, tmp_path):
+    from tradebot.types import Decision
+
+    class RejectAll:
+        kind = "reject_all"
+
+        def review(self, cands):
+            return [Decision(c.signal, False, "no", 0.0, self.kind) for c in cands]
+
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles(), ai=RejectAll())
+    assert repo.list_positions("t1") == []
+    assert repo.ai_rejection_count("t1") > 0
+
+
+def test_ai_returning_wrong_count_is_an_error(repo, tmp_path):
+    class Short:
+        kind = "short"
+
+        def review(self, cands):
+            return []
+
+    cfg = make_config(tmp_path)
+    with pytest.raises(RuntimeError, match="returned 0 decisions"):
+        _run(repo, cfg, _candles(), ai=Short())
+    assert repo.get_run("t1")["ended_at"] is not None  # run is closed even on failure
+
+
+def test_kill_switch_flatten_closes_open_positions(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    kill = Path(cfg.paths.kill_switch)
+
+    class ArmAfterFirstApproval(StubFilter):
+        def review(self, cands):
+            out = super().review(cands)
+            kill.write_text("flatten")  # engine reads it on the next bar, after the entry fills
+            return out
+
+    _run(repo, cfg, _candles(), ai=ArmAfterFirstApproval())
+    rows = repo.list_positions("t1")
+    assert rows and all(r["exit_reason"] == "FLATTEN" for r in rows)
+
+
+def test_daily_cap_flatten_fires_outside_entry_hours(repo, tmp_path):
+    cfg = make_config(tmp_path, risk={"daily_loss_cap_pct": 0.001, "flatten_on_daily_cap": True})
+    _run(repo, cfg, _candles())
+    rows = repo.list_positions("t1")
+    assert rows
+    assert "daily_loss_cap" in repo.rejection_counts("t1")
+    # once a loss breaches the tiny cap, anything still open that day is flattened, not stopped later
+    by_day = {}
+    for r in rows:
+        by_day.setdefault(date_of(r["opened_at"]), []).append(r)
+    for day_rows in by_day.values():
+        losses = [r for r in day_rows if r["pnl"] < 0]
+        if losses:
+            first_loss_close = min(r["closed_at"] for r in losses)
+            later_opens = [r for r in day_rows if r["opened_at"] > first_loss_close]
+            assert not later_opens
+
+
+def test_max_entries_per_day_is_enforced(repo, tmp_path):
+    cfg = make_config(tmp_path, risk={"max_entries_per_day": 1})
+    _run(repo, cfg, _candles())
+    assert all(d["entries_placed"] <= 1 for d in repo.daily_pnl("t1"))
+    assert "max_entries_per_day" in repo.rejection_counts("t1")
+
+
+def test_cnc_positions_carry_overnight_and_unrealised_is_day_scoped(repo, tmp_path):
+    from tests.helpers import BASE_CONFIG
+    params = {**BASE_CONFIG["strategy"]["ema_rsi"], "product": "CNC", "atr_stop_mult": 50.0, "reward_risk": 50.0}
+    cfg = make_config(tmp_path, strategy={"ema_rsi": params})
+    _run(repo, cfg, _candles())
+    rows = repo.list_positions("t1")
+    assert rows and all(r["closed_at"] is None for r in rows), "nothing can exit: held to run end"
+    days = repo.daily_pnl("t1")
+    assert len(days) == 2 and days[0]["unrealised"] != 0.0
+    # day 2's unrealised is today's move only, not the lifetime mark
+    total_mark = sum(sig * (repo.conn.execute("SELECT c FROM candles WHERE symbol=? ORDER BY ts DESC LIMIT 1",
+                                              (r["symbol"],)).fetchone()[0] - r["avg_price"]) * r["qty"]
+                     for r in rows for sig in ([1] if r["direction"] == "LONG" else [-1]))
+    assert days[0]["unrealised"] + days[1]["unrealised"] == pytest.approx(total_mark, abs=0.05)
+
+
+def test_disabled_strategy_is_reset_before_next_day(repo, tmp_path):
+    cfg = make_config(tmp_path)
+
+    class Boom(EmaRsiStrategy):
+        name = "boom"
+        resets: list = []
+
+        def reset(self, symbol):
+            self.resets.append(symbol)
+            super().reset(symbol)
+
+        def on_candle(self, c):
+            if date_of(c.ts) == date(2026, 9, 14) and c.ts >= ist_epoch(date(2026, 9, 14), "10:00"):
+                raise RuntimeError("bad indicator")
+            return super().on_candle(c)
+
+    candles = _candles()
+    repo.insert_candles(candles, interval=5)
+    src = HistoricalSource.from_repo(repo, ["A", "B"], 5, 0, 2_000_000_000)
+    strat = Boom(cfg.strategy["ema_rsi"])
+    eng = BacktestEngine(cfg, repo, src, [strat], BacktestBroker(cfg.capital, 0.05, 5.0, 0.1), StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1, "B": 1}, "t1")
+    eng.run()
+    day2_open = ist_epoch(date(2026, 9, 15), "09:15")
+    # resets happened for both symbols at the start of day 2, so early day-2 bars produce no signals
+    assert {"A", "B"} <= set(strat.resets)
+    early = [r for r in repo.conn.execute("SELECT bar_ts FROM signals WHERE run_id='t1'").fetchall()
+             if day2_open <= r["bar_ts"] < day2_open + 20 * 300]
+    assert not early
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -4098,9 +4259,13 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradebot.engine.loop'
 Order inside a bar:
   1. broker.on_bar        fills pending entries at this bar's open, simulates exits
   2. square-off           once per day, from the square-off bar onward (latched)
-  3. kill switch          flatten if requested
-  4. strategies           every candle feeds every strategy (indicators stay warm)
-  5. risk -> AI -> place  only if entries are allowed and the kill switch is off
+  3. daily loss cap       flatten once per day if breached and configured to
+  4. kill switch          flatten if requested
+  5. strategies           every candle feeds every strategy (indicators stay warm)
+  6. risk -> AI -> place  only if entries are allowed; a live kill switch rejects inside evaluate()
+
+"PnL for the day" (spec 6.2) is realised today plus the change in unrealised since the day
+opened, so a position carried overnight only charges today's move against today's cap.
 """
 from __future__ import annotations
 
@@ -4132,11 +4297,13 @@ class _DayCounters:
     fills: int = 0
     flattened: bool = False
     squared_off: bool = False
+    unrealised_at_open: float = 0.0  # mark of positions carried in from earlier days
 
 
 class BacktestEngine:
     def __init__(self, cfg: Config, repo: Repo, source: HistoricalSource, strategies: list[Strategy],
-                 broker: Broker, ai_filter: AIFilter, clock: SessionClock, lot_sizes: dict[str, int], run_id: str):
+                 broker: Broker, ai_filter: AIFilter, clock: SessionClock, lot_sizes: dict[str, int],
+                 run_id: str, mode: str = "backtest"):
         self.cfg = cfg
         self.repo = repo
         self.source = source
@@ -4146,6 +4313,7 @@ class BacktestEngine:
         self.clock = clock
         self.lot_sizes = lot_sizes
         self.run_id = run_id
+        self.mode = mode
         self.interval_sec = cfg.execution.interval_minutes * 60
         self._history: dict[str, deque[Candle]] = {}
         self._last_close: dict[str, float] = {}
@@ -4155,31 +4323,49 @@ class BacktestEngine:
 
     # -- lifecycle -------------------------------------------------------------
     def run(self) -> str:
-        self.repo.create_run(self.run_id, "backtest", int(time.time()), json.dumps(self.cfg.raw))
+        self.repo.create_run(self.run_id, self.mode, int(time.time()), json.dumps(self.cfg.raw, default=str))
         current: date | None = None
-        for ts in self.source.bar_timestamps():
-            d = date_of(ts)
-            if not self.clock.is_trading_day(d):
-                continue
-            if d != current:
-                if current is not None:
-                    self._end_day(current)
-                self._start_day()
-                current = d
-            self.process_bar(ts, self.source.candles_at(ts))
-        if current is not None:
-            self._end_day(current)
-        self.repo.end_run(self.run_id, int(time.time()))
+        last_ts = 0
+        try:
+            for ts in self.source.bar_timestamps():
+                d = date_of(ts)
+                if not self.clock.is_trading_day(d):
+                    continue
+                if d != current:
+                    if current is not None:
+                        self._end_day(current, last_ts)
+                    self._start_day()
+                    current = d
+                self.process_bar(ts, self.source.candles_at(ts))
+                last_ts = ts
+        finally:
+            # A mid-run exception still leaves a closed run and the last day's row for the report.
+            if current is not None:
+                self._end_day(current, last_ts)
+            self.repo.end_run(self.run_id, int(time.time()))
         return self.run_id
 
     def _start_day(self) -> None:
-        self._day = _DayCounters()
+        # A strategy disabled yesterday missed bars; its incremental indicators would silently
+        # carry state across the hole. Reset so is_ready() gates signals until they are warm again.
+        for strat in self.strategies:
+            if strat.name in self.disabled_strategies:
+                for sym in self._history:
+                    strat.reset(sym)
         self.disabled_strategies.clear()
+        self._day = _DayCounters(unrealised_at_open=self._unrealised_now())
 
-    def _end_day(self, d: date) -> None:
-        unrealised = self.broker.unrealised_pnl(self._last_close)
-        self.repo.upsert_daily_pnl(self.run_id, d.isoformat(), self._day.realised, unrealised,
+    def _end_day(self, d: date, ts: int) -> None:
+        # Entries queued on the last bar must not fill against tomorrow's open on a stale signal.
+        self._record(self.broker.cancel_pending(ts, "day_end"))
+        self.repo.upsert_daily_pnl(self.run_id, d.isoformat(), self._day.realised, self._unrealised_today(),
                                    self._day.fills, self._day.entries_placed)
+
+    def _unrealised_now(self) -> float:
+        return self.broker.unrealised_pnl(self._last_close)
+
+    def _unrealised_today(self) -> float:
+        return self._unrealised_now() - self._day.unrealised_at_open
 
     # -- per bar ----------------------------------------------------------------
     def process_bar(self, ts: int, candles: dict[str, Candle]) -> None:
@@ -4192,6 +4378,11 @@ class BacktestEngine:
             # Latched per day: a missing bar at exactly the square-off time cannot skip it.
             self._record(self.broker.square_off(ts, candles))
             self._day.squared_off = True
+
+        if (self.cfg.risk.flatten_on_daily_cap and not self._day.flattened
+                and self._state().daily_loss_breached(self.cfg.risk)):
+            log.warning("daily loss cap breached at %s; flattening", ts)
+            self._flatten(ts, candles)
 
         kill = read_kill_switch(self.cfg.paths.kill_switch)
         if kill.flatten and not self._day.flattened:
@@ -4206,7 +4397,7 @@ class BacktestEngine:
                 sid = self.repo.insert_signal(self.run_id, sig)
                 self.repo.insert_risk_decision(self.run_id, sid, False, "entries_closed", 0)
             return
-        self._place(ts, candles, signals, kill)  # a live kill switch is rejected inside evaluate()
+        self._place(ts, signals, kill)
 
     def _run_strategies(self, candles: dict[str, Candle]) -> list[tuple[Strategy, Signal]]:
         out: list[tuple[Strategy, Signal]] = []
@@ -4227,16 +4418,19 @@ class BacktestEngine:
     def _lev(self, product: str) -> float:
         return self.cfg.risk.mis_leverage if product == "MIS" else 1.0
 
-    def _place(self, ts: int, candles: dict[str, Candle], signals: list[tuple[Strategy, Signal]], kill: KillState) -> None:
-        state = PortfolioState(
+    def _state(self) -> PortfolioState:
+        return PortfolioState(
             capital=self.cfg.capital,
             open_symbols=set(self.broker.open_positions()),
             pending_symbols=self.broker.pending_symbols(),
             realised_today=self._day.realised,
-            unrealised=self.broker.unrealised_pnl(self._last_close),
+            unrealised=self._unrealised_today(),
             entries_today=self._day.entries_placed,
             cooldown_until=dict(self._cooldown_until),
         )
+
+    def _place(self, ts: int, signals: list[tuple[Strategy, Signal]], kill: KillState) -> None:
+        state = self._state()
         reserved_cash = 0.0  # margin claimed by approvals earlier in this same bar
         batch: list[tuple[int, ApprovedOrder, Candidate]] = []
         for strat, sig in signals:
@@ -4245,10 +4439,10 @@ class BacktestEngine:
             res = evaluate(sig, state, self.cfg.risk, self.lot_sizes.get(sig.symbol, 1), margin, kill)
             if isinstance(res, Rejection):
                 self.repo.insert_risk_decision(self.run_id, sid, False, res.reason, 0)
-                if res.reason == "daily_loss_cap" and self.cfg.risk.flatten_on_daily_cap and not self._day.flattened:
-                    self._flatten(ts, candles)
                 continue
             self.repo.insert_risk_decision(self.run_id, sid, True, "ok", res.quantity)
+            # Deliberately conservative within the bar: a risk-approved candidate holds its slot,
+            # symbol and margin even if the AI then rejects it. The day counter counts placements.
             state.pending_symbols.add(sig.symbol)
             state.entries_today += 1
             reserved_cash += sig.entry_price * res.quantity / self._lev(sig.product)
@@ -4283,7 +4477,9 @@ class BacktestEngine:
                 ev.position.db_id = self.repo.insert_position(self.run_id, ev.position)
                 self.repo.update_order(self.run_id, ev.order.client_id, "FILLED", ev.ts)
                 oid = self.repo.order_id(self.run_id, ev.order.client_id)
-                if oid is not None:
+                if oid is None:
+                    log.error("fill for unknown order %s %s", ev.position.symbol, ev.order.client_id)
+                else:
                     self.repo.insert_fill(oid, ev.position.quantity, ev.position.avg_price, ev.ts)
                 self._day.fills += 1
             elif isinstance(ev, Unfilled):
@@ -4295,16 +4491,17 @@ class BacktestEngine:
                     self.repo.close_position(p.db_id, p.closed_ts, p.exit_price, p.exit_reason, p.pnl)
                 self._day.realised += p.pnl or 0.0
                 if p.exit_reason == "STOP":
+                    # Wall-clock cooldown: an overnight gap absorbs it, which is intended (intraday rule).
                     self._cooldown_until[p.symbol] = p.closed_ts + self.cfg.risk.cooldown_bars * self.interval_sec
 ```
 
 - [ ] **Step 5: Run tests; first run of the golden test writes the fixture**
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 6 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
+Expected: 16 passed, 1 failed (`test_golden_trades` with "golden file written"). Open `tests/fixtures/golden_trades.json`, confirm it has 7 trades with STOP, TARGET and SQUARE_OFF exits and prices near 100, then:
 
 Run: `.venv/bin/pytest tests/test_engine.py -v`
-Expected: 7 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
+Expected: 17 passed. The fixture should show 7 trades: 4 STOP, 1 TARGET and 2 SQUARE_OFF exits.
 
 - [ ] **Step 6: Commit**
 

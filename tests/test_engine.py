@@ -137,3 +137,157 @@ def test_golden_trades(repo, tmp_path):
         GOLDEN.write_text(json.dumps(got, indent=2))
         pytest.fail(f"golden file written to {GOLDEN}; inspect it, commit it, and re-run")
     assert got == json.loads(GOLDEN.read_text())
+
+
+# -- branches the golden run never reaches -----------------------------------------------------
+
+def test_record_entry_bar_stop_inserts_then_closes_same_position(repo, tmp_path):
+    from tradebot.execution.broker import Closed, Filled
+    from tradebot.types import ApprovedOrder, Position, Signal
+    cfg = make_config(tmp_path)
+    src = HistoricalSource([])
+    eng = BacktestEngine(cfg, repo, src, [], BacktestBroker(1e5, 0.0, 5.0), StubFilter(),
+                         SessionClock(cfg.session, 5), {}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    sig = Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 1000)
+    order = ApprovedOrder(sig, 10, "cidcidcidcidcid1")
+    repo.insert_order("t1", order.client_id, repo.insert_signal("t1", sig), "ENTRY", "BUY", 10, 100.0, "PENDING", 1000)
+    pos = Position("A", "MIS", "LONG", 10, 95.0, 99.0, 102.0, 1300, order.client_id, "ema_rsi")
+    pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = 1300, 95.0, "STOP", 0.0
+    eng._record([Filled(pos, order, 1300), Closed(pos)])
+    row = repo.list_positions("t1")[0]
+    assert row["closed_at"] == 1300 and row["exit_reason"] == "STOP"
+    assert repo.order_status("t1", order.client_id) == "FILLED"
+    assert repo.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+    assert eng._cooldown_until["A"] == 1300 + 3 * 300
+
+
+def test_tight_entry_buffer_produces_unfilled_orders(repo, tmp_path):
+    cfg = make_config(tmp_path, execution={"entry_buffer_pct": 0.001})
+    _run(repo, cfg, _candles())
+    n_unfilled = repo.conn.execute("SELECT COUNT(*) FROM orders WHERE status='UNFILLED'").fetchone()[0]
+    n_pending = repo.conn.execute("SELECT COUNT(*) FROM orders WHERE status='PENDING'").fetchone()[0]
+    assert n_unfilled > 0 and n_pending == 0
+    days = repo.daily_pnl("t1")
+    assert any(d["fill_rate"] < 1.0 for d in days)
+
+
+def test_no_order_is_left_pending_at_run_end(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles())
+    assert repo.conn.execute("SELECT COUNT(*) FROM orders WHERE status='PENDING'").fetchone()[0] == 0
+
+
+def test_ai_rejection_records_decision_and_places_nothing(repo, tmp_path):
+    from tradebot.types import Decision
+
+    class RejectAll:
+        kind = "reject_all"
+
+        def review(self, cands):
+            return [Decision(c.signal, False, "no", 0.0, self.kind) for c in cands]
+
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles(), ai=RejectAll())
+    assert repo.list_positions("t1") == []
+    assert repo.ai_rejection_count("t1") > 0
+
+
+def test_ai_returning_wrong_count_is_an_error(repo, tmp_path):
+    class Short:
+        kind = "short"
+
+        def review(self, cands):
+            return []
+
+    cfg = make_config(tmp_path)
+    with pytest.raises(RuntimeError, match="returned 0 decisions"):
+        _run(repo, cfg, _candles(), ai=Short())
+    assert repo.get_run("t1")["ended_at"] is not None  # run is closed even on failure
+
+
+def test_kill_switch_flatten_closes_open_positions(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    kill = Path(cfg.paths.kill_switch)
+
+    class ArmAfterFirstApproval(StubFilter):
+        def review(self, cands):
+            out = super().review(cands)
+            kill.write_text("flatten")  # engine reads it on the next bar, after the entry fills
+            return out
+
+    _run(repo, cfg, _candles(), ai=ArmAfterFirstApproval())
+    rows = repo.list_positions("t1")
+    assert rows and all(r["exit_reason"] == "FLATTEN" for r in rows)
+
+
+def test_daily_cap_flatten_fires_outside_entry_hours(repo, tmp_path):
+    cfg = make_config(tmp_path, risk={"daily_loss_cap_pct": 0.001, "flatten_on_daily_cap": True})
+    _run(repo, cfg, _candles())
+    rows = repo.list_positions("t1")
+    assert rows
+    assert "daily_loss_cap" in repo.rejection_counts("t1")
+    # once a loss breaches the tiny cap, anything still open that day is flattened, not stopped later
+    by_day = {}
+    for r in rows:
+        by_day.setdefault(date_of(r["opened_at"]), []).append(r)
+    for day_rows in by_day.values():
+        losses = [r for r in day_rows if r["pnl"] < 0]
+        if losses:
+            first_loss_close = min(r["closed_at"] for r in losses)
+            later_opens = [r for r in day_rows if r["opened_at"] > first_loss_close]
+            assert not later_opens
+
+
+def test_max_entries_per_day_is_enforced(repo, tmp_path):
+    cfg = make_config(tmp_path, risk={"max_entries_per_day": 1})
+    _run(repo, cfg, _candles())
+    assert all(d["entries_placed"] <= 1 for d in repo.daily_pnl("t1"))
+    assert "max_entries_per_day" in repo.rejection_counts("t1")
+
+
+def test_cnc_positions_carry_overnight_and_unrealised_is_day_scoped(repo, tmp_path):
+    from tests.helpers import BASE_CONFIG
+    params = {**BASE_CONFIG["strategy"]["ema_rsi"], "product": "CNC", "atr_stop_mult": 50.0, "reward_risk": 50.0}
+    cfg = make_config(tmp_path, strategy={"ema_rsi": params})
+    _run(repo, cfg, _candles())
+    rows = repo.list_positions("t1")
+    assert rows and all(r["closed_at"] is None for r in rows), "nothing can exit: held to run end"
+    days = repo.daily_pnl("t1")
+    assert len(days) == 2 and days[0]["unrealised"] != 0.0
+    # day 2's unrealised is today's move only, not the lifetime mark
+    total_mark = sum(sig * (repo.conn.execute("SELECT c FROM candles WHERE symbol=? ORDER BY ts DESC LIMIT 1",
+                                              (r["symbol"],)).fetchone()[0] - r["avg_price"]) * r["qty"]
+                     for r in rows for sig in ([1] if r["direction"] == "LONG" else [-1]))
+    assert days[0]["unrealised"] + days[1]["unrealised"] == pytest.approx(total_mark, abs=0.05)
+
+
+def test_disabled_strategy_is_reset_before_next_day(repo, tmp_path):
+    cfg = make_config(tmp_path)
+
+    class Boom(EmaRsiStrategy):
+        name = "boom"
+        resets: list = []
+
+        def reset(self, symbol):
+            self.resets.append(symbol)
+            super().reset(symbol)
+
+        def on_candle(self, c):
+            if date_of(c.ts) == date(2026, 9, 14) and c.ts >= ist_epoch(date(2026, 9, 14), "10:00"):
+                raise RuntimeError("bad indicator")
+            return super().on_candle(c)
+
+    candles = _candles()
+    repo.insert_candles(candles, interval=5)
+    src = HistoricalSource.from_repo(repo, ["A", "B"], 5, 0, 2_000_000_000)
+    strat = Boom(cfg.strategy["ema_rsi"])
+    eng = BacktestEngine(cfg, repo, src, [strat], BacktestBroker(cfg.capital, 0.05, 5.0, 0.1), StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1, "B": 1}, "t1")
+    eng.run()
+    day2_open = ist_epoch(date(2026, 9, 15), "09:15")
+    # resets happened for both symbols at the start of day 2, so early day-2 bars produce no signals
+    assert {"A", "B"} <= set(strat.resets)
+    early = [r for r in repo.conn.execute("SELECT bar_ts FROM signals WHERE run_id='t1'").fetchall()
+             if day2_open <= r["bar_ts"] < day2_open + 20 * 300]
+    assert not early
