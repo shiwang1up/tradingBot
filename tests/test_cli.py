@@ -40,6 +40,122 @@ def test_backtest_without_data_fails_clearly(tmp_path):
     assert "fetch-data" in res.output
 
 
+def _invoke(tmp_path, *args):
+    return CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"), *args])
+
+
+def test_missing_credentials_is_a_clean_error(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [RELIANCE]\n")
+    (tmp_path / "instruments.csv").write_text(
+        "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+        "NSE,2885,RELIANCE,CASH,EQ,1,0.05,1,1\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+    res = _invoke(tmp_path, "fetch-data")
+    assert res.exit_code == 1 and "Error: GROWW_API_KEY and GROWW_TOTP_SECRET must be set" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_groww_auth_failure_is_a_clean_error(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [RELIANCE]\n")
+    (tmp_path / "instruments.csv").write_text(
+        "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+        "NSE,2885,RELIANCE,CASH,EQ,1,0.05,1,1\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+
+    class Auth:
+        def __init__(self, k, s):
+            pass
+
+        def fetch_candles(self, *a):
+            raise type("GrowwAPIAuthenticationException", (Exception,), {})("bad totp")
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Auth)
+    res = _invoke(tmp_path, "fetch-data", "--sleep", "0")
+    assert res.exit_code == 1 and "Error: GrowwAPIAuthenticationException: bad totp" in res.output
+
+
+def test_fetch_data_isolates_symbol_failures(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A, B, C]\n")
+    hdr = "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+    (tmp_path / "instruments.csv").write_text(hdr + "".join(f"NSE,{i},{s},CASH,EQ,1,0.05,1,1\n" for i, s in enumerate("ABC")))
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+
+    class Flaky:
+        def __init__(self, k, s):
+            pass
+
+        def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
+            if symbol == "B":
+                raise type("GrowwAPINotFoundException", (Exception,), {})("no such symbol")
+            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Flaky)
+    res = _invoke(tmp_path, "fetch-data", "--days", "5", "--sleep", "0")
+    assert res.exit_code == 1
+    assert "failed: B" in res.output and "1 symbol(s) failed: B" in res.output
+    repo = Repo(connect(make_config(tmp_path).paths.db))
+    assert repo.latest_candle_ts("A", 5) is not None and repo.latest_candle_ts("C", 5) is not None
+
+
+def test_run_id_reuse_and_reversed_range_are_clean_errors(tmp_path):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "dup")
+    assert ok.exit_code == 0, ok.output
+    again = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "dup")
+    assert again.exit_code == 1 and "already exists" in again.output
+    rev = _invoke(tmp_path, "backtest", "--start", "2026-09-15", "--end", "2026-09-14")
+    assert rev.exit_code == 1 and "--start must not be after --end" in rev.output
+
+
+def test_bad_config_and_unknown_run_are_clean_errors(tmp_path):
+    cfg = make_config(tmp_path)
+    (tmp_path / "config.yaml").write_text((tmp_path / "config.yaml").read_text().replace("per_trade_pct: 1.0", "per_trade_pct: -1"))
+    res = _invoke(tmp_path, "report", "--run", "x")
+    assert res.exit_code == 1 and res.output.startswith("Error: config.yaml")
+    make_config(tmp_path)
+    res = _invoke(tmp_path, "report", "--run", "nope")
+    assert res.exit_code == 1 and "no database" in res.output
+
+
+def test_env_is_read_next_to_config_or_from_override(tmp_path, monkeypatch):
+    cfg_dir = tmp_path / "cfgs"
+    cfg_dir.mkdir()
+    make_config(cfg_dir)
+    (cfg_dir / ".env").write_text("GROWW_API_KEY=beside-config\nGROWW_TOTP_SECRET=s\n")
+    seen = {}
+
+    class Spy:
+        def __init__(self, k, s):
+            seen["key"] = k
+
+        def fetch_candles(self, *a):
+            return []
+
+    (cfg_dir / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    (cfg_dir / "instruments.csv").write_text(
+        "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+        "NSE,1,A,CASH,EQ,1,0.05,1,1\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+    monkeypatch.setattr(cli, "GrowwAdapter", Spy)
+    monkeypatch.chdir(tmp_path)  # CWD has no .env
+    res = CliRunner().invoke(cli.main, ["--config", str(cfg_dir / "config.yaml"), "fetch-data", "--sleep", "0"])
+    assert res.exit_code == 0, res.output
+    assert seen["key"] == "beside-config"
+    # A real CLI call is a fresh process; here the first invocation populated os.environ and
+    # process env deliberately beats .env, so clear it before testing the override.
+    for name in ("GROWW_API_KEY", "GROWW_TOTP_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "other.env").write_text("GROWW_API_KEY=override\nGROWW_TOTP_SECRET=s\n")
+    res = CliRunner().invoke(cli.main, ["--config", str(cfg_dir / "config.yaml"), "--env", str(tmp_path / "other.env"),
+                                        "fetch-data", "--sleep", "0"])
+    assert res.exit_code == 0 and seen["key"] == "override"
+
+
 def test_fetch_data_uses_adapter_and_instruments(tmp_path, monkeypatch):
     cfg = make_config(tmp_path)
     (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [RELIANCE, NOSUCH]\n")
@@ -61,7 +177,7 @@ def test_fetch_data_uses_adapter_and_instruments(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "GrowwAdapter", FakeAdapter)
     monkeypatch.setattr(cli, "download_instruments", lambda p: p)
     monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
-    res = CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"), "fetch-data", "--days", "20"])
+    res = CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"), "fetch-data", "--days", "20", "--sleep", "0"])
     assert res.exit_code == 0, res.output
     assert calls and all(c[0] == "RELIANCE" and c[1] == "NSE" and c[2] == 5 for c in calls)
     assert "dropping NOSUCH: not_found" in res.output
