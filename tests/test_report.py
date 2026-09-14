@@ -36,11 +36,13 @@ def test_build_summary_metrics(repo):
     assert s.total_pnl == pytest.approx(5.0)
     assert s.avg_r == pytest.approx((2 - 1 - 1 + 0.5) / 4)
     assert s.max_drawdown == pytest.approx(20.0)  # peak 20 after t1, trough 0 after t3
+    assert s.max_drawdown_equity == pytest.approx(0.0)  # single positive daily row
+    assert s.r_trades == 4
     assert s.exit_reasons == {"TARGET": 1, "STOP": 2, "SQUARE_OFF": 1}
     assert s.risk_rejections == {"cooldown": 1}
     assert s.ai_rejections == 1
     assert s.open_positions == 1
-    assert s.adopted_pnl == pytest.approx(-10.0)
+    assert s.adopted_trades == 1 and s.adopted_pnl == pytest.approx(-10.0)
     assert [d["date"] for d in s.days] == ["2026-09-14"]
 
 
@@ -55,3 +57,38 @@ def test_format_summary_mentions_key_numbers(repo):
 def test_unknown_run_raises(repo):
     with pytest.raises(ValueError):
         build_summary(repo, "nope")
+
+
+def test_empty_run_reports_without_dividing_by_zero(repo):
+    repo.create_run("empty", "backtest", 0, "{}")
+    s = build_summary(repo, "empty")
+    assert (s.trades, s.win_rate, s.avg_r, s.r_trades, s.max_drawdown, s.max_drawdown_equity) == (0, 0.0, 0.0, 0, 0.0, 0.0)
+    text = format_summary(s)
+    assert "n/a" in text and "none" in text
+
+
+def test_zero_risk_trade_is_excluded_from_avg_r_and_null_pnl_tolerated(repo):
+    repo.create_run("r2", "backtest", 0, "{}")
+    pid = repo.insert_position("r2", Position("Z", "MIS", "LONG", 10, 100.0, 100.0, None, 1, "c", "s"))
+    repo.close_position(pid, 2, 105.0, "TARGET", 50.0)
+    pid2 = repo.insert_position("r2", Position("N", "MIS", "LONG", 1, 100.0, 99.0, None, 3, "c2", "s"))
+    repo.close_position(pid2, 4, None, "SQUARE_OFF", None)
+    s = build_summary(repo, "r2")
+    assert s.trades == 2 and s.r_trades == 1 and s.avg_r == 0.0 and s.total_pnl == 50.0
+
+
+def test_equity_drawdown_counts_open_excursions(repo):
+    repo.create_run("r3", "backtest", 0, "{}")
+    repo.upsert_daily_pnl("r3", "2026-09-14", realised=0.0, unrealised=-800.0, fills=1, entries_placed=1)
+    repo.upsert_daily_pnl("r3", "2026-09-15", realised=0.0, unrealised=800.0, fills=0, entries_placed=0)
+    s = build_summary(repo, "r3")
+    assert s.max_drawdown == 0.0 and s.max_drawdown_equity == pytest.approx(800.0)
+
+
+def test_daily_table_alignment_survives_large_numbers(repo):
+    repo.create_run("r4", "backtest", 0, "{}")
+    repo.upsert_daily_pnl("r4", "2026-09-14", realised=12_345_678.9, unrealised=-2_345.5, fills=4, entries_placed=5)
+    repo.upsert_daily_pnl("r4", "2026-09-15", realised=5.0, unrealised=0.0, fills=12345, entries_placed=99999)
+    lines = format_summary(build_summary(repo, "r4")).splitlines()
+    table = [ln for ln in lines if ln[:4] in ("Date", "2026")]
+    assert len({len(ln) for ln in table}) == 1, "header and every row have identical width"

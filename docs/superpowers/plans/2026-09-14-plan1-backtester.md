@@ -4566,7 +4566,6 @@ git commit -m "feat: backtest engine loop with golden trade fixture"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_report.py
 import pytest
 
 from tradebot.report.summary import build_summary, format_summary
@@ -4605,11 +4604,13 @@ def test_build_summary_metrics(repo):
     assert s.total_pnl == pytest.approx(5.0)
     assert s.avg_r == pytest.approx((2 - 1 - 1 + 0.5) / 4)
     assert s.max_drawdown == pytest.approx(20.0)  # peak 20 after t1, trough 0 after t3
+    assert s.max_drawdown_equity == pytest.approx(0.0)  # single positive daily row
+    assert s.r_trades == 4
     assert s.exit_reasons == {"TARGET": 1, "STOP": 2, "SQUARE_OFF": 1}
     assert s.risk_rejections == {"cooldown": 1}
     assert s.ai_rejections == 1
     assert s.open_positions == 1
-    assert s.adopted_pnl == pytest.approx(-10.0)
+    assert s.adopted_trades == 1 and s.adopted_pnl == pytest.approx(-10.0)
     assert [d["date"] for d in s.days] == ["2026-09-14"]
 
 
@@ -4624,6 +4625,41 @@ def test_format_summary_mentions_key_numbers(repo):
 def test_unknown_run_raises(repo):
     with pytest.raises(ValueError):
         build_summary(repo, "nope")
+
+
+def test_empty_run_reports_without_dividing_by_zero(repo):
+    repo.create_run("empty", "backtest", 0, "{}")
+    s = build_summary(repo, "empty")
+    assert (s.trades, s.win_rate, s.avg_r, s.r_trades, s.max_drawdown, s.max_drawdown_equity) == (0, 0.0, 0.0, 0, 0.0, 0.0)
+    text = format_summary(s)
+    assert "n/a" in text and "none" in text
+
+
+def test_zero_risk_trade_is_excluded_from_avg_r_and_null_pnl_tolerated(repo):
+    repo.create_run("r2", "backtest", 0, "{}")
+    pid = repo.insert_position("r2", Position("Z", "MIS", "LONG", 10, 100.0, 100.0, None, 1, "c", "s"))
+    repo.close_position(pid, 2, 105.0, "TARGET", 50.0)
+    pid2 = repo.insert_position("r2", Position("N", "MIS", "LONG", 1, 100.0, 99.0, None, 3, "c2", "s"))
+    repo.close_position(pid2, 4, None, "SQUARE_OFF", None)
+    s = build_summary(repo, "r2")
+    assert s.trades == 2 and s.r_trades == 1 and s.avg_r == 0.0 and s.total_pnl == 50.0
+
+
+def test_equity_drawdown_counts_open_excursions(repo):
+    repo.create_run("r3", "backtest", 0, "{}")
+    repo.upsert_daily_pnl("r3", "2026-09-14", realised=0.0, unrealised=-800.0, fills=1, entries_placed=1)
+    repo.upsert_daily_pnl("r3", "2026-09-15", realised=0.0, unrealised=800.0, fills=0, entries_placed=0)
+    s = build_summary(repo, "r3")
+    assert s.max_drawdown == 0.0 and s.max_drawdown_equity == pytest.approx(800.0)
+
+
+def test_daily_table_alignment_survives_large_numbers(repo):
+    repo.create_run("r4", "backtest", 0, "{}")
+    repo.upsert_daily_pnl("r4", "2026-09-14", realised=12_345_678.9, unrealised=-2_345.5, fills=4, entries_placed=5)
+    repo.upsert_daily_pnl("r4", "2026-09-15", realised=5.0, unrealised=0.0, fills=12345, entries_placed=99999)
+    lines = format_summary(build_summary(repo, "r4")).splitlines()
+    table = [ln for ln in lines if ln[:4] in ("Date", "2026")]
+    assert len({len(ln) for ln in table}) == 1, "header and every row have identical width"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -4634,7 +4670,15 @@ Expected: FAIL with `ModuleNotFoundError`
 - [ ] **Step 3: Write `src/tradebot/report/summary.py`**
 
 ```python
-"""Run summary: trade statistics, drawdown, rejection counts, daily PnL."""
+"""Run summary: trade statistics, drawdown, rejection counts, daily PnL.
+
+Conventions:
+- Strategy statistics exclude adopted positions (spec 8.5); their PnL is reported separately.
+- A trade with pnl == 0 counts as a loss so wins + losses == trades.
+- "Max drawdown (closed)" is the peak-to-trough of cumulative realised PnL over closed trades.
+  "Max drawdown (equity)" is over the daily rows' realised + unrealised, so open-position
+  excursions count. Both are 2-dp rupee figures, not percentages.
+"""
 from __future__ import annotations
 
 from collections import Counter
@@ -4653,13 +4697,25 @@ class Summary:
     win_rate: float
     total_pnl: float
     avg_r: float
-    max_drawdown: float
-    exit_reasons: dict[str, int]
-    risk_rejections: dict[str, int]
+    r_trades: int              # trades with non-zero risk that entered avg_r
+    max_drawdown: float        # closed-trade, realised only
+    max_drawdown_equity: float  # daily realised + unrealised
+    exit_reasons: dict
+    risk_rejections: dict
     ai_rejections: int
     open_positions: int
+    adopted_trades: int
     adopted_pnl: float
-    days: list[dict] = field(default_factory=list)
+    days: list = field(default_factory=list)
+
+
+def _max_drawdown(increments) -> float:
+    cum = peak = mdd = 0.0
+    for p in increments:
+        cum += p
+        peak = max(peak, cum)
+        mdd = max(mdd, peak - cum)
+    return mdd
 
 
 def build_summary(repo: Repo, run_id: str) -> Summary:
@@ -4668,17 +4724,14 @@ def build_summary(repo: Repo, run_id: str) -> Summary:
         raise ValueError(f"unknown run: {run_id}")
     rows = repo.list_positions(run_id)
     closed = sorted((r for r in rows if r["closed_at"] is not None and not r["adopted"]), key=lambda r: r["closed_at"])
-    pnls = [r["pnl"] for r in closed]
+    adopted_closed = [r for r in rows if r["closed_at"] is not None and r["adopted"]]
+    pnls = [r["pnl"] or 0.0 for r in closed]
     rs = []
     for r in closed:
         risk = abs(r["avg_price"] - r["stop"]) * r["qty"]
         if risk > 0:
-            rs.append(r["pnl"] / risk)
-    cum = peak = mdd = 0.0
-    for p in pnls:
-        cum += p
-        peak = max(peak, cum)
-        mdd = max(mdd, peak - cum)
+            rs.append((r["pnl"] or 0.0) / risk)
+    days = [dict(d) for d in repo.daily_pnl(run_id)]
     wins = sum(1 for p in pnls if p > 0)
     return Summary(
         run_id=run_id,
@@ -4689,45 +4742,55 @@ def build_summary(repo: Repo, run_id: str) -> Summary:
         win_rate=wins / len(closed) if closed else 0.0,
         total_pnl=sum(pnls),
         avg_r=sum(rs) / len(rs) if rs else 0.0,
-        max_drawdown=mdd,
+        r_trades=len(rs),
+        max_drawdown=_max_drawdown(pnls),
+        max_drawdown_equity=_max_drawdown(d["realised"] + d["unrealised"] for d in days),
         exit_reasons=dict(Counter(r["exit_reason"] for r in closed)),
         risk_rejections=repo.rejection_counts(run_id),
         ai_rejections=repo.ai_rejection_count(run_id),
         open_positions=sum(1 for r in rows if r["closed_at"] is None),
-        adopted_pnl=sum(r["pnl"] or 0.0 for r in rows if r["adopted"] and r["closed_at"] is not None),
-        days=[dict(d) for d in repo.daily_pnl(run_id)],
+        adopted_trades=len(adopted_closed),
+        adopted_pnl=sum(r["pnl"] or 0.0 for r in adopted_closed),
+        days=days,
     )
 
 
+def _counts(d: dict) -> str:
+    return ", ".join(f"{k} {v}" for k, v in sorted(d.items())) or "none"
+
+
 def format_summary(s: Summary) -> str:
+    win_rate = f"{s.win_rate * 100:.1f}%" if s.trades else "n/a"
     lines = [
         f"Run {s.run_id} ({s.mode})",
         "Survivorship note: universe.yaml is today's constituent list; past-period results are overstated.",
         "",
-        f"Trades        {s.trades}   (wins {s.wins}, losses {s.losses})",
-        f"Win rate      {s.win_rate * 100:.1f}%",
-        f"Total PnL     {s.total_pnl:,.2f}",
-        f"Avg R         {s.avg_r:.2f}",
-        f"Max drawdown  {s.max_drawdown:,.2f}",
-        f"Exit reasons  {s.exit_reasons}",
-        f"Risk rejects  {s.risk_rejections}",
-        f"AI rejects    {s.ai_rejections}",
-        f"Open now      {s.open_positions}",
+        f"Trades                {s.trades}   (wins {s.wins}, losses {s.losses})",
+        f"Win rate              {win_rate}",
+        f"Total PnL             {s.total_pnl:,.2f}",
+        f"Avg R                 {s.avg_r:.2f}   (over {s.r_trades} of {s.trades} trades with non-zero risk)",
+        f"Max drawdown (closed) {s.max_drawdown:,.2f}   realised, closed trades only",
+        f"Max drawdown (equity) {s.max_drawdown_equity:,.2f}   daily realised + unrealised",
+        f"Exit reasons          {_counts(s.exit_reasons)}",
+        f"Risk rejects          {_counts(s.risk_rejections)}",
+        f"AI rejects            {s.ai_rejections}",
+        f"Open now              {s.open_positions}",
     ]
-    if s.adopted_pnl:
-        lines.append(f"Adopted PnL   {s.adopted_pnl:,.2f} (excluded from stats above)")
+    if s.adopted_trades:
+        lines.append(f"Adopted               {s.adopted_trades} trades, PnL {s.adopted_pnl:,.2f} (excluded from stats above)")
     if s.days:
-        lines += ["", "Date        Realised    Unrealised  Fills/Entries  Fill rate"]
+        lines += ["", f"{'Date':<10}  {'Realised':>14}  {'Unrealised':>14}  {'Fills/Entries':>14}  {'Fill rate':>9}"]
         for d in s.days:
-            lines.append(f"{d['date']}  {d['realised']:>10,.2f}  {d['unrealised']:>10,.2f}  "
-                         f"{d['fills']:>5}/{d['entries_placed']:<7}  {d['fill_rate'] * 100:.0f}%")
+            fe = f"{d['fills']}/{d['entries_placed']}"
+            lines.append(f"{d['date']:<10}  {d['realised']:>14,.2f}  {d['unrealised']:>14,.2f}  {fe:>14}  "
+                         f"{d['fill_rate'] * 100:>8.0f}%")
     return "\n".join(lines)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_report.py -v`
-Expected: 3 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
