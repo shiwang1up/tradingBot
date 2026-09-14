@@ -18,6 +18,7 @@ class Filled:
 class Unfilled:
     order: ApprovedOrder
     ts: int
+    reason: str = "no_candle"  # no_candle | beyond_buffer
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,8 @@ BrokerEvent = Union[Filled, Unfilled, Closed]  # runtime union; `|` needs 3.10+
 
 
 class Broker(Protocol):
-    def place_entry(self, order: ApprovedOrder) -> None: ...
+    def place_entry(self, order: ApprovedOrder) -> None:
+        """Queue an entry. One position or pending entry per symbol: raise ValueError otherwise."""
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]: ...
     def square_off(self, ts: int, candles: dict[str, Candle], products: tuple[str, ...] = ("MIS",),
                    reason: str = "SQUARE_OFF") -> list[Closed]: ...

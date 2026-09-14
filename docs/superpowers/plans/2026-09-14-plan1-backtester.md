@@ -3422,10 +3422,11 @@ git commit -m "feat: AI filter interface with stub"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_backtest_broker.py
 import pytest
 
-from tradebot.execution.backtest import STOP_FIRST_ON_SAME_BAR, BacktestBroker
+from tradebot.execution.backtest import STOP_FIRST_ON_SAME_BAR, BacktestBroker, check_exit
+from tradebot.execution.broker import Broker
+from tradebot.types import Position
 from tradebot.execution.broker import Closed, Filled, Unfilled
 from tradebot.types import ApprovedOrder, Candle, Signal
 
@@ -3438,8 +3439,11 @@ def _c(o, h, l, c, ts=1300, sym="X"):
     return Candle(sym, ts, o, h, l, c, 1)
 
 
-def _broker(slip=0.0):
-    return BacktestBroker(capital=100_000.0, slippage_pct=slip, mis_leverage=5.0)
+def _broker(slip=0.0, buffer=None):
+    return BacktestBroker(capital=100_000.0, slippage_pct=slip, mis_leverage=5.0, entry_buffer_pct=buffer)
+
+
+_: Broker = _broker()  # BacktestBroker must satisfy the Protocol (checked at import by type checkers)
 
 
 def test_constant_documented():
@@ -3469,8 +3473,73 @@ def test_unfilled_when_no_candle_for_symbol():
     b = _broker()
     b.place_entry(_order())
     ev = b.on_bar(1300, {"Y": _c(1, 1, 1, 1, sym="Y")})
-    assert isinstance(ev[0], Unfilled) and ev[0].order.client_id == "cid-X"
+    assert isinstance(ev[0], Unfilled) and ev[0].order.client_id == "cid-X" and ev[0].reason == "no_candle"
     assert b.pending_symbols() == set()
+
+
+def test_unfilled_when_open_gaps_beyond_entry_buffer():
+    b = _broker(buffer=0.1)  # 0.1% like the live marketable limit
+    b.place_entry(_order(entry=100.0))
+    ev = b.on_bar(1300, {"X": _c(100.5, 101.0, 100.4, 100.8)})  # opens 0.5% above the signal
+    assert isinstance(ev[0], Unfilled) and ev[0].reason == "beyond_buffer"
+    b2 = _broker(buffer=0.1)
+    b2.place_entry(_order(entry=100.0))
+    assert isinstance(b2.on_bar(1300, {"X": _c(100.05, 101.0, 99.9, 100.8)})[0], Filled)
+    b3 = _broker(buffer=0.1)
+    b3.place_entry(_order("SHORT", 100.0, 101.0, 98.0))
+    assert b3.on_bar(1300, {"X": _c(99.5, 99.6, 99.0, 99.2)})[0].reason == "beyond_buffer"
+
+
+def test_place_entry_refuses_duplicate_pending_or_open_symbol():
+    b = _broker()
+    b.place_entry(_order())
+    with pytest.raises(ValueError):
+        b.place_entry(_order())
+    b.on_bar(1300, {"X": _c(100.0, 100.1, 99.9, 100.0)})
+    with pytest.raises(ValueError):
+        b.place_entry(_order())
+
+
+def test_gap_through_stop_fills_at_open_not_stop():
+    pos = Position("X", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 1, "c", "s")
+    assert check_exit(pos, _c(95.0, 96.0, 94.0, 95.5)) == ("STOP", 95.0)
+    short = Position("X", "MIS", "SHORT", 10, 100.0, 101.0, 98.0, 1, "c", "s")
+    assert check_exit(short, _c(105.0, 106.0, 104.0, 105.0)) == ("STOP", 105.0)
+
+
+def test_gap_through_target_fills_at_open():
+    pos = Position("X", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 1, "c", "s")
+    assert check_exit(pos, _c(103.0, 104.0, 102.5, 103.5)) == ("TARGET", 103.0)
+    no_target = Position("X", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c", "s")
+    assert check_exit(no_target, _c(103.0, 110.0, 102.5, 103.5)) is None
+
+
+def test_entry_bar_gapping_through_stop_is_a_loss_not_a_profit():
+    b = _broker()
+    b.place_entry(_order(entry=100.0, stop=99.0, target=102.0))
+    ev = b.on_bar(1300, {"X": _c(95.0, 96.0, 94.0, 95.5)})
+    assert [type(e) for e in ev] == [Filled, Closed]
+    pos = ev[1].position
+    assert pos.avg_price == 95.0 and pos.exit_price == 95.0 and pos.exit_reason == "STOP"
+    assert pos.pnl == 0.0  # filled and stopped at the same gapped open; never +40
+
+
+def test_cnc_position_carries_across_bars_then_stops():
+    b = _broker()
+    b.place_entry(_order(product="CNC"))
+    b.on_bar(1300, {"X": _c(100.0, 100.1, 99.9, 100.0)})
+    assert b.on_bar(1600, {"X": _c(100.0, 100.5, 99.5, 100.2)}) == []
+    assert b.square_off(1900, {"X": _c(100.0, 100.5, 99.5, 100.2, 1900)}) == []
+    ev = b.on_bar(2200, {"X": _c(100.0, 100.1, 98.9, 99.0, 2200)})
+    assert isinstance(ev[0], Closed) and ev[0].position.exit_reason == "STOP" and ev[0].position.closed_ts == 2200
+
+
+def test_unrealised_requires_price_for_every_open_position():
+    b = _broker()
+    b.place_entry(_order())
+    b.on_bar(1300, {"X": _c(100.0, 100.1, 99.9, 100.0)})
+    with pytest.raises(KeyError):
+        b.unrealised_pnl({})
 
 
 def test_stop_hit_on_entry_bar():
@@ -3595,6 +3664,7 @@ class Filled:
 class Unfilled:
     order: ApprovedOrder
     ts: int
+    reason: str = "no_candle"  # no_candle | beyond_buffer
 
 
 @dataclass(frozen=True)
@@ -3606,7 +3676,8 @@ BrokerEvent = Union[Filled, Unfilled, Closed]  # runtime union; `|` needs 3.10+
 
 
 class Broker(Protocol):
-    def place_entry(self, order: ApprovedOrder) -> None: ...
+    def place_entry(self, order: ApprovedOrder) -> None:
+        """Queue an entry. One position or pending entry per symbol: raise ValueError otherwise."""
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]: ...
     def square_off(self, ts: int, candles: dict[str, Candle], products: tuple[str, ...] = ("MIS",),
                    reason: str = "SQUARE_OFF") -> list[Closed]: ...
@@ -3623,40 +3694,59 @@ class Broker(Protocol):
 broker-side stop/target exits against each bar's high/low."""
 from __future__ import annotations
 
+import logging
+
 from tradebot.execution.broker import BrokerEvent, Closed, Filled, Unfilled
 from tradebot.types import ApprovedOrder, Candle, Position, round_tick
+
+log = logging.getLogger("tradebot.backtest")
 
 # Spec 8.1: if one bar touches both the stop and the target, assume the stop was hit first.
 STOP_FIRST_ON_SAME_BAR = True
 
 
 def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
-    """Return (reason, level) if the bar triggers an exit, else None."""
-    if pos.direction == "LONG":
+    """Return (reason, level) if the bar triggers an exit, else None.
+
+    Levels are clamped to the bar's open: a bar that gaps through the stop fills at the
+    open (worse than the stop), and one that gaps through the target fills at the open
+    (better than the target). Without the clamp an entry bar gapping through the stop
+    would book a profit on a losing trade.
+    """
+    long = pos.direction == "LONG"
+    if long:
         stop_hit = c.low <= pos.stop_price
         target_hit = pos.target_price is not None and c.high >= pos.target_price
     else:
         stop_hit = c.high >= pos.stop_price
         target_hit = pos.target_price is not None and c.low <= pos.target_price
     if stop_hit and (STOP_FIRST_ON_SAME_BAR or not target_hit):
-        return "STOP", pos.stop_price
+        return "STOP", (min(c.open, pos.stop_price) if long else max(c.open, pos.stop_price))
     if target_hit:
-        return "TARGET", pos.target_price
+        return "TARGET", (max(c.open, pos.target_price) if long else min(c.open, pos.target_price))
     return None
 
 
 class BacktestBroker:
-    def __init__(self, capital: float, slippage_pct: float, mis_leverage: float):
+    def __init__(self, capital: float, slippage_pct: float, mis_leverage: float,
+                 entry_buffer_pct: float | None = None):
+        """entry_buffer_pct mirrors the live marketable limit: an entry whose next open is beyond
+        signal_price * (1 +/- buffer) is left unfilled, exactly as the live order would be.
+        None disables the check."""
         self.cash = float(capital)
         self.slip = slippage_pct / 100.0
         self.lev = mis_leverage
+        self.buffer = None if entry_buffer_pct is None else entry_buffer_pct / 100.0
         self._pending: dict[str, ApprovedOrder] = {}
         self._positions: dict[str, Position] = {}
         self.closed: list[Position] = []
 
     # -- interface -----------------------------------------------------------
     def place_entry(self, order: ApprovedOrder) -> None:
-        self._pending[order.signal.symbol] = order
+        sym = order.signal.symbol
+        if sym in self._pending or sym in self._positions:
+            raise ValueError(f"{sym} already has a pending entry or an open position")
+        self._pending[sym] = order
 
     def pending_symbols(self) -> set[str]:
         return set(self._pending)
@@ -3664,20 +3754,30 @@ class BacktestBroker:
     def open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
 
+    def _beyond_buffer(self, sig, open_price: float) -> bool:
+        if self.buffer is None:
+            return False
+        if sig.direction == "LONG":
+            return open_price > sig.entry_price * (1 + self.buffer)
+        return open_price < sig.entry_price * (1 - self.buffer)
+
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]:
         events: list[BrokerEvent] = []
         for sym, order in list(self._pending.items()):
             del self._pending[sym]
             c = candles.get(sym)
             if c is None:
-                events.append(Unfilled(order, ts))
+                events.append(Unfilled(order, ts, "no_candle"))
                 continue
             sig = order.signal
+            if self._beyond_buffer(sig, c.open):
+                events.append(Unfilled(order, ts, "beyond_buffer"))
+                continue
             price = self._entry_price(sig.direction, c.open)
             pos = Position(sym, sig.product, sig.direction, order.quantity, price, sig.stop_price,
-                           sig.target_price, c.ts, order.client_id, sig.strategy)
+                           sig.target_price, ts, order.client_id, sig.strategy)
             self._positions[sym] = pos
-            events.append(Filled(pos, order, c.ts))
+            events.append(Filled(pos, order, ts))
         for sym, pos in list(self._positions.items()):
             c = candles.get(sym)
             if c is None:
@@ -3687,7 +3787,7 @@ class BacktestBroker:
                 continue
             reason, level = hit
             price = self._exit_price(pos.direction, level) if reason == "STOP" else level
-            self._close(pos, c.ts, price, reason)
+            self._close(pos, ts, price, reason)
             events.append(Closed(pos))
         return events
 
@@ -3703,6 +3803,7 @@ class BacktestBroker:
         return out
 
     def available_margin(self, product: str) -> float:
+        """Free cash times leverage. Margin is charged on entry cost, not marked to market."""
         used = 0.0
         for pos in self._positions.values():
             used += pos.avg_price * pos.quantity / self._lev_for(pos.product)
@@ -3712,7 +3813,14 @@ class BacktestBroker:
         return free * self._lev_for(product)
 
     def unrealised_pnl(self, last_prices: dict[str, float]) -> float:
-        return sum(p.unrealised(last_prices[s]) for s, p in self._positions.items() if s in last_prices)
+        """Sum over open positions. A position with no price in last_prices raises: the engine
+        always has a last close for any symbol that has a position."""
+        total = 0.0
+        for s, p in self._positions.items():
+            if s not in last_prices:
+                raise KeyError(f"no last price for open position {s}")
+            total += p.unrealised(last_prices[s])
+        return total
 
     # -- internals ----------------------------------------------------------
     def _lev_for(self, product: str) -> float:
@@ -3729,6 +3837,8 @@ class BacktestBroker:
         pnl = (price - pos.avg_price) * pos.quantity if pos.direction == "LONG" else (pos.avg_price - price) * pos.quantity
         pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = ts, price, reason, round(pnl, 2)
         self.cash += pos.pnl
+        if self.cash <= 0:
+            log.warning("simulated cash is %.2f after closing %s: account is blown", self.cash, pos.symbol)
         del self._positions[pos.symbol]
         self.closed.append(pos)
 ```
@@ -3736,7 +3846,7 @@ class BacktestBroker:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_backtest_broker.py -v`
-Expected: 13 passed
+Expected: 21 passed
 
 - [ ] **Step 6: Commit**
 
@@ -3854,7 +3964,7 @@ def _run(repo, cfg, candles, run_id="t1", ai=None):
     repo.insert_candles(candles, interval=5)
     src = HistoricalSource.from_repo(repo, sorted({c.symbol for c in candles}), 5, 0, 2_000_000_000)
     strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
     eng = BacktestEngine(cfg, repo, src, [strat], broker, ai or StubFilter(),
                          SessionClock(cfg.session, 5), {"A": 1, "B": 1}, run_id)
     eng.run()
@@ -3946,7 +4056,7 @@ def test_strategy_exception_disables_strategy_for_day(repo, tmp_path):
     candles = _candles()
     repo.insert_candles(candles, interval=5)
     src = HistoricalSource.from_repo(repo, ["A", "B"], 5, 0, 2_000_000_000)
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
     eng = BacktestEngine(cfg, repo, src, [Boom(cfg.strategy["ema_rsi"])], broker, StubFilter(),
                          SessionClock(cfg.session, 5), {"A": 1, "B": 1}, "t1")
     eng.run()  # must not raise
@@ -4162,6 +4272,7 @@ class BacktestEngine:
                 self._day.fills += 1
             elif isinstance(ev, Unfilled):
                 self.repo.update_order(self.run_id, ev.order.client_id, "UNFILLED", ev.ts)
+                log.info("unfilled %s %s: %s", ev.order.signal.symbol, ev.order.client_id, ev.reason)
             elif isinstance(ev, Closed):
                 p = ev.position
                 if p.db_id is not None:
@@ -4542,7 +4653,7 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     if strategy_name not in cfg.strategy:
         raise click.ClickException(f"no config for strategy '{strategy_name}'")
     strategy = build_strategy(strategy_name, cfg.strategy[strategy_name])
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
     engine = BacktestEngine(cfg, repo, source, [strategy], broker,
                             build_filter(cfg.ai, cfg.secrets.anthropic_api_key),
                             SessionClock(cfg.session, interval), lots,

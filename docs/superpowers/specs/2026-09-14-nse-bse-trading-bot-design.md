@@ -222,10 +222,15 @@ run ID so reports can attribute PnL to the filter.
 
 ### 8.2 Backtest backend
 
-Fills entries at the next bar's open plus `slippage_pct`. Exits are simulated
-each bar against high/low using the stop-first rule, including the entry bar
-itself: after filling at that bar's open, the same bar's high and low are
-checked against stop and target. Intraday positions are closed at the close of
+Fills entries at the next bar's open plus `slippage_pct`, but only if that open is
+within `ENTRY_BUFFER_PCT` of the signal price; otherwise the entry is recorded
+`unfilled`, exactly as the live marketable limit would be, so fill rates are
+comparable by construction. Exits are simulated each bar against high/low using
+the stop-first rule, including the entry bar itself: after filling at that bar's
+open, the same bar's high and low are checked against stop and target. Exit
+levels are clamped to the bar's open, so a bar that gaps through the stop fills
+at the open (worse than the stop) and one that gaps through the target fills at
+the open (better). Intraday positions are closed at the close of
 the last bar ending at or before `SQUARE_OFF_TIME`, with `slippage_pct` applied
 against the position so backtest square-off stays comparable to the live
 market order. Tracks a simulated cash balance.

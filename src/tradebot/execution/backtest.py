@@ -2,40 +2,59 @@
 broker-side stop/target exits against each bar's high/low."""
 from __future__ import annotations
 
+import logging
+
 from tradebot.execution.broker import BrokerEvent, Closed, Filled, Unfilled
 from tradebot.types import ApprovedOrder, Candle, Position, round_tick
+
+log = logging.getLogger("tradebot.backtest")
 
 # Spec 8.1: if one bar touches both the stop and the target, assume the stop was hit first.
 STOP_FIRST_ON_SAME_BAR = True
 
 
 def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
-    """Return (reason, level) if the bar triggers an exit, else None."""
-    if pos.direction == "LONG":
+    """Return (reason, level) if the bar triggers an exit, else None.
+
+    Levels are clamped to the bar's open: a bar that gaps through the stop fills at the
+    open (worse than the stop), and one that gaps through the target fills at the open
+    (better than the target). Without the clamp an entry bar gapping through the stop
+    would book a profit on a losing trade.
+    """
+    long = pos.direction == "LONG"
+    if long:
         stop_hit = c.low <= pos.stop_price
         target_hit = pos.target_price is not None and c.high >= pos.target_price
     else:
         stop_hit = c.high >= pos.stop_price
         target_hit = pos.target_price is not None and c.low <= pos.target_price
     if stop_hit and (STOP_FIRST_ON_SAME_BAR or not target_hit):
-        return "STOP", pos.stop_price
+        return "STOP", (min(c.open, pos.stop_price) if long else max(c.open, pos.stop_price))
     if target_hit:
-        return "TARGET", pos.target_price
+        return "TARGET", (max(c.open, pos.target_price) if long else min(c.open, pos.target_price))
     return None
 
 
 class BacktestBroker:
-    def __init__(self, capital: float, slippage_pct: float, mis_leverage: float):
+    def __init__(self, capital: float, slippage_pct: float, mis_leverage: float,
+                 entry_buffer_pct: float | None = None):
+        """entry_buffer_pct mirrors the live marketable limit: an entry whose next open is beyond
+        signal_price * (1 +/- buffer) is left unfilled, exactly as the live order would be.
+        None disables the check."""
         self.cash = float(capital)
         self.slip = slippage_pct / 100.0
         self.lev = mis_leverage
+        self.buffer = None if entry_buffer_pct is None else entry_buffer_pct / 100.0
         self._pending: dict[str, ApprovedOrder] = {}
         self._positions: dict[str, Position] = {}
         self.closed: list[Position] = []
 
     # -- interface -----------------------------------------------------------
     def place_entry(self, order: ApprovedOrder) -> None:
-        self._pending[order.signal.symbol] = order
+        sym = order.signal.symbol
+        if sym in self._pending or sym in self._positions:
+            raise ValueError(f"{sym} already has a pending entry or an open position")
+        self._pending[sym] = order
 
     def pending_symbols(self) -> set[str]:
         return set(self._pending)
@@ -43,20 +62,30 @@ class BacktestBroker:
     def open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
 
+    def _beyond_buffer(self, sig, open_price: float) -> bool:
+        if self.buffer is None:
+            return False
+        if sig.direction == "LONG":
+            return open_price > sig.entry_price * (1 + self.buffer)
+        return open_price < sig.entry_price * (1 - self.buffer)
+
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]:
         events: list[BrokerEvent] = []
         for sym, order in list(self._pending.items()):
             del self._pending[sym]
             c = candles.get(sym)
             if c is None:
-                events.append(Unfilled(order, ts))
+                events.append(Unfilled(order, ts, "no_candle"))
                 continue
             sig = order.signal
+            if self._beyond_buffer(sig, c.open):
+                events.append(Unfilled(order, ts, "beyond_buffer"))
+                continue
             price = self._entry_price(sig.direction, c.open)
             pos = Position(sym, sig.product, sig.direction, order.quantity, price, sig.stop_price,
-                           sig.target_price, c.ts, order.client_id, sig.strategy)
+                           sig.target_price, ts, order.client_id, sig.strategy)
             self._positions[sym] = pos
-            events.append(Filled(pos, order, c.ts))
+            events.append(Filled(pos, order, ts))
         for sym, pos in list(self._positions.items()):
             c = candles.get(sym)
             if c is None:
@@ -66,7 +95,7 @@ class BacktestBroker:
                 continue
             reason, level = hit
             price = self._exit_price(pos.direction, level) if reason == "STOP" else level
-            self._close(pos, c.ts, price, reason)
+            self._close(pos, ts, price, reason)
             events.append(Closed(pos))
         return events
 
@@ -82,6 +111,7 @@ class BacktestBroker:
         return out
 
     def available_margin(self, product: str) -> float:
+        """Free cash times leverage. Margin is charged on entry cost, not marked to market."""
         used = 0.0
         for pos in self._positions.values():
             used += pos.avg_price * pos.quantity / self._lev_for(pos.product)
@@ -91,7 +121,14 @@ class BacktestBroker:
         return free * self._lev_for(product)
 
     def unrealised_pnl(self, last_prices: dict[str, float]) -> float:
-        return sum(p.unrealised(last_prices[s]) for s, p in self._positions.items() if s in last_prices)
+        """Sum over open positions. A position with no price in last_prices raises: the engine
+        always has a last close for any symbol that has a position."""
+        total = 0.0
+        for s, p in self._positions.items():
+            if s not in last_prices:
+                raise KeyError(f"no last price for open position {s}")
+            total += p.unrealised(last_prices[s])
+        return total
 
     # -- internals ----------------------------------------------------------
     def _lev_for(self, product: str) -> float:
@@ -108,5 +145,7 @@ class BacktestBroker:
         pnl = (price - pos.avg_price) * pos.quantity if pos.direction == "LONG" else (pos.avg_price - price) * pos.quantity
         pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = ts, price, reason, round(pnl, 2)
         self.cash += pos.pnl
+        if self.cash <= 0:
+            log.warning("simulated cash is %.2f after closing %s: account is blown", self.cash, pos.symbol)
         del self._positions[pos.symbol]
         self.closed.append(pos)
