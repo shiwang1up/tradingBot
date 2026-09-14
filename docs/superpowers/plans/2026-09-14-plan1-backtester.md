@@ -1147,6 +1147,14 @@ class Repo:
         self.conn.commit()
         return self.conn.total_changes - before
 
+    def delete_candles(self, symbol: str, interval: int, start_ts: int, end_ts: int) -> int:
+        cur = self.conn.execute(
+            "DELETE FROM candles WHERE symbol=? AND interval=? AND ts BETWEEN ? AND ?",
+            (symbol, interval, start_ts, end_ts),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def latest_candle_ts(self, symbol: str, interval: int) -> int | None:
         row = self.conn.execute(
             "SELECT MAX(ts) AS ts FROM candles WHERE symbol=? AND interval=?", (symbol, interval)
@@ -1959,13 +1967,12 @@ git commit -m "feat: universe loading and instrument master resolution"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-from datetime import date
-
+# tests/test_historical.py
 import pytest
 
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
-from tradebot.engine.clock import ist_epoch
-from tradebot.execution.groww_adapter import GrowwAdapter, candle_interval_name, groww_symbol, parse_candles, with_retry
+from tradebot.execution.groww_adapter import (GrowwAdapter, candle_interval_name, groww_symbol, parse_candles,
+                                              with_retry)
 from tradebot.types import Candle
 
 DAY = 86400
@@ -1984,10 +1991,31 @@ def test_parse_candles_accepts_epoch_seconds_millis_and_iso():
     assert all(c.symbol == "RELIANCE" and c.source == "official" for c in out)
 
 
-def test_parse_candles_v2_rows_with_open_interest_and_naive_ist_timestamp():
+def test_parse_candles_respects_non_ist_offsets_and_z_suffix():
+    resp = {"candles": [
+        ["2026-09-14T03:45:00+00:00", 1, 1, 1, 1, 1],   # 09:15 IST expressed in UTC
+        ["2026-09-14T03:45:00Z", 1, 1, 1, 1, 1],
+        ["2026-09-14T09:15:00", 1, 1, 1, 1, 1],         # naive => IST
+    ]}
+    assert [c.ts for c in parse_candles("X", resp)] == [1789357500] * 3
+
+
+def test_parse_candles_v2_rows_with_open_interest():
     resp = {"candles": [["2026-09-14T09:15:00", 100, 101, 99, 100.5, 1000, None]]}
     out = parse_candles("RELIANCE", resp)
     assert out[0].ts == 1789357500 and out[0].volume == 1000
+
+
+def test_parse_candles_malformed_row_names_symbol():
+    with pytest.raises(ValueError, match="RELIANCE"):
+        parse_candles("RELIANCE", {"candles": [[1789357500, 1, 2]]})
+    with pytest.raises(ValueError, match="RELIANCE"):
+        parse_candles("RELIANCE", {"candles": [{"ts": 1}]})
+
+
+def test_parse_candles_empty():
+    assert parse_candles("X", {}) == []
+    assert parse_candles("X", {"candles": None}) == []
 
 
 def test_interval_names_and_groww_symbol():
@@ -1996,6 +2024,61 @@ def test_interval_names_and_groww_symbol():
     assert groww_symbol("NSE", "RELIANCE") == "NSE-RELIANCE"
     with pytest.raises(ValueError):
         candle_interval_name(7)
+
+
+def test_with_retry_retries_with_backoff_then_succeeds():
+    calls, delays = [], []
+
+    def fn():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("rate limit")
+        return "ok"
+
+    assert with_retry(fn, attempts=3, sleep=delays.append) == "ok"
+    assert len(calls) == 3
+    assert delays == [1.0, 2.0]
+
+
+def test_with_retry_gives_up_after_attempts():
+    def fn():
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        with_retry(fn, attempts=2, sleep=lambda s: None)
+    with pytest.raises(ValueError):
+        with_retry(fn, attempts=0)
+
+
+@pytest.mark.parametrize("exc_factory", [
+    lambda: type("GrowwAPIAuthenticationException", (Exception,), {})("bad totp"),
+    lambda: type("GrowwAPINotFoundException", (Exception,), {})("no such symbol"),
+    # The SDK raises the generic class with a code for {"status": "FAILURE"} bodies.
+    lambda: type("GrowwAPIException", (Exception,), {"code": "401"})("unauthorised"),
+    lambda: type("GrowwAPIException", (Exception,), {"code": 403})("forbidden"),
+])
+def test_with_retry_never_retries_client_errors(exc_factory):
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise exc_factory()
+
+    with pytest.raises(Exception):
+        with_retry(fn, attempts=3, sleep=lambda s: None)
+    assert len(calls) == 1
+
+
+def test_with_retry_does_retry_generic_server_errors():
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise type("GrowwAPIException", (Exception,), {"code": "500"})("server")
+
+    with pytest.raises(Exception):
+        with_retry(fn, attempts=2, sleep=lambda s: None)
+    assert len(calls) == 2
 
 
 def test_fetch_candles_calls_v2_endpoint_with_ist_strings():
@@ -2019,50 +2102,16 @@ def test_fetch_candles_calls_v2_endpoint_with_ist_strings():
     assert out[0].ts == 1789357500
 
 
+def test_fetch_candles_validates_interval_before_any_call():
+    adapter = GrowwAdapter("key", "secret")
+    adapter._client = object()  # would explode if called
+    with pytest.raises(ValueError):
+        adapter.fetch_candles("RELIANCE", "NSE", 0, 1, 7)
+
+
 def test_adapter_requires_credentials():
     with pytest.raises(ValueError):
         GrowwAdapter("", "")
-
-
-def test_parse_candles_empty():
-    assert parse_candles("X", {}) == []
-    assert parse_candles("X", {"candles": None}) == []
-
-
-def test_with_retry_retries_then_succeeds():
-    calls = []
-
-    def fn():
-        calls.append(1)
-        if len(calls) < 3:
-            raise RuntimeError("rate limit")
-        return "ok"
-
-    assert with_retry(fn, attempts=3, sleep=lambda s: None) == "ok"
-    assert len(calls) == 3
-
-
-def test_with_retry_gives_up_after_attempts():
-    def fn():
-        raise RuntimeError("boom")
-
-    with pytest.raises(RuntimeError):
-        with_retry(fn, attempts=2, sleep=lambda s: None)
-
-
-def test_with_retry_never_retries_auth_errors():
-    class GrowwAPIAuthenticationException(Exception):
-        pass
-
-    calls = []
-
-    def fn():
-        calls.append(1)
-        raise GrowwAPIAuthenticationException("bad totp")
-
-    with pytest.raises(GrowwAPIAuthenticationException):
-        with_retry(fn, attempts=3, sleep=lambda s: None)
-    assert len(calls) == 1
 
 
 class FakeFetcher:
@@ -2071,23 +2120,23 @@ class FakeFetcher:
 
     def __call__(self, symbol, exchange, start_ts, end_ts, interval):
         self.calls.append((symbol, start_ts, end_ts))
-        # one candle per day boundary inside the window
+        # one candle per day boundary inside the window (both ends inclusive)
         first_day = (start_ts // DAY) * DAY
         return [Candle(symbol, t, 1, 2, 0.5, 1.5, 10)
                 for t in range(first_day, end_ts + 1, DAY) if start_ts <= t <= end_ts]
 
 
 def test_fetch_incremental_first_run_chunks_the_lookback(repo):
-    now = 100 * DAY
+    now = 100 * DAY  # exactly on a bar boundary: the bar opening now is in progress, excluded
     f = FakeFetcher()
     result = fetch_incremental(repo, f, ["RELIANCE"], "NSE", interval=5, lookback_days=30, now_ts=now)
     starts = [c[1] for c in f.calls]
     assert starts[0] == now - 30 * DAY
-    # 30-day lookback at 15-day chunks => 2 calls
-    assert len(f.calls) == 2
+    assert len(f.calls) == 2  # 30-day lookback at 15-day chunks
     assert f.calls[0][2] == starts[0] + CHUNK_DAYS[5] * DAY
-    assert result["RELIANCE"] == 31  # days 70..100 inclusive
-    assert repo.latest_candle_ts("RELIANCE", 5) == now
+    assert f.calls[1][1] == f.calls[0][2]  # windows share the boundary instant: no gap either way
+    assert result["RELIANCE"] == 30  # days 70..99; day 100 belongs to the in-progress bar
+    assert repo.latest_candle_ts("RELIANCE", 5) == now - DAY
 
 
 def test_fetch_incremental_second_run_resumes_from_latest_and_is_idempotent(repo):
@@ -2096,19 +2145,36 @@ def test_fetch_incremental_second_run_resumes_from_latest_and_is_idempotent(repo
     fetch_incremental(repo, f, ["RELIANCE"], "NSE", interval=5, lookback_days=30, now_ts=now)
     f2 = FakeFetcher()
     result = fetch_incremental(repo, f2, ["RELIANCE"], "NSE", interval=5, lookback_days=30, now_ts=now + 2 * DAY)
-    assert f2.calls[0][1] == now + 1
+    assert f2.calls[0][1] == (now - DAY) + 1
     assert result["RELIANCE"] == 2
-    # third run with nothing new inserts nothing
     f3 = FakeFetcher()
     assert fetch_incremental(repo, f3, ["RELIANCE"], "NSE", 5, 30, now + 2 * DAY)["RELIANCE"] == 0
 
 
-def test_fetch_incremental_full_ignores_existing(repo):
+def test_fetch_incremental_full_refetches_and_repairs(repo):
     now = 100 * DAY
     fetch_incremental(repo, FakeFetcher(), ["RELIANCE"], "NSE", 5, 30, now)
+    repo.conn.execute("UPDATE candles SET c = 999 WHERE symbol='RELIANCE' AND ts=?", (90 * DAY,))
+    repo.conn.commit()
     f = FakeFetcher()
-    fetch_incremental(repo, f, ["RELIANCE"], "NSE", 5, 30, now, full=True)
+    result = fetch_incremental(repo, f, ["RELIANCE"], "NSE", 5, 30, now, full=True)
     assert f.calls[0][1] == now - 30 * DAY
+    assert result["RELIANCE"] == 30
+    assert repo.load_candles(["RELIANCE"], 5, 90 * DAY, 90 * DAY)[0].close == 1.5
+
+
+def test_fetch_incremental_ignores_out_of_window_candles_and_empty_symbols(repo):
+    def stray(symbol, exchange, start_ts, end_ts, interval):
+        return [Candle(symbol, end_ts + 5 * DAY, 1, 1, 1, 1, 1)] if symbol == "A" else []
+
+    result = fetch_incremental(repo, stray, ["A", "B"], "NSE", 5, 30, 100 * DAY)
+    assert result == {"A": 0, "B": 0}
+    assert repo.latest_candle_ts("A", 5) is None
+
+
+def test_fetch_incremental_rejects_unknown_interval(repo):
+    with pytest.raises(ValueError):
+        fetch_incremental(repo, FakeFetcher(), ["A"], "NSE", 7, 30, 100 * DAY)
 
 
 def test_historical_source_groups_by_bar(repo):
@@ -2143,21 +2209,34 @@ from typing import Any
 from tradebot.engine.clock import IST, to_ist
 from tradebot.types import Candle
 
-NO_RETRY_MARKERS = ("Authentication", "Authorisation", "BadRequest")
+# Errors that must never be retried (spec 11): auth, authorisation, bad request, not found.
+# The SDK raises the generic GrowwAPIException for Groww's {"status": "FAILURE"} bodies, so
+# we match on the HTTP-style error code as well as the exception class name.
+NO_RETRY_MARKERS = ("Authentication", "Authorisation", "Authorization", "BadRequest", "NotFound")
+NO_RETRY_CODES = {"400", "401", "403", "404"}
+
+
+def is_non_retryable(e: BaseException) -> bool:
+    name = type(e).__name__
+    if any(m in name for m in NO_RETRY_MARKERS):
+        return True
+    code = getattr(e, "code", None)
+    return code is not None and str(code) in NO_RETRY_CODES
 
 
 def with_retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 1.0,
                sleep: Callable[[float], None] = time.sleep) -> Any:
-    """Exponential backoff. Auth/authorisation/bad-request errors are never retried."""
+    """Exponential backoff (1s, 2s, ...). Non-retryable errors propagate on the first attempt."""
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
     for i in range(attempts):
         try:
             return fn()
-        except Exception as e:  # noqa: BLE001 - SDK exceptions vary; we inspect the class name
-            name = type(e).__name__
-            if any(m in name for m in NO_RETRY_MARKERS) or i == attempts - 1:
+        except Exception as e:  # noqa: BLE001 - SDK exceptions vary; classified by is_non_retryable
+            if is_non_retryable(e) or i == attempts - 1:
                 raise
             sleep(base_delay * (2 ** i))
-    raise RuntimeError("unreachable")
+    raise AssertionError("unreachable")
 
 
 def _to_epoch(v: Any) -> int:
@@ -2167,16 +2246,21 @@ def _to_epoch(v: Any) -> int:
     s = str(v).strip()
     if s.isdigit():
         return _to_epoch(int(s))
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"  # 3.9's fromisoformat does not accept a Z suffix
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=IST)
+        dt = dt.replace(tzinfo=IST)  # Groww returns naive IST wall-clock strings
     return int(dt.timestamp())
 
 
 def parse_candles(symbol: str, resp: dict | None) -> list[Candle]:
+    """Rows are [ts, o, h, l, c, volume, ...]; V2 appends open interest, which is ignored."""
     rows = (resp or {}).get("candles") or []
     out = []
     for r in rows:
+        if not isinstance(r, (list, tuple)) or len(r) < 6:
+            raise ValueError(f"{symbol}: malformed candle row {r!r}")
         out.append(Candle(symbol, _to_epoch(r[0]), float(r[1]), float(r[2]), float(r[3]),
                           float(r[4]), int(float(r[5] or 0))))
     return out
@@ -2229,14 +2313,18 @@ class GrowwAdapter:
         V2 rows are [iso_timestamp, o, h, l, c, volume, open_interest]; parse_candles reads the
         first six and treats naive timestamps as IST.
         """
+        client = self.client  # auth happens here, outside the retry loop, so it is never retried
+        interval_name = candle_interval_name(interval)
+        gsym = groww_symbol(exchange, symbol)
+
         def call():
-            return self.client.get_historical_candles(
+            return client.get_historical_candles(
                 exchange=exchange,
-                segment=self.client.SEGMENT_CASH,
-                groww_symbol=groww_symbol(exchange, symbol),
+                segment=client.SEGMENT_CASH,
+                groww_symbol=gsym,
                 start_time=_fmt_ist(start_ts),
                 end_time=_fmt_ist(end_ts),
-                candle_interval=candle_interval_name(interval),
+                candle_interval=interval_name,
                 timeout=30,
             )
 
@@ -2266,20 +2354,30 @@ Fetcher = Callable[[str, str, int, int, int], list[Candle]]  # (symbol, exchange
 def fetch_incremental(repo: Repo, fetcher: Fetcher, symbols: list[str], exchange: str, interval: int,
                       lookback_days: int, now_ts: int, full: bool = False,
                       log: Callable[[str], None] = lambda s: None) -> dict[str, int]:
-    """For each symbol, fetch from (latest stored ts + 1) or (now - lookback) up to now_ts.
+    """For each symbol, fetch from (latest stored ts + 1) or (now - lookback) up to the last
+    COMPLETED bar before now_ts, so an in-progress candle is never stored.
 
-    Idempotent: inserts use INSERT OR IGNORE on (symbol, ts, interval). Returns inserted counts.
+    Idempotent: inserts use INSERT OR IGNORE on (symbol, ts, interval). `full` deletes the window
+    first so a refetch repairs bad rows. Consecutive windows share their boundary instant, so the
+    result is the same whether Groww treats end_time as inclusive or exclusive. Returns inserted counts.
     """
+    if interval not in CHUNK_DAYS:
+        raise ValueError(f"unsupported candle interval: {interval} minutes")
     chunk = CHUNK_DAYS[interval] * DAY
+    interval_sec = interval * 60
+    limit = now_ts - (now_ts % interval_sec) - 1  # last instant that belongs to a completed bar
     inserted: dict[str, int] = {}
     for sym in symbols:
         latest = None if full else repo.latest_candle_ts(sym, interval)
         start = now_ts - lookback_days * DAY if latest is None else latest + 1
+        if full:
+            repo.delete_candles(sym, interval, start, limit)
         n = 0
-        while start < now_ts:
-            end = min(start + chunk, now_ts)
-            n += repo.insert_candles(fetcher(sym, exchange, start, end, interval), interval)
-            start = end + 1
+        while start < limit:
+            end = min(start + chunk, limit)
+            candles = [c for c in fetcher(sym, exchange, start, end, interval) if start <= c.ts <= end]
+            n += repo.insert_candles(candles, interval)
+            start = end
         inserted[sym] = n
         log(f"{sym}: +{n} candles")
     return inserted
@@ -2308,7 +2406,7 @@ class HistoricalSource:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_historical.py -v`
-Expected: 13 passed
+Expected: 22 passed
 
 - [ ] **Step 6: Commit**
 
