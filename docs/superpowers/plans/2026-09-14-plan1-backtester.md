@@ -3312,7 +3312,6 @@ git commit -m "feat: risk engine, sizing, kill switch"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_ai_filter.py
 import pytest
 
 from tradebot.ai.filter import StubFilter, build_filter
@@ -3345,6 +3344,19 @@ def test_build_filter_unknown_raises():
     cfg = AIConfig(filter="claude", model="x", candles_in_context=30, on_failure="reject")
     with pytest.raises(ValueError):
         build_filter(cfg, api_key="")
+
+
+def check_filter_contract(flt, candidates):
+    """Shared contract every AIFilter implementation must satisfy (reuse in Plan 2)."""
+    out = flt.review(candidates)
+    assert len(out) == len(candidates)
+    for d, c in zip(out, candidates):
+        assert d.signal is c.signal
+        assert 0.0 <= d.confidence <= 1.0 and d.filter_kind == flt.kind and isinstance(d.approved, bool)
+
+
+def test_stub_satisfies_filter_contract():
+    check_filter_contract(StubFilter(), [_cand("A"), _cand("B"), _cand("C")])
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -3368,7 +3380,9 @@ class AIFilter(Protocol):
     kind: str
 
     def review(self, candidates: list[Candidate]) -> list[Decision]:
-        """Return one Decision per candidate, in the same order."""
+        """Return exactly one Decision per candidate, in the same order, each carrying the
+        candidate's own Signal. A length or order mismatch is a bug in the filter, never a
+        way to express rejection: reject with approved=False instead. The engine checks this."""
 
 
 class StubFilter:
@@ -3387,7 +3401,7 @@ def build_filter(cfg: AIConfig, api_key: str) -> AIFilter:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_ai_filter.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
@@ -4117,7 +4131,11 @@ class BacktestEngine:
         if not batch:
             return
         decisions = self.ai_filter.review([c for _, _, c in batch])
+        if len(decisions) != len(batch):  # zip would silently drop the tail; 3.9 has no strict=
+            raise RuntimeError(f"{self.ai_filter.kind} returned {len(decisions)} decisions for {len(batch)} candidates")
         for (sid, order, _), dec in zip(batch, decisions):
+            if dec.signal is not order.signal:
+                raise RuntimeError(f"{self.ai_filter.kind} returned decisions out of order")
             self.repo.insert_ai_decision(self.run_id, sid, dec.filter_kind, dec.approved, dec.reason,
                                          dec.confidence, dec.latency_ms, dec.failure)
             if not dec.approved:

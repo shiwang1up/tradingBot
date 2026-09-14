@@ -30,3 +30,16 @@ def test_build_filter_unknown_raises():
     cfg = AIConfig(filter="claude", model="x", candles_in_context=30, on_failure="reject")
     with pytest.raises(ValueError):
         build_filter(cfg, api_key="")
+
+
+def check_filter_contract(flt, candidates):
+    """Shared contract every AIFilter implementation must satisfy (reuse in Plan 2)."""
+    out = flt.review(candidates)
+    assert len(out) == len(candidates)
+    for d, c in zip(out, candidates):
+        assert d.signal is c.signal
+        assert 0.0 <= d.confidence <= 1.0 and d.filter_kind == flt.kind and isinstance(d.approved, bool)
+
+
+def test_stub_satisfies_filter_contract():
+    check_filter_contract(StubFilter(), [_cand("A"), _cand("B"), _cand("C")])

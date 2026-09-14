@@ -11,7 +11,9 @@ class AIFilter(Protocol):
     kind: str
 
     def review(self, candidates: list[Candidate]) -> list[Decision]:
-        """Return one Decision per candidate, in the same order."""
+        """Return exactly one Decision per candidate, in the same order, each carrying the
+        candidate's own Signal. A length or order mismatch is a bug in the filter, never a
+        way to express rejection: reject with approved=False instead. The engine checks this."""
 
 
 class StubFilter:
