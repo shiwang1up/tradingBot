@@ -1306,56 +1306,96 @@ git commit -m "feat: sqlite schema and repo"
 
 ```python
 # tests/test_clock.py
+from dataclasses import replace
 from datetime import date
 
+import pytest
+
 from tradebot.config import SessionConfig
-from tradebot.engine.clock import SessionClock, date_of, ist_epoch, to_ist
+from tradebot.engine.clock import SessionClock, date_of, iso_ist, ist_epoch, to_ist
 
 SESSION = SessionConfig(open="09:15", close="15:30", square_off="15:10",
-                        no_new_entries_after="14:45", holidays=("2026-10-02",))
+                        no_new_entries_after="14:45", holidays=("2026-10-02", "2026-09-12"))
+D = date(2026, 9, 14)  # Monday
 
 
-def test_ist_epoch_known_value():
-    # 2026-09-14 09:15 IST == 2026-09-14 03:45 UTC
-    assert ist_epoch(date(2026, 9, 14), "09:15") == 1789357500
+def test_ist_epoch_known_values():
+    assert ist_epoch(D, "09:15") == 1789357500          # 2026-09-14 03:45 UTC
+    assert ist_epoch(date(2026, 1, 5), "09:15") == 1767584700  # no DST in IST: same offset in January
 
 
-def test_to_ist_and_date_of_roundtrip():
-    ts = ist_epoch(date(2026, 9, 14), "15:29")
+def test_to_ist_date_of_and_iso_roundtrip():
+    ts = ist_epoch(D, "15:29")
     dt = to_ist(ts)
     assert (dt.hour, dt.minute) == (15, 29)
-    assert date_of(ts) == date(2026, 9, 14)
+    assert date_of(ts) == D
+    assert iso_ist(ts) == "2026-09-14T15:29:00+05:30"
 
 
 def test_trading_day_excludes_weekends_and_holidays():
     clk = SessionClock(SESSION, interval_minutes=5)
-    assert clk.is_trading_day(date(2026, 9, 14))       # Monday
+    assert clk.is_trading_day(D)
     assert not clk.is_trading_day(date(2026, 9, 13))   # Sunday
-    assert not clk.is_trading_day(date(2026, 10, 2))   # holiday
+    assert not clk.is_trading_day(date(2026, 10, 2))   # holiday on a Friday
+    assert not clk.is_trading_day(date(2026, 9, 12))   # holiday that is also a Saturday
 
 
 def test_square_off_bar_is_last_bar_ending_at_or_before_square_off():
     clk = SessionClock(SESSION, interval_minutes=5)
-    d = date(2026, 9, 14)
-    assert clk.square_off_bar_ts(d) == ist_epoch(d, "15:05")
-    assert clk.is_square_off_bar(ist_epoch(d, "15:05"))
-    assert not clk.is_square_off_bar(ist_epoch(d, "15:00"))
+    assert clk.square_off_bar_ts(D) == ist_epoch(D, "15:05")
+    assert clk.is_square_off_bar(ist_epoch(D, "15:05"))
+    assert not clk.is_square_off_bar(ist_epoch(D, "15:00"))
+    assert not clk.is_square_off_bar(ist_epoch(D, "15:10"))  # a bar opening at 15:10 ends after square-off
+
+
+@pytest.mark.parametrize("interval, expected", [(1, "15:09"), (5, "15:05"), (15, "14:45")])
+def test_square_off_bar_other_intervals(interval, expected):
+    clk = SessionClock(SESSION, interval_minutes=interval)
+    assert clk.square_off_bar_ts(D) == ist_epoch(D, expected)
+
+
+def test_square_off_due_is_true_from_the_bar_onward():
+    clk = SessionClock(SESSION, interval_minutes=5)
+    assert not clk.square_off_due(ist_epoch(D, "15:00"))
+    assert clk.square_off_due(ist_epoch(D, "15:05"))
+    assert clk.square_off_due(ist_epoch(D, "15:20"))
 
 
 def test_entries_allowed_cutoff():
     clk = SessionClock(SESSION, interval_minutes=5)
-    d = date(2026, 9, 14)
-    assert clk.entries_allowed(ist_epoch(d, "14:40"))
-    assert not clk.entries_allowed(ist_epoch(d, "14:45"))
-    assert not clk.entries_allowed(ist_epoch(d, "09:10"))  # before open
+    assert clk.entries_allowed(ist_epoch(D, "14:40"))
+    assert not clk.entries_allowed(ist_epoch(D, "14:45"))
+    assert not clk.entries_allowed(ist_epoch(D, "09:10"))  # before open
 
 
 def test_in_session():
     clk = SessionClock(SESSION, interval_minutes=5)
-    d = date(2026, 9, 14)
-    assert clk.in_session(ist_epoch(d, "09:15"))
-    assert clk.in_session(ist_epoch(d, "15:25"))
-    assert not clk.in_session(ist_epoch(d, "15:30"))
+    assert clk.in_session(ist_epoch(D, "09:15"))
+    assert clk.in_session(ist_epoch(D, "15:25"))
+    assert not clk.in_session(ist_epoch(D, "15:30"))
+
+
+def test_rejects_interval_that_does_not_fit():
+    with pytest.raises(ValueError, match="does not fit"):
+        SessionClock(SESSION, interval_minutes=360)
+
+
+def test_rejects_square_off_bar_before_entry_cutoff():
+    # 30m bars: square-off bar would open 14:15, before the 14:45 cutoff
+    with pytest.raises(ValueError, match="before no_new_entries_after"):
+        SessionClock(SESSION, interval_minutes=30)
+
+
+def test_rejects_unordered_session_times():
+    with pytest.raises(ValueError, match="open < no_new_entries_after"):
+        SessionClock(replace(SESSION, square_off="14:00"), interval_minutes=5)
+
+
+def test_rejects_malformed_holiday_and_time():
+    with pytest.raises(ValueError):
+        SessionClock(replace(SESSION, holidays=("2026-10-02 00:00:00",)), interval_minutes=5)
+    with pytest.raises(ValueError, match="HH:MM"):
+        ist_epoch(D, "09:15:00")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1366,20 +1406,34 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradebot.engine.clock
 - [ ] **Step 3: Write `src/tradebot/engine/clock.py`**
 
 ```python
-"""The only module that knows about IST. Everything else uses UTC epoch seconds."""
+"""The only module that knows about IST. Everything else uses UTC epoch seconds.
+
+Bar-time convention: every ``ts`` handed to this class is a bar's OPEN time. So
+``entries_allowed`` is true for the bar that opens strictly before the cutoff, and
+``square_off_bar_ts`` is the open of the last bar that CLOSES at or before square-off.
+"""
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from tradebot.config import SessionConfig
 
 IST = ZoneInfo("Asia/Kolkata")
+_HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 def _parse_hhmm(s: str) -> time:
-    h, m = s.split(":")
-    return time(int(h), int(m))
+    m = _HHMM.match(s)
+    if not m:
+        raise ValueError(f"expected a time in HH:MM form, got {s!r}")
+    return time(int(m.group(1)), int(m.group(2)))
+
+
+def _minute_of_day(s: str) -> int:
+    t = _parse_hhmm(s)
+    return t.hour * 60 + t.minute
 
 
 def ist_epoch(d: date, hhmm: str) -> int:
@@ -1400,15 +1454,30 @@ def iso_ist(ts: int) -> str:
 
 
 class SessionClock:
-    """Session boundaries for a given bar interval. Pure; no wall-clock access."""
+    """Session boundaries for a given bar interval. Pure; no wall-clock access.
+
+    Validates at construction that the session times are ordered and that at least one
+    bar fits between open and square-off, and that the square-off bar does not precede
+    the entry cutoff (otherwise an entry could be opened after square-off already ran).
+    """
 
     def __init__(self, session: SessionConfig, interval_minutes: int):
         self.session = session
         self.interval_sec = interval_minutes * 60
-        self._holidays = set(session.holidays)
+        self._holidays = {date.fromisoformat(h) for h in session.holidays}
+        o, cut, sq, c = (_minute_of_day(x) for x in
+                         (session.open, session.no_new_entries_after, session.square_off, session.close))
+        if not (o < cut <= sq <= c):
+            raise ValueError("session times must satisfy open < no_new_entries_after <= square_off <= close")
+        n_bars = (sq - o) // interval_minutes
+        if n_bars < 1:
+            raise ValueError(f"interval {interval_minutes}m does not fit between {session.open} and {session.square_off}")
+        self._square_off_offset_sec = (n_bars - 1) * self.interval_sec
+        if o + (n_bars - 1) * interval_minutes < cut:
+            raise ValueError("square-off bar would open before no_new_entries_after; shorten the interval or move the cutoff")
 
     def is_trading_day(self, d: date) -> bool:
-        return d.weekday() < 5 and d.isoformat() not in self._holidays
+        return d.weekday() < 5 and d not in self._holidays
 
     def open_ts(self, d: date) -> int:
         return ist_epoch(d, self.session.open)
@@ -1422,12 +1491,15 @@ class SessionClock:
 
     def square_off_bar_ts(self, d: date) -> int:
         """Open time of the last bar whose end is at or before the square-off time."""
-        sq = ist_epoch(d, self.session.square_off)
-        n_bars = (sq - self.open_ts(d)) // self.interval_sec
-        return self.open_ts(d) + (n_bars - 1) * self.interval_sec
+        return self.open_ts(d) + self._square_off_offset_sec
 
     def is_square_off_bar(self, ts: int) -> bool:
         return ts == self.square_off_bar_ts(date_of(ts))
+
+    def square_off_due(self, ts: int) -> bool:
+        """True from the square-off bar onward. Callers latch once per day so a missing
+        bar at exactly the square-off time cannot skip the square-off."""
+        return ts >= self.square_off_bar_ts(date_of(ts))
 
     def entries_allowed(self, ts: int) -> bool:
         d = date_of(ts)
@@ -1438,7 +1510,7 @@ class SessionClock:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_clock.py -v`
-Expected: 6 passed
+Expected: 14 passed
 
 - [ ] **Step 5: Commit**
 
@@ -3367,7 +3439,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradebot.engine.loop'
 
 Order inside a bar:
   1. broker.on_bar        fills pending entries at this bar's open, simulates exits
-  2. square-off           if this is the square-off bar
+  2. square-off           once per day, from the square-off bar onward (latched)
   3. kill switch          flatten if requested
   4. strategies           every candle feeds every strategy (indicators stay warm)
   5. risk -> AI -> place  only if entries are allowed and the kill switch is off
@@ -3401,6 +3473,7 @@ class _DayCounters:
     entries_placed: int = 0
     fills: int = 0
     flattened: bool = False
+    squared_off: bool = False
 
 
 class BacktestEngine:
@@ -3457,8 +3530,10 @@ class BacktestEngine:
             self._history.setdefault(sym, deque(maxlen=self.cfg.ai.candles_in_context)).append(c)
 
         self._record(self.broker.on_bar(ts, candles))
-        if self.clock.is_square_off_bar(ts):
+        if not self._day.squared_off and self.clock.square_off_due(ts):
+            # Latched per day: a missing bar at exactly the square-off time cannot skip it.
             self._record(self.broker.square_off(ts, candles))
+            self._day.squared_off = True
 
         kill = read_kill_switch(self.cfg.paths.kill_switch)
         if kill.flatten and not self._day.flattened:

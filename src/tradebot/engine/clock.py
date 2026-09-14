@@ -1,17 +1,31 @@
-"""The only module that knows about IST. Everything else uses UTC epoch seconds."""
+"""The only module that knows about IST. Everything else uses UTC epoch seconds.
+
+Bar-time convention: every ``ts`` handed to this class is a bar's OPEN time. So
+``entries_allowed`` is true for the bar that opens strictly before the cutoff, and
+``square_off_bar_ts`` is the open of the last bar that CLOSES at or before square-off.
+"""
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from tradebot.config import SessionConfig
 
 IST = ZoneInfo("Asia/Kolkata")
+_HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 def _parse_hhmm(s: str) -> time:
-    h, m = s.split(":")
-    return time(int(h), int(m))
+    m = _HHMM.match(s)
+    if not m:
+        raise ValueError(f"expected a time in HH:MM form, got {s!r}")
+    return time(int(m.group(1)), int(m.group(2)))
+
+
+def _minute_of_day(s: str) -> int:
+    t = _parse_hhmm(s)
+    return t.hour * 60 + t.minute
 
 
 def ist_epoch(d: date, hhmm: str) -> int:
@@ -32,15 +46,30 @@ def iso_ist(ts: int) -> str:
 
 
 class SessionClock:
-    """Session boundaries for a given bar interval. Pure; no wall-clock access."""
+    """Session boundaries for a given bar interval. Pure; no wall-clock access.
+
+    Validates at construction that the session times are ordered and that at least one
+    bar fits between open and square-off, and that the square-off bar does not precede
+    the entry cutoff (otherwise an entry could be opened after square-off already ran).
+    """
 
     def __init__(self, session: SessionConfig, interval_minutes: int):
         self.session = session
         self.interval_sec = interval_minutes * 60
-        self._holidays = set(session.holidays)
+        self._holidays = {date.fromisoformat(h) for h in session.holidays}
+        o, cut, sq, c = (_minute_of_day(x) for x in
+                         (session.open, session.no_new_entries_after, session.square_off, session.close))
+        if not (o < cut <= sq <= c):
+            raise ValueError("session times must satisfy open < no_new_entries_after <= square_off <= close")
+        n_bars = (sq - o) // interval_minutes
+        if n_bars < 1:
+            raise ValueError(f"interval {interval_minutes}m does not fit between {session.open} and {session.square_off}")
+        self._square_off_offset_sec = (n_bars - 1) * self.interval_sec
+        if o + (n_bars - 1) * interval_minutes < cut:
+            raise ValueError("square-off bar would open before no_new_entries_after; shorten the interval or move the cutoff")
 
     def is_trading_day(self, d: date) -> bool:
-        return d.weekday() < 5 and d.isoformat() not in self._holidays
+        return d.weekday() < 5 and d not in self._holidays
 
     def open_ts(self, d: date) -> int:
         return ist_epoch(d, self.session.open)
@@ -54,12 +83,15 @@ class SessionClock:
 
     def square_off_bar_ts(self, d: date) -> int:
         """Open time of the last bar whose end is at or before the square-off time."""
-        sq = ist_epoch(d, self.session.square_off)
-        n_bars = (sq - self.open_ts(d)) // self.interval_sec
-        return self.open_ts(d) + (n_bars - 1) * self.interval_sec
+        return self.open_ts(d) + self._square_off_offset_sec
 
     def is_square_off_bar(self, ts: int) -> bool:
         return ts == self.square_off_bar_ts(date_of(ts))
+
+    def square_off_due(self, ts: int) -> bool:
+        """True from the square-off bar onward. Callers latch once per day so a missing
+        bar at exactly the square-off time cannot skip the square-off."""
+        return ts >= self.square_off_bar_ts(date_of(ts))
 
     def entries_allowed(self, ts: int) -> bool:
         d = date_of(ts)
