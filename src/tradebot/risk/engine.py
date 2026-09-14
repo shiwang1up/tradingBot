@@ -1,6 +1,7 @@
 """Pure risk checks. Order of checks follows spec section 6."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from tradebot.config import RiskConfig
@@ -21,7 +22,7 @@ class PortfolioState:
 
     @property
     def open_count(self) -> int:
-        return len(self.open_symbols) + len(self.pending_symbols)
+        return len(self.open_symbols | self.pending_symbols)
 
     def daily_loss_breached(self, cfg: RiskConfig) -> bool:
         return (self.realised_today + self.unrealised) <= -(cfg.daily_loss_cap_pct / 100.0) * self.capital
@@ -41,6 +42,8 @@ def evaluate(signal: Signal, state: PortfolioState, cfg: RiskConfig, lot_size: i
         return Rejection(signal, "symbol_already_open")
     if signal.bar_ts <= state.cooldown_until.get(signal.symbol, -1):
         return Rejection(signal, "cooldown")
+    if not (math.isfinite(signal.entry_price) and signal.entry_price > 0):
+        return Rejection(signal, "invalid_price")
     if signal.direction == "LONG" and not signal.stop_price < signal.entry_price:
         return Rejection(signal, "invalid_stop")
     if signal.direction == "SHORT" and not signal.stop_price > signal.entry_price:

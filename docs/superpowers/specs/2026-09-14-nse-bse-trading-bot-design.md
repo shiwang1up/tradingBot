@@ -173,7 +173,7 @@ Every rejection is stored with a reason code. Checks in order:
 7. Stop price present and on the correct side of entry.
 8. Short signals with product CNC: reject. Shorts are intraday only.
 9. Position size:
-   - `risk_qty = floor(capital * risk.per_trade_pct / |entry - stop|)`
+   - `risk_qty = floor(capital * risk.per_trade_pct / 100 / |entry - stop|)` (percents are human percents)
    - `capital_qty = floor(available_margin_for_product / entry)`
    - `qty = min(risk_qty, capital_qty)`, rounded down to `lot_size`.
    - Reject if `qty < lot_size`.

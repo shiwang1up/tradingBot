@@ -29,6 +29,23 @@ def test_kill_switch_absent(tmp_path):
     assert read_kill_switch(tmp_path / "KILL") == KillState(False, False)
 
 
+def test_kill_switch_never_raises_and_fails_closed(tmp_path):
+    d = tmp_path / "KILL"
+    d.mkdir()
+    assert read_kill_switch(d) == KillState(True, False)      # directory: block, don't flatten
+    f = tmp_path / "K2"
+    f.write_bytes(b"\xff\xfe not utf8")
+    assert read_kill_switch(f) == KillState(True, False)      # undecodable: still active
+    link = tmp_path / "K3"
+    link.symlink_to(tmp_path / "gone")
+    assert read_kill_switch(link) == KillState(False, False)  # dangling symlink == absent
+
+
+def test_kill_switch_flatten_anywhere_in_text(tmp_path):
+    (tmp_path / "KILL").write_text("FLATTEN everything now\n")
+    assert read_kill_switch(tmp_path / "KILL").flatten
+
+
 def test_kill_switch_empty_file_blocks_entries_only(tmp_path):
     (tmp_path / "KILL").write_text("")
     assert read_kill_switch(tmp_path / "KILL") == KillState(True, False)
@@ -47,6 +64,12 @@ def test_kill_switch_flatten(tmp_path):
     (100_000, 1.0, 100.0, 99.0, 5_000, 75, 0),       # 50 < lot => 0
     (100_000, 1.0, 100.0, 100.0, 500_000, 1, 0),     # zero stop distance
     (100_000, 0.5, 250.0, 247.5, 1_000_000, 1, 200), # 500 / 2.5
+    (100_000, 0.5, 100.0, 99.8, 1e9, 500, 2500),      # float-exact boundary must not floor to 2000
+    (100_000, 1.0, 100.0, 99.0, 0, 1, 0),             # no margin
+    (100_000, 1.0, 100.0, 99.0, -5, 1, 0),            # negative margin
+    (100_000, 1.0, 100.0, 99.0, 500_000, 5000, 0),    # lot exceeds both candidates
+    (100_000, 1.0, float("nan"), 99.0, 500_000, 1, 0),
+    (100_000, 1.0, 100.0, 99.0, float("inf"), 1, 0),
 ])
 def test_compute_quantity(capital, pct, entry, stop, margin, lot, expected):
     assert compute_quantity(capital, pct, entry, stop, margin, lot) == expected
@@ -106,3 +129,27 @@ def test_approved_order_has_quantity_and_client_id():
     assert isinstance(r, ApprovedOrder)
     assert r.quantity == 1000
     assert len(r.client_id) == 16
+
+
+def test_check_precedence_kill_switch_wins():
+    st = _state(realised_today=-9999.0, entries_today=99, open_symbols={"RELIANCE"},
+                cooldown_until={"RELIANCE": 99_999})
+    r = evaluate(_sig(), st, CFG, 1, 0, KillState(True, False))
+    assert r.reason == "kill_switch"
+    assert evaluate(_sig(), st, CFG, 1, 0, OFF).reason == "daily_loss_cap"
+
+
+def test_invalid_price_reason():
+    assert evaluate(_sig(entry=0.0, stop=-1.0), _state(), CFG, 1, 500_000, OFF).reason == "invalid_price"
+
+
+def test_evaluate_does_not_mutate_state():
+    st = _state(open_symbols={"A"}, pending_symbols={"B"}, cooldown_until={"C": 5})
+    before = (set(st.open_symbols), set(st.pending_symbols), dict(st.cooldown_until), st.entries_today)
+    evaluate(_sig(), st, CFG, 1, 500_000, OFF)
+    assert before == (st.open_symbols, st.pending_symbols, st.cooldown_until, st.entries_today)
+
+
+def test_open_count_does_not_double_count_overlap():
+    st = _state(open_symbols={"A"}, pending_symbols={"A"})
+    assert st.open_count == 1

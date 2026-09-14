@@ -3009,7 +3009,6 @@ git commit -m "feat: strategy base and EMA/RSI strategy"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_risk.py
 import pytest
 
 from tradebot.config import RiskConfig
@@ -3041,6 +3040,23 @@ def test_kill_switch_absent(tmp_path):
     assert read_kill_switch(tmp_path / "KILL") == KillState(False, False)
 
 
+def test_kill_switch_never_raises_and_fails_closed(tmp_path):
+    d = tmp_path / "KILL"
+    d.mkdir()
+    assert read_kill_switch(d) == KillState(True, False)      # directory: block, don't flatten
+    f = tmp_path / "K2"
+    f.write_bytes(b"\xff\xfe not utf8")
+    assert read_kill_switch(f) == KillState(True, False)      # undecodable: still active
+    link = tmp_path / "K3"
+    link.symlink_to(tmp_path / "gone")
+    assert read_kill_switch(link) == KillState(False, False)  # dangling symlink == absent
+
+
+def test_kill_switch_flatten_anywhere_in_text(tmp_path):
+    (tmp_path / "KILL").write_text("FLATTEN everything now\n")
+    assert read_kill_switch(tmp_path / "KILL").flatten
+
+
 def test_kill_switch_empty_file_blocks_entries_only(tmp_path):
     (tmp_path / "KILL").write_text("")
     assert read_kill_switch(tmp_path / "KILL") == KillState(True, False)
@@ -3059,6 +3075,12 @@ def test_kill_switch_flatten(tmp_path):
     (100_000, 1.0, 100.0, 99.0, 5_000, 75, 0),       # 50 < lot => 0
     (100_000, 1.0, 100.0, 100.0, 500_000, 1, 0),     # zero stop distance
     (100_000, 0.5, 250.0, 247.5, 1_000_000, 1, 200), # 500 / 2.5
+    (100_000, 0.5, 100.0, 99.8, 1e9, 500, 2500),      # float-exact boundary must not floor to 2000
+    (100_000, 1.0, 100.0, 99.0, 0, 1, 0),             # no margin
+    (100_000, 1.0, 100.0, 99.0, -5, 1, 0),            # negative margin
+    (100_000, 1.0, 100.0, 99.0, 500_000, 5000, 0),    # lot exceeds both candidates
+    (100_000, 1.0, float("nan"), 99.0, 500_000, 1, 0),
+    (100_000, 1.0, 100.0, 99.0, float("inf"), 1, 0),
 ])
 def test_compute_quantity(capital, pct, entry, stop, margin, lot, expected):
     assert compute_quantity(capital, pct, entry, stop, margin, lot) == expected
@@ -3118,6 +3140,30 @@ def test_approved_order_has_quantity_and_client_id():
     assert isinstance(r, ApprovedOrder)
     assert r.quantity == 1000
     assert len(r.client_id) == 16
+
+
+def test_check_precedence_kill_switch_wins():
+    st = _state(realised_today=-9999.0, entries_today=99, open_symbols={"RELIANCE"},
+                cooldown_until={"RELIANCE": 99_999})
+    r = evaluate(_sig(), st, CFG, 1, 0, KillState(True, False))
+    assert r.reason == "kill_switch"
+    assert evaluate(_sig(), st, CFG, 1, 0, OFF).reason == "daily_loss_cap"
+
+
+def test_invalid_price_reason():
+    assert evaluate(_sig(entry=0.0, stop=-1.0), _state(), CFG, 1, 500_000, OFF).reason == "invalid_price"
+
+
+def test_evaluate_does_not_mutate_state():
+    st = _state(open_symbols={"A"}, pending_symbols={"B"}, cooldown_until={"C": 5})
+    before = (set(st.open_symbols), set(st.pending_symbols), dict(st.cooldown_until), st.entries_today)
+    evaluate(_sig(), st, CFG, 1, 500_000, OFF)
+    assert before == (st.open_symbols, st.pending_symbols, st.cooldown_until, st.entries_today)
+
+
+def test_open_count_does_not_double_count_overlap():
+    st = _state(open_symbols={"A"}, pending_symbols={"A"})
+    assert st.open_count == 1
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -3132,19 +3178,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Union
 
 
 @dataclass(frozen=True)
 class KillState:
-    active: bool   # file exists: no new entries
-    flatten: bool  # file contains "flatten": also square off everything
+    active: bool   # file exists (or is unreadable): no new entries
+    flatten: bool  # file mentions "flatten": also square off everything
 
 
-def read_kill_switch(path: str | Path) -> KillState:
-    p = Path(path)
-    if not p.exists():
+def read_kill_switch(path: Union[str, Path]) -> KillState:
+    """Safety interlock: never raises, and fails closed.
+
+    A single read avoids the exists/read race. Any OS error other than "not there"
+    (directory, permissions, I/O) blocks new entries rather than being ignored.
+    """
+    try:
+        text = Path(path).read_text(errors="replace")
+    except FileNotFoundError:
         return KillState(False, False)
-    return KillState(True, p.read_text().strip().lower() == "flatten")
+    except OSError:
+        return KillState(True, False)
+    return KillState(True, "flatten" in text.lower())
 ```
 
 - [ ] **Step 4: Write `src/tradebot/risk/sizing.py`**
@@ -3154,15 +3209,19 @@ from __future__ import annotations
 
 import math
 
+_EPS = 1e-9  # absorbs float error on tick-aligned distances so exact integers are not floored down
+
 
 def compute_quantity(capital: float, per_trade_pct: float, entry: float, stop: float,
                      available_margin: float, lot_size: int) -> int:
     """min(risk-based size, margin-based size), rounded down to lot size. 0 if below one lot."""
     dist = abs(entry - stop)
-    if dist <= 0 or entry <= 0 or lot_size <= 0:
+    if not all(math.isfinite(x) for x in (dist, entry, available_margin, capital)):
         return 0
-    risk_qty = math.floor(capital * per_trade_pct / 100.0 / dist)
-    margin_qty = math.floor(available_margin / entry)
+    if dist <= 0 or entry <= 0 or lot_size <= 0 or available_margin <= 0:
+        return 0
+    risk_qty = math.floor(capital * per_trade_pct / 100.0 / dist + _EPS)
+    margin_qty = math.floor(available_margin / entry + _EPS)
     qty = min(risk_qty, margin_qty)
     qty -= qty % lot_size
     return max(qty, 0)
@@ -3174,6 +3233,7 @@ def compute_quantity(capital: float, per_trade_pct: float, entry: float, stop: f
 """Pure risk checks. Order of checks follows spec section 6."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from tradebot.config import RiskConfig
@@ -3194,7 +3254,7 @@ class PortfolioState:
 
     @property
     def open_count(self) -> int:
-        return len(self.open_symbols) + len(self.pending_symbols)
+        return len(self.open_symbols | self.pending_symbols)
 
     def daily_loss_breached(self, cfg: RiskConfig) -> bool:
         return (self.realised_today + self.unrealised) <= -(cfg.daily_loss_cap_pct / 100.0) * self.capital
@@ -3214,6 +3274,8 @@ def evaluate(signal: Signal, state: PortfolioState, cfg: RiskConfig, lot_size: i
         return Rejection(signal, "symbol_already_open")
     if signal.bar_ts <= state.cooldown_until.get(signal.symbol, -1):
         return Rejection(signal, "cooldown")
+    if not (math.isfinite(signal.entry_price) and signal.entry_price > 0):
+        return Rejection(signal, "invalid_price")
     if signal.direction == "LONG" and not signal.stop_price < signal.entry_price:
         return Rejection(signal, "invalid_stop")
     if signal.direction == "SHORT" and not signal.stop_price > signal.entry_price:
@@ -3230,7 +3292,7 @@ def evaluate(signal: Signal, state: PortfolioState, cfg: RiskConfig, lot_size: i
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_risk.py -v`
-Expected: 19 passed
+Expected: 31 passed
 
 - [ ] **Step 7: Commit**
 
