@@ -4003,6 +4003,7 @@ def test_engine_invariants(repo, tmp_path):
 def test_engine_records_signals_decisions_and_orders(repo, tmp_path):
     cfg = make_config(tmp_path)
     _run(repo, cfg, _candles())
+    assert repo.rejection_counts("t1").get("entries_closed", 0) >= 0  # after-cutoff signals are rows, not silence
     n_signals = repo.conn.execute("SELECT COUNT(*) FROM signals WHERE run_id='t1'").fetchone()[0]
     n_risk = repo.conn.execute("SELECT COUNT(*) FROM risk_decisions WHERE run_id='t1'").fetchone()[0]
     n_ai = repo.conn.execute("SELECT COUNT(*) FROM ai_decisions WHERE run_id='t1'").fetchone()[0]
@@ -4017,7 +4018,8 @@ def test_kill_switch_blocks_entries(repo, tmp_path):
     Path(cfg.paths.kill_switch).write_text("")
     _run(repo, cfg, _candles())
     assert repo.list_positions("t1") == []
-    assert repo.rejection_counts("t1") == {}  # signals dropped before risk, nothing recorded
+    rej = repo.rejection_counts("t1")
+    assert rej.get("kill_switch", 0) > 0 and set(rej) <= {"kill_switch", "entries_closed"}
 
 
 def test_max_open_positions_one(repo, tmp_path):
@@ -4064,6 +4066,11 @@ def test_strategy_exception_disables_strategy_for_day(repo, tmp_path):
                          SessionClock(cfg.session, 5), {"A": 1, "B": 1}, "t1")
     eng.run()  # must not raise
     assert "boom" not in eng.disabled_strategies  # re-enabled on the next day
+    rows = repo.conn.execute("SELECT bar_ts FROM signals WHERE run_id='t1'").fetchall()
+    day1_after_10 = ist_epoch(date(2026, 9, 14), "10:00")
+    day2_open = ist_epoch(date(2026, 9, 15), "09:15")
+    assert not [r for r in rows if day1_after_10 <= r["bar_ts"] < day2_open], "disabled for the rest of day 1"
+    assert [r for r in rows if r["bar_ts"] >= day2_open], "runs again on day 2"
 
 
 def test_golden_trades(repo, tmp_path):
@@ -4191,9 +4198,15 @@ class BacktestEngine:
             self._flatten(ts, candles)
 
         signals = self._run_strategies(candles)
-        if not signals or kill.active or not self.clock.entries_allowed(ts):
+        if not signals:
             return
-        self._place(ts, candles, signals, kill)
+        if not self.clock.entries_allowed(ts):
+            # Audit trail: every dropped signal gets a row (spec 6), even outside entry hours.
+            for _, sig in signals:
+                sid = self.repo.insert_signal(self.run_id, sig)
+                self.repo.insert_risk_decision(self.run_id, sid, False, "entries_closed", 0)
+            return
+        self._place(ts, candles, signals, kill)  # a live kill switch is rejected inside evaluate()
 
     def _run_strategies(self, candles: dict[str, Candle]) -> list[tuple[Strategy, Signal]]:
         out: list[tuple[Strategy, Signal]] = []

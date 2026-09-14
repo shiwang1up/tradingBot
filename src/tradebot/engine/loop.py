@@ -103,9 +103,15 @@ class BacktestEngine:
             self._flatten(ts, candles)
 
         signals = self._run_strategies(candles)
-        if not signals or kill.active or not self.clock.entries_allowed(ts):
+        if not signals:
             return
-        self._place(ts, candles, signals, kill)
+        if not self.clock.entries_allowed(ts):
+            # Audit trail: every dropped signal gets a row (spec 6), even outside entry hours.
+            for _, sig in signals:
+                sid = self.repo.insert_signal(self.run_id, sig)
+                self.repo.insert_risk_decision(self.run_id, sid, False, "entries_closed", 0)
+            return
+        self._place(ts, candles, signals, kill)  # a live kill switch is rejected inside evaluate()
 
     def _run_strategies(self, candles: dict[str, Candle]) -> list[tuple[Strategy, Signal]]:
         out: list[tuple[Strategy, Signal]] = []
