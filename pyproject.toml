@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "NSE/BSE trading bot on the Groww Trade API"
 requires-python = ">=3.9"
 dependencies = [
-    "growwapi>=1.5.0",
+    "growwapi>=1.5.0,<2",
     "pyotp>=2.9",
-    "anthropic>=0.40",
+    "anthropic>=0.40,<1",
     "pyyaml>=6.0",
     "click>=8.1",
     "python-dotenv>=1.0",

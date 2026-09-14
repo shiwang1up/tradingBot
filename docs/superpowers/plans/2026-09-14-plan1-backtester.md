@@ -93,9 +93,9 @@ version = "0.1.0"
 description = "NSE/BSE trading bot on the Groww Trade API"
 requires-python = ">=3.9"
 dependencies = [
-    "growwapi>=1.5.0",
+    "growwapi>=1.5.0,<2",
     "pyotp>=2.9",
-    "anthropic>=0.40",
+    "anthropic>=0.40,<1",
     "pyyaml>=6.0",
     "click>=8.1",
     "python-dotenv>=1.0",
@@ -142,15 +142,18 @@ ANTHROPIC_API_KEY=
 ```python
 import pytest
 
-from tradebot.store.db import connect
-from tradebot.store.repo import Repo
-
 
 @pytest.fixture
 def repo():
+    # Imported lazily: store modules arrive in Task 4, and no earlier test uses this fixture.
+    from tradebot.store.db import connect
+    from tradebot.store.repo import Repo
+
     conn = connect(":memory:")
-    yield Repo(conn)
-    conn.close()
+    try:
+        yield Repo(conn)
+    finally:
+        conn.close()
 ```
 
 - [ ] **Step 5: Create venv and install**
