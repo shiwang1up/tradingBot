@@ -5,6 +5,7 @@ Usage: .venv/bin/python scripts/update_universe.py [--index nifty200]
 import argparse
 import csv
 import io
+import os
 import sys
 
 import requests
@@ -22,8 +23,13 @@ def main() -> int:
     ap.add_argument("--index", default="nifty200", choices=URLS)
     ap.add_argument("--out", default="universe.yaml")
     args = ap.parse_args()
-    resp = requests.get(URLS[args.index], headers=HEADERS, timeout=30)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(URLS[args.index], headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"download failed: {e}", file=sys.stderr)
+        return 1
+    resp.encoding = "utf-8-sig"
     rows = list(csv.DictReader(io.StringIO(resp.text)))
     symbols = sorted(r["Symbol"].strip() for r in rows if r.get("Symbol"))
     if not symbols:
@@ -31,9 +37,11 @@ def main() -> int:
         return 1
     header = ("# Survivorship bias: this is today's constituent list. Backtests over past\n"
               "# months overstate results. See spec section 4.1.\n")
-    with open(args.out, "w") as f:
-        f.write(header)
-        yaml.safe_dump({"exchange": "NSE", "symbols": symbols}, f, sort_keys=False)
+    body = header + yaml.safe_dump({"exchange": "NSE", "symbols": symbols}, sort_keys=False)
+    tmp = args.out + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(body)
+    os.replace(tmp, args.out)  # never leave universe.yaml half-written
     print(f"wrote {len(symbols)} symbols to {args.out}")
     return 0
 

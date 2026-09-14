@@ -1547,10 +1547,13 @@ BSE,500325,RELIANCE,BSE-RELIANCE,Reliance Industries,EQ,CASH,A,INE002A01018,,,,,
 - [ ] **Step 2: Write the failing tests**
 
 ```python
-# tests/test_universe_instruments.py
+from datetime import date
 from pathlib import Path
 
-from tradebot.data.instruments import load_instruments, resolve_universe
+import pytest
+
+from tradebot.data import instruments as instruments_mod
+from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
 from tradebot.data.universe import Universe, load_universe
 
 FIXTURE = Path(__file__).parent / "fixtures" / "instrument_sample.csv"
@@ -1583,6 +1586,84 @@ def test_resolve_universe_drops_missing_and_untradeable():
         "NOSUCH": "not_found",
         "NIFTY26SEPFUT": "not_cash_equity",
     }
+
+
+HEADER = FIXTURE.read_text().splitlines()[0]
+
+
+def test_load_universe_normalises_and_dedupes(tmp_path):
+    p = tmp_path / "universe.yaml"
+    p.write_text("exchange: nse\nsymbols:\n  - reliance\n  - RELIANCE\n  - ' TCS '\n  - RELIANCE\n")
+    assert load_universe(p) == Universe(exchange="NSE", symbols=("RELIANCE", "TCS"))
+
+
+@pytest.mark.parametrize("text", ["", "- a\n- b\n", "exchange: NSE\n", "exchange: NSE\nsymbols: []\n"])
+def test_load_universe_rejects_malformed(tmp_path, text):
+    p = tmp_path / "universe.yaml"
+    p.write_text(text)
+    with pytest.raises(ValueError):
+        load_universe(p)
+
+
+def test_load_universe_as_of_is_not_silently_ignored(tmp_path):
+    p = tmp_path / "universe.yaml"
+    p.write_text("exchange: NSE\nsymbols: [RELIANCE]\n")
+    with pytest.raises(NotImplementedError):
+        load_universe(p, as_of=date(2024, 1, 1))
+
+
+def test_load_instruments_missing_column_is_clear_error(tmp_path):
+    p = tmp_path / "i.csv"
+    p.write_text(HEADER.replace("buy_allowed,", "is_buy_allowed,") + "\n")
+    with pytest.raises(ValueError, match="missing columns"):
+        load_instruments(p)
+
+
+def test_load_instruments_tolerates_bom_and_empty_numeric_cells(tmp_path):
+    p = tmp_path / "i.csv"
+    row = "NSE,1,X,NSE-X,X Co,EQ,CASH,EQ,IN,,,,,,,,0,1,1,K"  # empty lot_size and tick_size
+    p.write_bytes(("\ufeff" + HEADER + "\n" + row + "\n").encode("utf-8"))
+    inst = load_instruments(p)[("NSE", "X")]
+    assert inst.lot_size == 1 and inst.tick_size == 0.05
+
+
+def test_load_instruments_bad_numeric_names_symbol(tmp_path):
+    p = tmp_path / "i.csv"
+    row = "NSE,1,BADLOT,NSE-BADLOT,X Co,EQ,CASH,EQ,IN,,,,,N/A,0.05,,0,1,1,K"
+    p.write_text(HEADER + "\n" + row + "\n")
+    with pytest.raises(ValueError, match="BADLOT"):
+        load_instruments(p)
+
+
+def test_empty_tradeability_cell_fails_closed(tmp_path):
+    p = tmp_path / "i.csv"
+    row = "NSE,1,X,NSE-X,X Co,EQ,CASH,EQ,IN,,,,,1,0.05,,0,,1,K"
+    p.write_text(HEADER + "\n" + row + "\n")
+    _, dropped = resolve_universe(Universe("NSE", ("X",)), load_instruments(p))
+    assert dropped == [("X", "not_tradeable")]
+
+
+def test_download_is_atomic_and_validated(tmp_path, monkeypatch):
+    dest = tmp_path / "data" / "instruments.csv"
+    dest.parent.mkdir()
+    dest.write_text("old-good-cache")
+
+    class Resp:
+        def __init__(self, content):
+            self.content = content
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(instruments_mod.requests, "get", lambda url, timeout: Resp(b"<html>blocked</html>"))
+    with pytest.raises(ValueError, match="does not look like"):
+        download_instruments(dest)
+    assert dest.read_text() == "old-good-cache"
+    assert not dest.with_suffix(".csv.tmp").exists()
+
+    monkeypatch.setattr(instruments_mod.requests, "get", lambda url, timeout: Resp(FIXTURE.read_bytes()))
+    download_instruments(dest)
+    assert ("NSE", "RELIANCE") in load_instruments(dest)
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -1596,7 +1677,9 @@ Expected: FAIL with `ModuleNotFoundError`
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+from typing import Optional, Union
 
 import yaml
 
@@ -1604,13 +1687,31 @@ import yaml
 @dataclass(frozen=True)
 class Universe:
     exchange: str
-    symbols: tuple[str, ...]
+    symbols: tuple  # of upper-case trading symbols, de-duplicated, order preserved
 
 
-def load_universe(path: str | Path, as_of=None) -> Universe:
-    """Load universe.yaml. `as_of` is reserved for point-in-time constituents and ignored for now."""
-    raw = yaml.safe_load(Path(path).read_text())
-    return Universe(exchange=str(raw["exchange"]), symbols=tuple(str(s) for s in raw["symbols"]))
+def load_universe(path: Union[str, Path], as_of: Optional[date] = None) -> Universe:
+    """Load universe.yaml.
+
+    `as_of` is the hook for point-in-time constituents (spec 4.1). It is not implemented,
+    so passing it raises rather than silently returning today's list.
+    """
+    if as_of is not None:
+        raise NotImplementedError("point-in-time constituents are not implemented; omit as_of")
+    p = Path(path)
+    if not p.exists():
+        raise ValueError(f"universe file not found: {p}")
+    raw = yaml.safe_load(p.read_text()) or {}
+    if not isinstance(raw, dict) or "exchange" not in raw or "symbols" not in raw:
+        raise ValueError(f"{p}: expected a mapping with 'exchange' and 'symbols' keys")
+    if not isinstance(raw["symbols"], list) or not raw["symbols"]:
+        raise ValueError(f"{p}: 'symbols' must be a non-empty list")
+    seen: dict = {}
+    for s in raw["symbols"]:
+        sym = str(s).strip().upper()
+        if sym:
+            seen.setdefault(sym, None)
+    return Universe(exchange=str(raw["exchange"]).strip().upper(), symbols=tuple(seen))
 ```
 
 - [ ] **Step 5: Write `src/tradebot/data/instruments.py`**
@@ -1620,14 +1721,20 @@ def load_universe(path: str | Path, as_of=None) -> Universe:
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Union
 
 import requests
 
 from tradebot.data.universe import Universe
 
 INSTRUMENTS_URL = "https://growwapi-assets.groww.in/instruments/instrument.csv"
+REQUIRED_COLUMNS = frozenset({
+    "exchange", "exchange_token", "trading_symbol", "segment", "instrument_type",
+    "lot_size", "tick_size", "buy_allowed", "sell_allowed",
+})
 
 
 @dataclass(frozen=True)
@@ -1647,39 +1754,60 @@ def _truthy(v: str) -> bool:
     return str(v).strip().lower() in ("1", "true", "y", "yes")
 
 
-def download_instruments(dest: str | Path, url: str = INSTRUMENTS_URL) -> Path:
+def download_instruments(dest: Union[str, Path], url: str = INSTRUMENTS_URL) -> Path:
+    """Download the master atomically: a failed or truncated download never replaces a good cache."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
-    dest.write_bytes(resp.content)
+    head = resp.content[:4096].decode("utf-8-sig", errors="replace").splitlines()[:1]
+    if not head or "trading_symbol" not in head[0]:
+        raise ValueError(f"instrument download from {url} does not look like the instrument CSV")
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(resp.content)
+    os.replace(tmp, dest)
     return dest
 
 
-def load_instruments(path: str | Path) -> dict[tuple[str, str], Instrument]:
-    out: dict[tuple[str, str], Instrument] = {}
-    with open(path, newline="") as f:
-        for row in csv.DictReader(f):
+def _num(row: dict, col: str, cast, default, path: Path):
+    raw = (row.get(col) or "").strip()
+    if raw == "":
+        return default
+    try:
+        return cast(float(raw))
+    except ValueError as e:
+        raise ValueError(f"{path}: bad {col}={raw!r} for {row.get('trading_symbol')!r}") from e
+
+
+def load_instruments(path: Union[str, Path]) -> dict:
+    """Return {(exchange, trading_symbol): Instrument}. Fails loudly on schema drift."""
+    path = Path(path)
+    out: dict = {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        missing = REQUIRED_COLUMNS - set(reader.fieldnames or ())
+        if missing:
+            raise ValueError(f"{path}: instrument CSV missing columns {sorted(missing)}")
+        for row in reader:
             inst = Instrument(
-                exchange=row["exchange"],
-                trading_symbol=row["trading_symbol"],
-                exchange_token=row["exchange_token"],
-                segment=row["segment"],
-                instrument_type=row["instrument_type"],
-                lot_size=int(float(row["lot_size"] or 1)),
-                tick_size=float(row["tick_size"] or 0.05),
-                buy_allowed=_truthy(row.get("buy_allowed", "1")),
-                sell_allowed=_truthy(row.get("sell_allowed", "1")),
+                exchange=row["exchange"].strip().upper(),
+                trading_symbol=row["trading_symbol"].strip().upper(),
+                exchange_token=row["exchange_token"].strip(),
+                segment=row["segment"].strip().upper(),
+                instrument_type=row["instrument_type"].strip().upper(),
+                lot_size=_num(row, "lot_size", int, 1, path),
+                tick_size=_num(row, "tick_size", float, 0.05, path),
+                buy_allowed=_truthy(row["buy_allowed"]),    # empty cell => not tradeable (fail closed)
+                sell_allowed=_truthy(row["sell_allowed"]),
             )
             out[(inst.exchange, inst.trading_symbol)] = inst
     return out
 
 
-def resolve_universe(universe: Universe, instruments: dict[tuple[str, str], Instrument]
-                     ) -> tuple[dict[str, Instrument], list[tuple[str, str]]]:
+def resolve_universe(universe: Universe, instruments: dict) -> tuple:
     """Return (resolved symbol -> Instrument, [(symbol, drop_reason)])."""
-    resolved: dict[str, Instrument] = {}
-    dropped: list[tuple[str, str]] = []
+    resolved: dict = {}
+    dropped: list = []
     for sym in universe.symbols:
         inst = instruments.get((universe.exchange, sym))
         if inst is None:
@@ -1696,7 +1824,7 @@ def resolve_universe(universe: Universe, instruments: dict[tuple[str, str], Inst
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_universe_instruments.py -v`
-Expected: 3 passed
+Expected: 14 passed
 
 - [ ] **Step 7: Write `universe.yaml` (NIFTY 50 starter; run the script in Step 8 to expand to NIFTY 200)**
 
@@ -1767,6 +1895,7 @@ Usage: .venv/bin/python scripts/update_universe.py [--index nifty200]
 import argparse
 import csv
 import io
+import os
 import sys
 
 import requests
@@ -1784,8 +1913,13 @@ def main() -> int:
     ap.add_argument("--index", default="nifty200", choices=URLS)
     ap.add_argument("--out", default="universe.yaml")
     args = ap.parse_args()
-    resp = requests.get(URLS[args.index], headers=HEADERS, timeout=30)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(URLS[args.index], headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"download failed: {e}", file=sys.stderr)
+        return 1
+    resp.encoding = "utf-8-sig"
     rows = list(csv.DictReader(io.StringIO(resp.text)))
     symbols = sorted(r["Symbol"].strip() for r in rows if r.get("Symbol"))
     if not symbols:
@@ -1793,9 +1927,11 @@ def main() -> int:
         return 1
     header = ("# Survivorship bias: this is today's constituent list. Backtests over past\n"
               "# months overstate results. See spec section 4.1.\n")
-    with open(args.out, "w") as f:
-        f.write(header)
-        yaml.safe_dump({"exchange": "NSE", "symbols": symbols}, f, sort_keys=False)
+    body = header + yaml.safe_dump({"exchange": "NSE", "symbols": symbols}, sort_keys=False)
+    tmp = args.out + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(body)
+    os.replace(tmp, args.out)  # never leave universe.yaml half-written
     print(f"wrote {len(symbols)} symbols to {args.out}")
     return 0
 
