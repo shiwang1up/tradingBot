@@ -44,6 +44,13 @@ def test_parse_candles_malformed_row_names_symbol():
         parse_candles("RELIANCE", {"candles": [{"ts": 1}]})
 
 
+def test_parse_candles_rejects_non_finite_or_inconsistent_ohlc():
+    with pytest.raises(ValueError, match="bad OHLC"):
+        parse_candles("X", {"candles": [[1, float("nan"), 2, 0.5, 1.5, 10]]})
+    with pytest.raises(ValueError, match="bad OHLC"):
+        parse_candles("X", {"candles": [[1, 1, 2, 0.5, 5.0, 10]]})  # close above high
+
+
 def test_parse_candles_empty():
     assert parse_candles("X", {}) == []
     assert parse_candles("X", {"candles": None}) == []

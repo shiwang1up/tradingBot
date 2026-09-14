@@ -2,6 +2,7 @@
 Order, feed, position, and margin methods are added in Plan 3."""
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -62,8 +63,10 @@ def parse_candles(symbol: str, resp: dict | None) -> list[Candle]:
     for r in rows:
         if not isinstance(r, (list, tuple)) or len(r) < 6:
             raise ValueError(f"{symbol}: malformed candle row {r!r}")
-        out.append(Candle(symbol, _to_epoch(r[0]), float(r[1]), float(r[2]), float(r[3]),
-                          float(r[4]), int(float(r[5] or 0))))
+        o, h, l, c = (float(r[i]) for i in (1, 2, 3, 4))
+        if not all(math.isfinite(x) for x in (o, h, l, c)) or not (l <= min(o, c) and max(o, c) <= h):
+            raise ValueError(f"{symbol}: bad OHLC in candle row {r!r}")
+        out.append(Candle(symbol, _to_epoch(r[0]), o, h, l, c, int(float(r[5] or 0))))
     return out
 
 

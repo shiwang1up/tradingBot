@@ -2013,6 +2013,13 @@ def test_parse_candles_malformed_row_names_symbol():
         parse_candles("RELIANCE", {"candles": [{"ts": 1}]})
 
 
+def test_parse_candles_rejects_non_finite_or_inconsistent_ohlc():
+    with pytest.raises(ValueError, match="bad OHLC"):
+        parse_candles("X", {"candles": [[1, float("nan"), 2, 0.5, 1.5, 10]]})
+    with pytest.raises(ValueError, match="bad OHLC"):
+        parse_candles("X", {"candles": [[1, 1, 2, 0.5, 5.0, 10]]})  # close above high
+
+
 def test_parse_candles_empty():
     assert parse_candles("X", {}) == []
     assert parse_candles("X", {"candles": None}) == []
@@ -2201,6 +2208,7 @@ Expected: FAIL with `ModuleNotFoundError`
 Order, feed, position, and margin methods are added in Plan 3."""
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -2261,8 +2269,10 @@ def parse_candles(symbol: str, resp: dict | None) -> list[Candle]:
     for r in rows:
         if not isinstance(r, (list, tuple)) or len(r) < 6:
             raise ValueError(f"{symbol}: malformed candle row {r!r}")
-        out.append(Candle(symbol, _to_epoch(r[0]), float(r[1]), float(r[2]), float(r[3]),
-                          float(r[4]), int(float(r[5] or 0))))
+        o, h, l, c = (float(r[i]) for i in (1, 2, 3, 4))
+        if not all(math.isfinite(x) for x in (o, h, l, c)) or not (l <= min(o, c) and max(o, c) <= h):
+            raise ValueError(f"{symbol}: bad OHLC in candle row {r!r}")
+        out.append(Candle(symbol, _to_epoch(r[0]), o, h, l, c, int(float(r[5] or 0))))
     return out
 
 
@@ -2406,7 +2416,7 @@ class HistoricalSource:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_historical.py -v`
-Expected: 22 passed
+Expected: 23 passed
 
 - [ ] **Step 6: Commit**
 
@@ -2426,7 +2436,6 @@ git commit -m "feat: groww historical adapter and incremental fetch"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_indicators.py
 import pytest
 
 from tradebot.strategy.indicators import ATR, EMA, RSI
@@ -2470,7 +2479,7 @@ def _c(o, h, l, c, ts=0):
 
 def test_atr_constant_range_no_gaps():
     a = ATR(2)
-    assert a.update(_c(10, 11, 9, 10)) is None      # no prev close: TR ignored for seeding? No: first TR = h-l
+    assert a.update(_c(10, 11, 9, 10)) is None      # first TR = high - low; ATR(2) needs two of them
     assert a.update(_c(10, 11, 9, 10)) == pytest.approx(2.0)
     assert a.update(_c(10, 11, 9, 10)) == pytest.approx(2.0) and a.ready
 
@@ -2480,6 +2489,43 @@ def test_atr_uses_gap_from_prev_close():
     a.update(_c(10, 11, 9, 10))
     # gap up: prev close 10, low 12 => TR = max(13-12, |13-10|, |12-10|) = 3
     assert a.update(_c(12, 13, 12, 13)) == pytest.approx(3.0)
+
+
+# Wilder's worked example (StockCharts): 33 closes, RSI(14) first value 70.46.
+STOCKCHARTS = [44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03, 45.61, 46.28,
+               46.28, 46.00, 46.03, 46.41, 46.22, 45.64, 46.21, 46.25, 45.71, 46.45, 45.78, 45.35, 44.03, 44.18,
+               44.22, 44.57, 43.42, 42.66, 43.13]
+
+
+def test_rsi_matches_wilder_reference_series():
+    r = RSI(14)
+    values = [v for v in (r.update(x) for x in STOCKCHARTS) if v is not None]
+    assert values[:6] == pytest.approx([70.4641, 66.2496, 66.4809, 69.3469, 66.2947, 57.9150], abs=1e-3)
+
+
+def test_rsi_flat_series_is_50_not_100():
+    r = RSI(3)
+    for _ in range(6):
+        v = r.update(10.0)
+    assert v == 50.0
+
+
+@pytest.mark.parametrize("cls", [EMA, RSI, ATR])
+@pytest.mark.parametrize("period", [0, -1, 2.5])
+def test_invalid_period_rejected(cls, period):
+    with pytest.raises(ValueError):
+        cls(period)
+
+
+def test_non_finite_input_fails_loud_instead_of_poisoning():
+    e = EMA(2)
+    e.update(1.0)
+    with pytest.raises(ValueError):
+        e.update(float("nan"))
+    with pytest.raises(ValueError):
+        RSI(2).update(float("inf"))
+    with pytest.raises(ValueError):
+        ATR(2).update(_c(1, float("nan"), 1, 1))
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2491,15 +2537,32 @@ Expected: FAIL with `ModuleNotFoundError`
 
 ```python
 """Incremental (streaming) indicators. Each update() consumes one bar and returns the
-current value, or None until warm-up completes. No lookahead: only past inputs are used."""
+current value, or None until warm-up completes. No lookahead: only past inputs are used.
+
+Inputs must be finite: a NaN would otherwise poison the state forever while `ready`
+still reports True, silently disabling the symbol. We fail loud instead."""
 from __future__ import annotations
+
+import math
 
 from tradebot.types import Candle
 
 
+def _check_period(period: int) -> int:
+    if not isinstance(period, int) or period < 1:
+        raise ValueError(f"period must be an integer >= 1, got {period!r}")
+    return period
+
+
+def _check_finite(name: str, x: float) -> float:
+    if not math.isfinite(x):
+        raise ValueError(f"{name}: non-finite input {x!r}")
+    return x
+
+
 class EMA:
     def __init__(self, period: int):
-        self.period = period
+        self.period = _check_period(period)
         self.k = 2.0 / (period + 1)
         self.value: float | None = None
         self._seed: list[float] = []
@@ -2509,6 +2572,7 @@ class EMA:
         return self.value is not None
 
     def update(self, x: float) -> float | None:
+        _check_finite("EMA", x)
         if self.value is None:
             self._seed.append(x)
             if len(self._seed) == self.period:
@@ -2519,10 +2583,11 @@ class EMA:
 
 
 class RSI:
-    """Wilder's RSI. Seeded with a simple average of the first `period` changes."""
+    """Wilder's RSI. Seeded with a simple average of the first `period` changes.
+    A perfectly flat series (no gains, no losses) reads 50, not 100."""
 
     def __init__(self, period: int):
-        self.period = period
+        self.period = _check_period(period)
         self.value: float | None = None
         self._prev: float | None = None
         self._gains: list[float] = []
@@ -2535,6 +2600,7 @@ class RSI:
         return self.value is not None
 
     def update(self, close: float) -> float | None:
+        _check_finite("RSI", close)
         if self._prev is None:
             self._prev = close
             return None
@@ -2551,7 +2617,9 @@ class RSI:
         else:
             self.avg_gain = (self.avg_gain * (self.period - 1) + gain) / self.period
             self.avg_loss = (self.avg_loss * (self.period - 1) + loss) / self.period
-        if self.avg_loss == 0:
+        if self.avg_gain == 0 and self.avg_loss == 0:
+            self.value = 50.0
+        elif self.avg_loss == 0:
             self.value = 100.0
         else:
             rs = self.avg_gain / self.avg_loss
@@ -2563,7 +2631,7 @@ class ATR:
     """Wilder's ATR. The first bar's true range is high-low (no previous close)."""
 
     def __init__(self, period: int):
-        self.period = period
+        self.period = _check_period(period)
         self.value: float | None = None
         self._prev_close: float | None = None
         self._seed: list[float] = []
@@ -2572,12 +2640,14 @@ class ATR:
     def ready(self) -> bool:
         return self.value is not None
 
-    def update(self, c: Candle) -> float | None:
+    def update(self, candle: Candle) -> float | None:
+        for name, x in (("high", candle.high), ("low", candle.low), ("close", candle.close)):
+            _check_finite(f"ATR.{name}", x)
         if self._prev_close is None:
-            tr = c.high - c.low
+            tr = candle.high - candle.low
         else:
-            tr = max(c.high - c.low, abs(c.high - self._prev_close), abs(c.low - self._prev_close))
-        self._prev_close = c.close
+            tr = max(candle.high - candle.low, abs(candle.high - self._prev_close), abs(candle.low - self._prev_close))
+        self._prev_close = candle.close
         if self.value is None:
             self._seed.append(tr)
             if len(self._seed) == self.period:
@@ -2590,7 +2660,7 @@ class ATR:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_indicators.py -v`
-Expected: 6 passed. If `test_atr_constant_range_no_gaps` fails on the first assertion, the implementation is wrong, not the test: ATR(2) needs two true ranges before it is ready, and the first bar contributes `high - low`.
+Expected: 17 passed. If `test_atr_constant_range_no_gaps` fails on the first assertion, the implementation is wrong, not the test: ATR(2) needs two true ranges before it is ready, and the first bar contributes `high - low`.
 
 - [ ] **Step 5: Commit**
 
@@ -2602,6 +2672,8 @@ git commit -m "feat: streaming EMA, RSI, ATR"
 ---
 
 ### Task 9: Strategy base and EMA/RSI strategy
+
+> Note from the Task 8 review: after a long run of identical closes RSI pins at exactly 100 or 0, so the first small tick afterwards can satisfy the 45/55 thresholds. Illiquid symbols will produce such runs from tick-built bars. A staleness guard (skip signals when the last N closes are identical) belongs in the live bar builder or a later strategy revision, not in this task.
 
 **Files:**
 - Create: `src/tradebot/strategy/base.py`
