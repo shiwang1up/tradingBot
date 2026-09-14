@@ -1,6 +1,6 @@
 import pytest
 
-from tradebot.strategy.ema_rsi import EmaRsiStrategy
+from tradebot.strategy.ema_rsi import EmaRsiStrategy, build_strategy
 from tradebot.types import Candle
 
 PARAMS = dict(fast=3, slow=5, rsi_period=3, rsi_long_min=55, rsi_short_max=45,
@@ -65,6 +65,61 @@ def test_recompute_reproduces_state():
     rebuilt.recompute("X", _candles(closes))
     assert live.snapshot("X") == pytest.approx(rebuilt.snapshot("X"))
     assert set(live.snapshot("X")) == {"ema_fast", "ema_slow", "rsi", "atr"}
+
+
+def test_rsi_filter_gates_both_directions():
+    long_series = [10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    s = EmaRsiStrategy({**PARAMS, "rsi_long_min": 101, "rsi_short_max": 45})
+    assert not [sig for _, sig in _run(s, _candles(long_series)) if sig]
+    short_series = [20, 21, 22, 23, 24, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16]
+    s = EmaRsiStrategy({**PARAMS, "rsi_long_min": 55, "rsi_short_max": -1})
+    assert not [sig for _, sig in _run(s, _candles(short_series)) if sig]
+
+
+def test_zero_or_sub_tick_atr_emits_nothing():
+    # flat bars (high == low == close) then a bullish cross with a near-zero ATR
+    flat = [Candle("X", 1000 + i * 300, 100.0, 100.0, 100.0, 100.0, 1) for i in range(8)]
+    rise = [Candle("X", 1000 + (8 + i) * 300, c, c, c, c, 1) for i, c in enumerate([100.01, 100.02, 100.03, 100.04])]
+    s = EmaRsiStrategy(PARAMS)
+    assert not [sig for _, sig in _run(s, flat + rise) if sig]
+
+
+def test_stop_and_target_are_on_the_correct_side_after_rounding():
+    s = EmaRsiStrategy({**PARAMS, "atr_stop_mult": 0.3})
+    closes = [10.03, 9.03, 8.03, 7.03, 6.03, 5.03, 6.03, 7.03, 8.03, 9.03, 10.03, 11.03, 12.03]
+    sigs = [sig for _, sig in _run(s, _candles(closes)) if sig]
+    assert sigs and all(sig.stop_price < sig.entry_price < sig.target_price for sig in sigs)
+    for sig in sigs:
+        assert round(sig.stop_price * 20) == pytest.approx(sig.stop_price * 20)  # on the 0.05 grid
+
+
+@pytest.mark.parametrize("bad", [
+    {"fast": 5, "slow": 3}, {"reward_risk": 0}, {"reward_risk": -1}, {"atr_stop_mult": 0},
+    {"rsi_long_min": 45, "rsi_short_max": 55}, {"product": "NRML"}, {"fast": 2.5}, {"min_stop_pct": 0},
+])
+def test_invalid_params_rejected(bad):
+    with pytest.raises(ValueError):
+        EmaRsiStrategy({**PARAMS, **bad})
+
+
+def test_build_strategy_registry():
+    assert isinstance(build_strategy("ema_rsi", PARAMS), EmaRsiStrategy)
+    with pytest.raises(ValueError):
+        build_strategy("nope", PARAMS)
+
+
+def test_reset_clears_symbol_state_only():
+    s = EmaRsiStrategy(PARAMS)
+    _run(s, _candles([10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 10], "A"))
+    _run(s, _candles([10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 10], "B"))
+    s.reset("A")
+    assert not s.is_ready("A") and s.is_ready("B")
+
+
+def test_recompute_rejects_wrong_symbol_candles():
+    s = EmaRsiStrategy(PARAMS)
+    with pytest.raises(ValueError):
+        s.recompute("A", _candles([1, 2, 3], "B"))
 
 
 def test_strategy_exception_is_not_swallowed():

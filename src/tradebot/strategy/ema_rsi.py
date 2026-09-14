@@ -5,7 +5,9 @@ from dataclasses import dataclass
 
 from tradebot.strategy.base import Strategy
 from tradebot.strategy.indicators import ATR, EMA, RSI
-from tradebot.types import Candle, Signal, round_tick
+from tradebot.types import Candle, Signal, round_tick_down, round_tick_up
+
+PRODUCTS = ("MIS", "CNC")
 
 
 @dataclass
@@ -17,19 +19,35 @@ class _State:
     prev_diff: float | None = None
 
 
+def _int(params: dict, key: str) -> int:
+    v = params[key]
+    if isinstance(v, bool) or int(v) != v:
+        raise ValueError(f"ema_rsi.{key} must be an integer, got {v!r}")
+    return int(v)
+
+
 class EmaRsiStrategy(Strategy):
     name = "ema_rsi"
 
     def __init__(self, params: dict):
-        self.fast_n = int(params["fast"])
-        self.slow_n = int(params["slow"])
-        self.rsi_n = int(params["rsi_period"])
+        self.fast_n = _int(params, "fast")
+        self.slow_n = _int(params, "slow")
+        self.rsi_n = _int(params, "rsi_period")
         self.rsi_long_min = float(params["rsi_long_min"])
         self.rsi_short_max = float(params["rsi_short_max"])
-        self.atr_n = int(params["atr_period"])
+        self.atr_n = _int(params, "atr_period")
         self.atr_mult = float(params["atr_stop_mult"])
         self.rr = float(params["reward_risk"])
+        self.min_stop_pct = float(params.get("min_stop_pct", 0.1))  # percent of entry
         self.product = params.get("product", "MIS")
+        if self.fast_n >= self.slow_n:
+            raise ValueError("ema_rsi.fast must be < ema_rsi.slow")
+        if self.atr_mult <= 0 or self.rr <= 0 or self.min_stop_pct <= 0:
+            raise ValueError("ema_rsi.atr_stop_mult, reward_risk and min_stop_pct must be > 0")
+        if self.rsi_long_min <= self.rsi_short_max:
+            raise ValueError("ema_rsi.rsi_long_min must be > ema_rsi.rsi_short_max")
+        if self.product not in PRODUCTS:
+            raise ValueError(f"ema_rsi.product must be one of {PRODUCTS}, got {self.product!r}")
         self._state: dict[str, _State] = {}
 
     def _st(self, symbol: str) -> _State:
@@ -65,13 +83,21 @@ class EmaRsiStrategy(Strategy):
         if prev is None:
             return None
         close = candle.close
+        # A stop closer than min_stop_pct of price (or a zero ATR) is noise: slippage alone would
+        # exceed it, and sizing would balloon to the margin limit. Emit nothing.
+        if atr * self.atr_mult < close * self.min_stop_pct / 100.0:
+            return None
         if prev <= 0 < diff and rsi >= self.rsi_long_min:
-            stop = round_tick(close - atr * self.atr_mult)
-            target = round_tick(close + (close - stop) * self.rr)
+            stop = round_tick_down(close - atr * self.atr_mult)     # away from entry
+            target = round_tick_down(close + (close - stop) * self.rr)  # toward entry
+            if not stop < close < target:
+                return None
             return Signal(self.name, candle.symbol, "LONG", close, stop, target, self.product, candle.ts)
         if prev >= 0 > diff and rsi <= self.rsi_short_max:
-            stop = round_tick(close + atr * self.atr_mult)
-            target = round_tick(close - (stop - close) * self.rr)
+            stop = round_tick_up(close + atr * self.atr_mult)
+            target = round_tick_up(close - (stop - close) * self.rr)
+            if not target < close < stop:
+                return None
             return Signal(self.name, candle.symbol, "SHORT", close, stop, target, self.product, candle.ts)
         return None
 

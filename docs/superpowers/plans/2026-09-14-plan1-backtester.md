@@ -248,6 +248,7 @@ until the project drops 3.9.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -259,6 +260,14 @@ TICK = 0.05
 
 def round_tick(price: float, tick: float = TICK) -> float:
     return round(round(price / tick) * tick, 2)
+
+
+def round_tick_down(price: float, tick: float = TICK) -> float:
+    return round(math.floor(price / tick + 1e-9) * tick, 2)
+
+
+def round_tick_up(price: float, tick: float = TICK) -> float:
+    return round(math.ceil(price / tick - 1e-9) * tick, 2)
 
 
 def make_client_id(strategy: str, symbol: str, bar_ts: int) -> str:
@@ -753,6 +762,7 @@ strategy:
     atr_period: 14
     atr_stop_mult: 1.5
     reward_risk: 2.0
+    min_stop_pct: 0.1         # skip signals whose stop is closer than this % of price
     product: MIS
 
 ai:
@@ -2683,10 +2693,9 @@ git commit -m "feat: streaming EMA, RSI, ATR"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_ema_rsi.py
 import pytest
 
-from tradebot.strategy.ema_rsi import EmaRsiStrategy
+from tradebot.strategy.ema_rsi import EmaRsiStrategy, build_strategy
 from tradebot.types import Candle
 
 PARAMS = dict(fast=3, slow=5, rsi_period=3, rsi_long_min=55, rsi_short_max=45,
@@ -2753,6 +2762,61 @@ def test_recompute_reproduces_state():
     assert set(live.snapshot("X")) == {"ema_fast", "ema_slow", "rsi", "atr"}
 
 
+def test_rsi_filter_gates_both_directions():
+    long_series = [10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    s = EmaRsiStrategy({**PARAMS, "rsi_long_min": 101, "rsi_short_max": 45})
+    assert not [sig for _, sig in _run(s, _candles(long_series)) if sig]
+    short_series = [20, 21, 22, 23, 24, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16]
+    s = EmaRsiStrategy({**PARAMS, "rsi_long_min": 55, "rsi_short_max": -1})
+    assert not [sig for _, sig in _run(s, _candles(short_series)) if sig]
+
+
+def test_zero_or_sub_tick_atr_emits_nothing():
+    # flat bars (high == low == close) then a bullish cross with a near-zero ATR
+    flat = [Candle("X", 1000 + i * 300, 100.0, 100.0, 100.0, 100.0, 1) for i in range(8)]
+    rise = [Candle("X", 1000 + (8 + i) * 300, c, c, c, c, 1) for i, c in enumerate([100.01, 100.02, 100.03, 100.04])]
+    s = EmaRsiStrategy(PARAMS)
+    assert not [sig for _, sig in _run(s, flat + rise) if sig]
+
+
+def test_stop_and_target_are_on_the_correct_side_after_rounding():
+    s = EmaRsiStrategy({**PARAMS, "atr_stop_mult": 0.3})
+    closes = [10.03, 9.03, 8.03, 7.03, 6.03, 5.03, 6.03, 7.03, 8.03, 9.03, 10.03, 11.03, 12.03]
+    sigs = [sig for _, sig in _run(s, _candles(closes)) if sig]
+    assert sigs and all(sig.stop_price < sig.entry_price < sig.target_price for sig in sigs)
+    for sig in sigs:
+        assert round(sig.stop_price * 20) == pytest.approx(sig.stop_price * 20)  # on the 0.05 grid
+
+
+@pytest.mark.parametrize("bad", [
+    {"fast": 5, "slow": 3}, {"reward_risk": 0}, {"reward_risk": -1}, {"atr_stop_mult": 0},
+    {"rsi_long_min": 45, "rsi_short_max": 55}, {"product": "NRML"}, {"fast": 2.5}, {"min_stop_pct": 0},
+])
+def test_invalid_params_rejected(bad):
+    with pytest.raises(ValueError):
+        EmaRsiStrategy({**PARAMS, **bad})
+
+
+def test_build_strategy_registry():
+    assert isinstance(build_strategy("ema_rsi", PARAMS), EmaRsiStrategy)
+    with pytest.raises(ValueError):
+        build_strategy("nope", PARAMS)
+
+
+def test_reset_clears_symbol_state_only():
+    s = EmaRsiStrategy(PARAMS)
+    _run(s, _candles([10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 10], "A"))
+    _run(s, _candles([10, 9, 8, 7, 6, 5, 6, 7, 8, 9, 10], "B"))
+    s.reset("A")
+    assert not s.is_ready("A") and s.is_ready("B")
+
+
+def test_recompute_rejects_wrong_symbol_candles():
+    s = EmaRsiStrategy(PARAMS)
+    with pytest.raises(ValueError):
+        s.recompute("A", _candles([1, 2, 3], "B"))
+
+
 def test_strategy_exception_is_not_swallowed():
     s = EmaRsiStrategy(PARAMS)
     with pytest.raises(AttributeError):
@@ -2802,6 +2866,8 @@ class Strategy(ABC):
         """Rebuild state for a symbol from scratch. Signals produced during replay are discarded."""
         self.reset(symbol)
         for c in candles:
+            if c.symbol != symbol:
+                raise ValueError(f"recompute({symbol!r}) given a candle for {c.symbol!r}")
             self.on_candle(c)
 ```
 
@@ -2815,7 +2881,9 @@ from dataclasses import dataclass
 
 from tradebot.strategy.base import Strategy
 from tradebot.strategy.indicators import ATR, EMA, RSI
-from tradebot.types import Candle, Signal, round_tick
+from tradebot.types import Candle, Signal, round_tick_down, round_tick_up
+
+PRODUCTS = ("MIS", "CNC")
 
 
 @dataclass
@@ -2827,19 +2895,35 @@ class _State:
     prev_diff: float | None = None
 
 
+def _int(params: dict, key: str) -> int:
+    v = params[key]
+    if isinstance(v, bool) or int(v) != v:
+        raise ValueError(f"ema_rsi.{key} must be an integer, got {v!r}")
+    return int(v)
+
+
 class EmaRsiStrategy(Strategy):
     name = "ema_rsi"
 
     def __init__(self, params: dict):
-        self.fast_n = int(params["fast"])
-        self.slow_n = int(params["slow"])
-        self.rsi_n = int(params["rsi_period"])
+        self.fast_n = _int(params, "fast")
+        self.slow_n = _int(params, "slow")
+        self.rsi_n = _int(params, "rsi_period")
         self.rsi_long_min = float(params["rsi_long_min"])
         self.rsi_short_max = float(params["rsi_short_max"])
-        self.atr_n = int(params["atr_period"])
+        self.atr_n = _int(params, "atr_period")
         self.atr_mult = float(params["atr_stop_mult"])
         self.rr = float(params["reward_risk"])
+        self.min_stop_pct = float(params.get("min_stop_pct", 0.1))  # percent of entry
         self.product = params.get("product", "MIS")
+        if self.fast_n >= self.slow_n:
+            raise ValueError("ema_rsi.fast must be < ema_rsi.slow")
+        if self.atr_mult <= 0 or self.rr <= 0 or self.min_stop_pct <= 0:
+            raise ValueError("ema_rsi.atr_stop_mult, reward_risk and min_stop_pct must be > 0")
+        if self.rsi_long_min <= self.rsi_short_max:
+            raise ValueError("ema_rsi.rsi_long_min must be > ema_rsi.rsi_short_max")
+        if self.product not in PRODUCTS:
+            raise ValueError(f"ema_rsi.product must be one of {PRODUCTS}, got {self.product!r}")
         self._state: dict[str, _State] = {}
 
     def _st(self, symbol: str) -> _State:
@@ -2875,13 +2959,21 @@ class EmaRsiStrategy(Strategy):
         if prev is None:
             return None
         close = candle.close
+        # A stop closer than min_stop_pct of price (or a zero ATR) is noise: slippage alone would
+        # exceed it, and sizing would balloon to the margin limit. Emit nothing.
+        if atr * self.atr_mult < close * self.min_stop_pct / 100.0:
+            return None
         if prev <= 0 < diff and rsi >= self.rsi_long_min:
-            stop = round_tick(close - atr * self.atr_mult)
-            target = round_tick(close + (close - stop) * self.rr)
+            stop = round_tick_down(close - atr * self.atr_mult)     # away from entry
+            target = round_tick_down(close + (close - stop) * self.rr)  # toward entry
+            if not stop < close < target:
+                return None
             return Signal(self.name, candle.symbol, "LONG", close, stop, target, self.product, candle.ts)
         if prev >= 0 > diff and rsi <= self.rsi_short_max:
-            stop = round_tick(close + atr * self.atr_mult)
-            target = round_tick(close - (stop - close) * self.rr)
+            stop = round_tick_up(close + atr * self.atr_mult)
+            target = round_tick_up(close - (stop - close) * self.rr)
+            if not target < close < stop:
+                return None
             return Signal(self.name, candle.symbol, "SHORT", close, stop, target, self.product, candle.ts)
         return None
 
@@ -2895,7 +2987,7 @@ def build_strategy(name: str, params: dict) -> Strategy:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_ema_rsi.py -v`
-Expected: 6 passed
+Expected: 20 passed
 
 - [ ] **Step 6: Commit**
 
@@ -3609,7 +3701,7 @@ BASE_CONFIG = {
              "mis_leverage": 5.0, "adopted_stop_pct": 1.5},
     "strategy": {"ema_rsi": {"fast": 9, "slow": 21, "rsi_period": 14, "rsi_long_min": 55,
                              "rsi_short_max": 45, "atr_period": 14, "atr_stop_mult": 1.5,
-                             "reward_risk": 2.0, "product": "MIS"}},
+                             "reward_risk": 2.0, "min_stop_pct": 0.1, "product": "MIS"}},
     "ai": {"filter": "stub", "model": "claude-sonnet-5", "candles_in_context": 30, "on_failure": "reject"},
     "execution": {"slippage_pct": 0.05, "entry_buffer_pct": 0.1, "bar_deadline_sec": 60, "interval_minutes": 5},
     "session": {"open": "09:15", "close": "15:30", "square_off": "15:10",

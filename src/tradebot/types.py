@@ -7,6 +7,7 @@ until the project drops 3.9.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -18,6 +19,14 @@ TICK = 0.05
 
 def round_tick(price: float, tick: float = TICK) -> float:
     return round(round(price / tick) * tick, 2)
+
+
+def round_tick_down(price: float, tick: float = TICK) -> float:
+    return round(math.floor(price / tick + 1e-9) * tick, 2)
+
+
+def round_tick_up(price: float, tick: float = TICK) -> float:
+    return round(math.ceil(price / tick - 1e-9) * tick, 2)
 
 
 def make_client_id(strategy: str, symbol: str, bar_ts: int) -> str:

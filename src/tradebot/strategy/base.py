@@ -33,4 +33,6 @@ class Strategy(ABC):
         """Rebuild state for a symbol from scratch. Signals produced during replay are discarded."""
         self.reset(symbol)
         for c in candles:
+            if c.symbol != symbol:
+                raise ValueError(f"recompute({symbol!r}) given a candle for {c.symbol!r}")
             self.on_candle(c)

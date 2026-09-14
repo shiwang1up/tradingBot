@@ -20,6 +20,7 @@ strategy:
     atr_period: 14
     atr_stop_mult: 1.5
     reward_risk: 2.0
+    min_stop_pct: 0.1         # skip signals whose stop is closer than this % of price
     product: MIS
 
 ai:
