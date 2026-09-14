@@ -183,7 +183,7 @@ git commit -m "chore: project scaffold"
 
 ```python
 # tests/test_types.py
-from tradebot.types import Signal, make_client_id, round_tick
+from tradebot.types import Position, Signal, make_client_id, round_tick
 
 
 def _sig(**kw):
@@ -215,9 +215,13 @@ def test_round_tick():
     assert round_tick(99.98) == 100.0
 
 
-def test_signal_risk_per_share():
-    assert _sig().risk_per_share == 1.0
-    assert _sig(direction="SHORT", stop_price=101.5).risk_per_share == 1.5
+def test_position_unrealised_signs():
+    long = Position("X", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "cid", "s")
+    short = Position("X", "MIS", "SHORT", 10, 100.0, 101.0, None, 1, "cid", "s")
+    assert long.unrealised(102.0) == 20.0
+    assert long.unrealised(98.0) == -20.0
+    assert short.unrealised(98.0) == 20.0
+    assert short.unrealised(102.0) == -20.0
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -228,7 +232,12 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'tradebot.types'`
 - [ ] **Step 3: Write `src/tradebot/types.py`**
 
 ```python
-"""Core value types shared by every package. No I/O here."""
+"""Core value types shared by every package. No I/O here.
+
+Annotations use PEP 604/585 syntax and are strings under Python 3.9 thanks to the
+`from __future__ import annotations` import; never resolve them with typing.get_type_hints()
+until the project drops 3.9.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -276,10 +285,6 @@ class Signal:
     target_price: float | None
     product: Product
     bar_ts: int
-
-    @property
-    def risk_per_share(self) -> float:
-        return abs(self.entry_price - self.stop_price)
 
 
 @dataclass(frozen=True)

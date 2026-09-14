@@ -1,5 +1,5 @@
 # tests/test_types.py
-from tradebot.types import Signal, make_client_id, round_tick
+from tradebot.types import Position, Signal, make_client_id, round_tick
 
 
 def _sig(**kw):
@@ -31,6 +31,10 @@ def test_round_tick():
     assert round_tick(99.98) == 100.0
 
 
-def test_signal_risk_per_share():
-    assert _sig().risk_per_share == 1.0
-    assert _sig(direction="SHORT", stop_price=101.5).risk_per_share == 1.5
+def test_position_unrealised_signs():
+    long = Position("X", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "cid", "s")
+    short = Position("X", "MIS", "SHORT", 10, 100.0, 101.0, None, 1, "cid", "s")
+    assert long.unrealised(102.0) == 20.0
+    assert long.unrealised(98.0) == -20.0
+    assert short.unrealised(98.0) == 20.0
+    assert short.unrealised(102.0) == -20.0

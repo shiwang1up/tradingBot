@@ -1,4 +1,9 @@
-"""Core value types shared by every package. No I/O here."""
+"""Core value types shared by every package. No I/O here.
+
+Annotations use PEP 604/585 syntax and are strings under Python 3.9 thanks to the
+`from __future__ import annotations` import; never resolve them with typing.get_type_hints()
+until the project drops 3.9.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -46,10 +51,6 @@ class Signal:
     target_price: float | None
     product: Product
     bar_ts: int
-
-    @property
-    def risk_per_share(self) -> float:
-        return abs(self.entry_price - self.stop_price)
 
 
 @dataclass(frozen=True)
