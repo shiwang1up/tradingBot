@@ -490,6 +490,8 @@ def test_unquoted_holiday_dates_are_normalised_to_iso_strings(tmp_path):
     (YAML.replace('square_off: "15:10"', 'square_off: "3:10pm"'), "session.square_off"),
     (YAML.replace('holidays: ["2026-10-02"]', 'holidays: "2026-10-02"'), "session.holidays"),
     (YAML.replace("interval_minutes: 5", "interval_minutes: 0"), "interval_minutes"),
+    (YAML.replace('holidays: ["2026-10-02"]', "holidays: [null]"), "session.holidays"),
+    (YAML[:YAML.index("session:")] + YAML[YAML.index("data:"):], "missing section: session"),
     (YAML.replace("on_failure: reject", "on_failure: maybe"), "ai.on_failure"),
     (YAML.replace("filter: stub", "filter: gpt"), "ai.filter"),
     ("", "capital"),
@@ -696,16 +698,18 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
     capital = _coerce("(root)", "capital", "float", raw["capital"])
     if capital <= 0:
         raise ValueError("config.yaml capital must be > 0")
-    session_raw = dict(raw.get("session") or {})
-    if isinstance(session_raw.get("holidays"), (list, tuple)):
-        session_raw["holidays"] = tuple(str(h) for h in session_raw["holidays"])  # unquoted dates -> ISO
+    raw_for_session = raw
+    if isinstance(raw.get("session"), dict) and isinstance(raw["session"].get("holidays"), (list, tuple)):
+        session_raw = dict(raw["session"])
+        session_raw["holidays"] = tuple(h if h is None else str(h) for h in session_raw["holidays"])  # dates -> ISO
+        raw_for_session = {**raw, "session": session_raw}
     cfg = Config(
         capital=capital,
         risk=_section(raw, "risk", RiskConfig),
         strategy=copy.deepcopy(raw.get("strategy") or {}),
         ai=_section(raw, "ai", AIConfig),
         execution=_section(raw, "execution", ExecutionConfig),
-        session=_section({**raw, "session": session_raw}, "session", SessionConfig),
+        session=_section(raw_for_session, "session", SessionConfig),
         data=_section(raw, "data", DataConfig),
         paths=_section(raw, "paths", PathsConfig),
         secrets=Secrets(
@@ -722,7 +726,7 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_config.py -v`
-Expected: 20 passed
+Expected: 22 passed
 
 - [ ] **Step 5: Write the real `config.yaml` at project root**
 

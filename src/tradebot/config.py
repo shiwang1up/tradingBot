@@ -180,16 +180,18 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
     capital = _coerce("(root)", "capital", "float", raw["capital"])
     if capital <= 0:
         raise ValueError("config.yaml capital must be > 0")
-    session_raw = dict(raw.get("session") or {})
-    if isinstance(session_raw.get("holidays"), (list, tuple)):
-        session_raw["holidays"] = tuple(str(h) for h in session_raw["holidays"])  # unquoted dates -> ISO
+    raw_for_session = raw
+    if isinstance(raw.get("session"), dict) and isinstance(raw["session"].get("holidays"), (list, tuple)):
+        session_raw = dict(raw["session"])
+        session_raw["holidays"] = tuple(h if h is None else str(h) for h in session_raw["holidays"])  # dates -> ISO
+        raw_for_session = {**raw, "session": session_raw}
     cfg = Config(
         capital=capital,
         risk=_section(raw, "risk", RiskConfig),
         strategy=copy.deepcopy(raw.get("strategy") or {}),
         ai=_section(raw, "ai", AIConfig),
         execution=_section(raw, "execution", ExecutionConfig),
-        session=_section({**raw, "session": session_raw}, "session", SessionConfig),
+        session=_section(raw_for_session, "session", SessionConfig),
         data=_section(raw, "data", DataConfig),
         paths=_section(raw, "paths", PathsConfig),
         secrets=Secrets(

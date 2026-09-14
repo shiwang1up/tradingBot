@@ -111,6 +111,8 @@ def test_unquoted_holiday_dates_are_normalised_to_iso_strings(tmp_path):
     (YAML.replace('square_off: "15:10"', 'square_off: "3:10pm"'), "session.square_off"),
     (YAML.replace('holidays: ["2026-10-02"]', 'holidays: "2026-10-02"'), "session.holidays"),
     (YAML.replace("interval_minutes: 5", "interval_minutes: 0"), "interval_minutes"),
+    (YAML.replace('holidays: ["2026-10-02"]', "holidays: [null]"), "session.holidays"),
+    (YAML[:YAML.index("session:")] + YAML[YAML.index("data:"):], "missing section: session"),
     (YAML.replace("on_failure: reject", "on_failure: maybe"), "ai.on_failure"),
     (YAML.replace("filter: stub", "filter: gpt"), "ai.filter"),
     ("", "capital"),
