@@ -4889,6 +4889,30 @@ def test_groww_auth_failure_is_a_clean_error(tmp_path, monkeypatch):
     assert res.exit_code == 1 and "Error: GrowwAPIAuthenticationException: bad totp" in res.output
 
 
+def test_generic_groww_exception_with_auth_code_aborts_on_first_symbol(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A, B, C]\n")
+    hdr = "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+    (tmp_path / "instruments.csv").write_text(hdr + "".join(f"NSE,{i},{s},CASH,EQ,1,0.05,1,1\n" for i, s in enumerate("ABC")))
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+    calls = []
+
+    class Expired:
+        def __init__(self, k, s):
+            pass
+
+        def fetch_candles(self, symbol, *a):
+            calls.append(symbol)
+            raise type("GrowwAPIException", (Exception,), {"code": "401"})("Invalid session")
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Expired)
+    res = _invoke(tmp_path, "fetch-data", "--sleep", "0")
+    assert res.exit_code == 1 and "Error: GrowwAPIException: Invalid session" in res.output
+    assert calls == ["A"], "auth failure must abort before touching the next symbol"
+    assert "symbol(s) failed" not in res.output
+
+
 def test_fetch_data_isolates_symbol_failures(tmp_path, monkeypatch):
     make_config(tmp_path)
     (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
@@ -5018,7 +5042,7 @@ import requests
 
 from tradebot.ai.filter import build_filter
 from tradebot.config import Config, load_config
-from tradebot.data.historical import HistoricalSource, fetch_incremental
+from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
 from tradebot.data.universe import load_universe
 from tradebot.engine.clock import SessionClock, ist_epoch
@@ -5030,7 +5054,19 @@ from tradebot.store.db import SchemaVersionError, connect
 from tradebot.store.repo import Repo
 from tradebot.strategy.ema_rsi import build_strategy
 
-_FRIENDLY = (ValueError, SchemaVersionError, sqlite3.Error, requests.RequestException, NotImplementedError)
+# Operational failures that deserve a one-line message. sqlite3 programming errors (bad SQL) still traceback.
+_FRIENDLY = (ValueError, SchemaVersionError, sqlite3.OperationalError, sqlite3.DatabaseError,
+             requests.RequestException, NotImplementedError)
+_FATAL_AUTH_CODES = {"401", "403"}
+
+
+def _is_fatal_auth(e: BaseException) -> bool:
+    """Auth/authorisation failures abort the whole run (spec 11). The SDK raises the generic
+    GrowwAPIException with a code for Groww failure bodies, so match on the code as well as the name."""
+    name = type(e).__name__
+    if any(m in name for m in ("Authentication", "Authorisation", "Authorization")):
+        return True
+    return str(getattr(e, "code", "")) in _FATAL_AUTH_CODES
 
 
 class _FriendlyGroup(click.Group):
@@ -5094,15 +5130,19 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     if not _instruments_fresh(path):
         click.echo("downloading instrument master")
         download_instruments(path)
+    if cfg.execution.interval_minutes not in CHUNK_DAYS:
+        raise click.ClickException(f"unsupported candle interval: {cfg.execution.interval_minutes} minutes")
     symbols, _, exchange = _symbols_and_lots(cfg, require_instruments=True)
     adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret)
     repo = Repo(connect(cfg.paths.db))
     failures: list = []
 
     def throttled(symbol, exch, start_ts, end_ts, interval):
-        if pause:
-            time.sleep(pause)
-        return adapter.fetch_candles(symbol, exch, start_ts, end_ts, interval)
+        try:
+            return adapter.fetch_candles(symbol, exch, start_ts, end_ts, interval)
+        finally:
+            if pause:
+                time.sleep(pause)
 
     total = 0
     for sym in symbols:
@@ -5110,7 +5150,7 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
             total += fetch_incremental(repo, throttled, [sym], exchange, cfg.execution.interval_minutes,
                                        days, int(time.time()), full=full, log=click.echo)[sym]
         except Exception as e:  # noqa: BLE001 - isolate per symbol; auth errors are fatal
-            if type(e).__name__.startswith("GrowwAPIAuth") or "Authentication" in type(e).__name__:
+            if _is_fatal_auth(e):
                 raise
             if is_non_retryable(e) or isinstance(e, _FRIENDLY):
                 failures.append((sym, f"{type(e).__name__}: {e}"))
@@ -5167,7 +5207,7 @@ def report(cfg: Config, run_id: str) -> None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_cli.py -v`
-Expected: 9 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Run the full suite**
 

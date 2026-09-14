@@ -77,6 +77,30 @@ def test_groww_auth_failure_is_a_clean_error(tmp_path, monkeypatch):
     assert res.exit_code == 1 and "Error: GrowwAPIAuthenticationException: bad totp" in res.output
 
 
+def test_generic_groww_exception_with_auth_code_aborts_on_first_symbol(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A, B, C]\n")
+    hdr = "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+    (tmp_path / "instruments.csv").write_text(hdr + "".join(f"NSE,{i},{s},CASH,EQ,1,0.05,1,1\n" for i, s in enumerate("ABC")))
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+    calls = []
+
+    class Expired:
+        def __init__(self, k, s):
+            pass
+
+        def fetch_candles(self, symbol, *a):
+            calls.append(symbol)
+            raise type("GrowwAPIException", (Exception,), {"code": "401"})("Invalid session")
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Expired)
+    res = _invoke(tmp_path, "fetch-data", "--sleep", "0")
+    assert res.exit_code == 1 and "Error: GrowwAPIException: Invalid session" in res.output
+    assert calls == ["A"], "auth failure must abort before touching the next symbol"
+    assert "symbol(s) failed" not in res.output
+
+
 def test_fetch_data_isolates_symbol_failures(tmp_path, monkeypatch):
     make_config(tmp_path)
     (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
