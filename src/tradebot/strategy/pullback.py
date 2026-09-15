@@ -3,11 +3,14 @@
 Trend: EMA fast above EMA slow (below for shorts). A bar whose low touches the fast EMA in an uptrend
 opens a pullback; the first pullback bar that closes back above the fast EMA with a higher low fires
 LONG at its close, stop one tick under the pullback's lowest low, target at reward_risk times the
-stop distance. One trade per pullback: nothing fires again until a bar exceeds the swing high recorded
-when the pullback began. A pullback older than max_pullback_bars or a trend flip resets. Shorts mirror."""
+stop distance. One trade per pullback: nothing fires again until a bar exceeds the swing high, which is
+the high before the pullback raised by the confirmation bar's own high. A pullback older than
+max_pullback_bars is spent the same way (no trade, wait for a new swing). A trend flip or the first bar
+of a new session starts a clean cycle, and that bar never arms. Shorts mirror."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
 from tradebot.engine.clock import date_of
@@ -34,7 +37,7 @@ class _State:
     prev_low: Optional[float] = None
     prev_high: Optional[float] = None
     ready_bars: int = 0  # bars seen with every indicator warm
-    day: Optional[object] = None  # IST date of the last bar; a new day starts a clean cycle
+    day: Optional[date] = None  # IST date of the last bar; a new day starts a clean cycle
 
 
 def _int(params: dict, key: str) -> int:

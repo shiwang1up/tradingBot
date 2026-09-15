@@ -20,7 +20,7 @@ tooling change needed to judge it with the forward-return table before trusting 
 | Pullback | A bar whose low touches or crosses EMA20 during an uptrend (high touches or crosses EMA20 in a downtrend) |
 | Entry | The first pullback bar that closes back above EMA20 with a low above the previous bar's low (mirror for shorts). Signal at that bar's close; the broker fills at the next open as today |
 | Stop and target | Stop one tick below the pullback's lowest low (above the highest high for shorts); target at `reward_risk` times the stop distance |
-| One trade per pullback | After a signal the symbol waits until a bar's high exceeds the swing high recorded when the pullback began (low below the swing low for shorts) before a new pullback can arm |
+| One trade per pullback | After a signal the symbol waits until a bar's high exceeds the swing high (the high before the pullback, raised by the confirmation bar's own high) before a new pullback can arm; mirror with the swing low for shorts |
 | Guards | Skip a signal whose stop is closer than `min_stop_pct` of price or further than `max_stop_atr` ATRs. A pullback older than `max_pullback_bars` is a failing trend, not a dip: it is spent (phase done) so a fresh swing extreme is needed before another can arm. A trend flip resets to idle |
 | Session boundary | The first bar of a new IST day starts a clean cycle (idle, swings re-seeded from that bar, no arming on that bar), so a pullback from the previous afternoon can never confirm against the opening gap |
 | Product | MIS only, square-off as today (with 15-minute bars the square-off bar opens at 14:45) |
@@ -40,7 +40,8 @@ _State: ema_fast, ema_slow, atr (streaming, from strategy/indicators.py)
         pullback_low, pullback_high: float | None
         pullback_bars: int
         prev_low, prev_high: float | None      # previous bar, for the higher-low / lower-high test
-        bars_seen: int
+        ready_bars: int                        # bars seen with every indicator warm
+        day: date | None                       # IST date of the last bar
 ```
 
 Per bar, after updating the three indicators:
@@ -119,8 +120,8 @@ Unit tests on crafted 15-minute bars for `PullbackStrategy`:
 - the canonical long setup (warm trend, one bar dips to EMA20, next bar closes above it with a higher
   low) fires LONG at that bar with stop one tick under the pullback low and target at 2R;
 - a confirmation bar without a higher low does not fire, and the next bar that has one does;
-- after a signal nothing fires again until a bar exceeds the pre-pullback swing high, then a fresh
-  pullback fires again;
+- after a signal nothing fires again until a bar exceeds the swing high (raised by the confirmation
+  bar if it printed a new high), then a fresh pullback fires again;
 - a pullback longer than `max_pullback_bars` is spent without firing and cannot re-arm until a new
   swing high, after which the next pullback trades;
 - a trend flip mid-pullback resets without firing, and the flip bar itself does not arm;

@@ -98,7 +98,7 @@ def test_not_ready_until_two_warm_bars_and_first_ready_bar_never_fires():
         assert s.on_candle(c) is None
     assert not s.is_ready("X") and s.snapshot("X") == {}
     assert s.on_candle(cs[4]) is None          # first bar with EMA5 and ATR warm
-    assert not s.is_ready("X")
+    assert not s.is_ready("X") and s.snapshot("X") == {}   # the base contract: empty until ready
     s.on_candle(cs[5])
     assert s.is_ready("X")
     assert set(s.snapshot("X")) == {"ema_fast", "ema_slow", "atr", "trend", "phase", "swing_high", "swing_low",
@@ -151,3 +151,13 @@ def test_parameter_validation(bad, msg):
 
 def test_factory_registers_pullback():
     assert isinstance(build_strategy("pullback", PARAMS), PullbackStrategy)
+
+
+def test_confirmation_bar_raises_the_swing_so_re_arming_needs_a_genuinely_new_high():
+    tall_confirm = (15, 17.0, 14.5, 16.4)          # confirms and prints a new high 17.0 above the old swing 16.5
+    between = (16.4, 16.8, 15.0, 16.6)             # 16.8 beats the old swing but not 17.0: stays DONE, cannot arm
+    s, out = run(UP + [TOUCH, tall_confirm, between])
+    assert len(signals(out)) == 1
+    assert s.snapshot("X")["phase"] == DONE and s.snapshot("X")["swing_high"] == 17.0
+    _, out2 = run(UP + [TOUCH, tall_confirm, between, (16.6, 17.1, 16.5, 17.0), (17.0, 17.2, 15.5, 16.9), (16.9, 17.5, 16.0, 17.4)])
+    assert len(signals(out2)) == 2                 # a new high above 17.0, then a pullback, trades again
