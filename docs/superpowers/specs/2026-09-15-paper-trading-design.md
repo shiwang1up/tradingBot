@@ -84,11 +84,12 @@ Sleeping stays out of the clock: `PaperEngine` takes `now` and `sleep` callables
 3. If resuming, `last_ts` is `runs.last_bar_ts` (see Store). Fetch and replay every bar from
    `last_ts + interval` up to the last completed bar with the broker active. Signals from these bars
    are `stale` by the deadline rule, so catch-up only settles exits and fills.
-4. Loop: `target = next_bar_close(now)`; sleep until `target + bar_grace_sec`; `candles =
-   source.fetch_bar(target - interval)`; `process_bar(bar_ts, candles, now_ts=now())`; write the
-   daily row; update `last_bar_ts`. If `now` has jumped past several boundaries (machine slept),
-   fetch the range and process each bar in order before sleeping again.
-5. When `next_bar_close` returns `None`: `_end_day`, `end_run`, return.
+4. Loop while the last processed bar is before `last_bar_ts(today)`: `latest =
+   latest_complete_bar(now, bar_grace_sec)`; if that is not past the last processed bar, sleep until
+   the next bar's close plus grace and re-check; otherwise `source.fetch_range(last + interval,
+   latest)` in one window and `process_bar(ts, candles, now_ts=now())` for each bar in order, writing
+   the daily row and `last_bar_ts` after each. A machine that slept simply finds several bars ready.
+5. When the last bar of the session has been processed: `_end_day`, `end_run`, return.
 
 A `stop` flag set by the SIGINT/SIGTERM handler is checked after each bar; when set the loop
 performs step 5 immediately (positions are left open on the books; a resume later the same day
