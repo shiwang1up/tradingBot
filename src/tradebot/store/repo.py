@@ -83,11 +83,14 @@ class Repo:
         self.conn.commit()
 
     def insert_ai_decision(self, run_id: str, signal_id: int, filter_kind: str, approved: bool, reason: str,
-                           confidence: float, latency_ms: int, failure: str | None) -> None:
+                           confidence: float, latency_ms: int, failure: str | None,
+                           input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0,
+                           cache_write_tokens: int = 0) -> None:
         self.conn.execute(
-            "INSERT INTO ai_decisions(run_id, signal_id, filter_kind, approved, reason, confidence, latency_ms, failure) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (run_id, signal_id, filter_kind, int(approved), reason, confidence, latency_ms, failure),
+            "INSERT INTO ai_decisions(run_id, signal_id, filter_kind, approved, reason, confidence, latency_ms, failure, "
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, signal_id, filter_kind, int(approved), reason, confidence, latency_ms, failure,
+             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens),
         )
         self.conn.commit()
 
@@ -103,6 +106,39 @@ class Repo:
             "SELECT COUNT(*) AS n FROM ai_decisions WHERE run_id=? AND approved=0", (run_id,)
         ).fetchone()
         return row["n"]
+
+    def ai_usage(self, run_id: str) -> dict:
+        """Token totals, call count (decisions carrying input tokens) and mean latency of real calls."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS decisions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
+            "SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
+            "SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
+            "AVG(CASE WHEN input_tokens > 0 THEN latency_ms END) AS avg_latency_ms, "
+            "SUM(CASE WHEN failure IS NOT NULL THEN 1 ELSE 0 END) AS failures "
+            "FROM ai_decisions WHERE run_id=?", (run_id,)).fetchone()
+        return {k: (row[k] or 0) for k in row.keys()}
+
+    def ai_rejected_signals(self, run_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT s.strategy, s.symbol, s.bar_ts, s.direction, d.reason, d.confidence "
+            "FROM ai_decisions d JOIN signals s ON s.id = d.signal_id "
+            "WHERE d.run_id=? AND d.approved=0 ORDER BY s.bar_ts, s.symbol", (run_id,)).fetchall()
+
+    def positions_by_client_id(self, run_id: str) -> dict:
+        return {r["client_id"]: r for r in self.list_positions(run_id)}
+
+    # -- ai cache ----------------------------------------------------------
+    def get_ai_cache(self, symbol: str, bar_ts: int, prompt_hash: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT response_json FROM ai_cache WHERE symbol=? AND bar_ts=? AND prompt_hash=?",
+            (symbol, bar_ts, prompt_hash)).fetchone()
+        return row["response_json"] if row else None
+
+    def put_ai_cache(self, symbol: str, bar_ts: int, prompt_hash: str, response_json: str, created_at: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ai_cache(symbol, bar_ts, prompt_hash, response_json, created_at) VALUES (?,?,?,?,?)",
+            (symbol, bar_ts, prompt_hash, response_json, created_at))
+        self.conn.commit()
 
     # -- orders & fills ----------------------------------------------------
     def insert_order(self, run_id: str, client_id: str, signal_id: int | None, kind: str, side: str, qty: int,
