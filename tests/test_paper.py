@@ -160,3 +160,35 @@ def test_a_failing_bar_is_logged_and_the_loop_continues(repo, tmp_path, caplog, 
     assert "failed; continuing" in caplog.text
     assert hits == [OPEN]
     assert repo.get_run("boom")["last_bar_ts"] == ist_epoch(TODAY, "15:25")
+
+
+def test_resume_replays_stored_bars_past_the_last_processed_one(repo, tmp_path):
+    """The CLI's start-up fetch stores today's bars up to now before the engine resumes. Those past
+    runs.last_bar_ts were never seen by the broker, so they must be replayed, not warmed away."""
+    cfg = make_config(tmp_path, risk={"cooldown_bars": 0})
+    market = _market()
+    warm = _warm(market)
+    _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="cont").run(warm)
+
+    t = FakeTime(ist_epoch(TODAY, "09:00"))
+    first = _engine(repo, cfg, market, t, run_id="split")
+    stop_at = ist_epoch(TODAY, "11:30")
+
+    def sleep_then_stop(seconds):
+        t.sleep(seconds)
+        if t.t >= stop_at:
+            first.request_stop()
+
+    first.sleep = sleep_then_stop
+    first.run(warm)
+    last = repo.get_run("split")["last_bar_ts"]
+    assert last < ist_epoch(TODAY, "12:00")
+    # Simulate the CLI: fetch-incremental stores today's completed bars up to now, beyond last_bar_ts.
+    repo.insert_candles([c for cs in market.values() for c in cs if OPEN <= c.ts < ist_epoch(TODAY, "12:00")], 5)
+    stored_today = repo.load_candles(["A", "B"], 5, OPEN, 2_000_000_000)
+    assert max(c.ts for c in stored_today) > last
+    second = _engine(repo, cfg, market, t, run_id="split")
+    second.run(warm + stored_today)
+    assert _trades(repo, "split") == _trades(repo, "cont")
+    assert any(r["opened_at"] <= last < r["closed_at"] for r in repo.list_positions("cont")), \
+        "the scenario must have a position open across the stop for the test to mean anything"

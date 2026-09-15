@@ -98,6 +98,11 @@ class PaperEngine(Engine):
         if now >= self.clock.close_ts(today):
             log.info("the %s session has already closed; nothing to do", today)
             return None
+        existing = self.repo.get_run(self.run_id)
+        if existing is not None and existing["last_bar_ts"] is not None:
+            # A resumed run must replay every bar after the one it last processed *with the broker*,
+            # so stored candles past that point (the start-up fetch stores them) are not warmed away.
+            warm_candles = [c for c in warm_candles if c.ts <= existing["last_bar_ts"]]
         warmed = self.warm(warm_candles)
         resumed = self.resume(today)
         if not resumed:
