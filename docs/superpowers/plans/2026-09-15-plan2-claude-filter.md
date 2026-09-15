@@ -1512,15 +1512,23 @@ In `backtest`, add the option and wiring:
               help="Override ai.filter from config for this run")
 ```
 
-and the function signature gains `ai_filter: Optional[str]`. Replace the `build_filter(cfg.ai, cfg.secrets.anthropic_api_key)` call with:
+and the function signature gains `ai_filter: Optional[str]` as its last parameter. Then replace this exact block in `backtest`:
+
+```python
+    engine = BacktestEngine(cfg, repo, source, [strategy], broker,
+                            build_filter(cfg.ai, cfg.secrets.anthropic_api_key),
+                            SessionClock(cfg.session, interval), lots, run_id)
+```
+
+with:
 
 ```python
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
     clock = SessionClock(cfg.session, interval)
     ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
+    # The engine stores the resolved config with the run, so record the effective filter there too.
+    engine = BacktestEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id)
 ```
-
-and pass `ai` to `BacktestEngine`. Also store the effective filter in the run: after `engine.run()` nothing else changes (the resolved config is stored by the engine from `cfg`; to record the override, construct the engine with `dc_replace(cfg, ai=ai_cfg)` instead of `cfg`).
 
 Replace the `report` command with:
 
