@@ -1,0 +1,7 @@
+{
+ "base_slip0": {"_exec": {"slippage_pct": 0.0}},
+ "thr4.5_slip0": {"threshold": 4.5, "_exec": {"slippage_pct": 0.0}},
+ "atr3.0_slip0": {"atr_stop_mult": 3.0, "_exec": {"slippage_pct": 0.0}},
+ "trend2_slip0": {"weights": {"trend": 2.0}, "_exec": {"slippage_pct": 0.0}},
+ "base_slip0.1": {"_exec": {"slippage_pct": 0.1}}
+}

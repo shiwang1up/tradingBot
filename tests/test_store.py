@@ -119,3 +119,104 @@ def test_file_backed_connect_uses_wal_persists_and_versions(tmp_path):
     conn2.close()
     with pytest.raises(SchemaVersionError):
         connect(path)
+
+
+def test_v1_database_is_migrated_to_v2(tmp_path):
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(str(path))
+    raw.executescript("""
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
+                           ended_at INTEGER, config_json TEXT NOT NULL);
+        CREATE TABLE ai_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
+                                   filter_kind TEXT NOT NULL, approved INTEGER NOT NULL, reason TEXT NOT NULL,
+                                   confidence REAL NOT NULL, latency_ms INTEGER NOT NULL, failure TEXT);
+        PRAGMA user_version = 1;
+    """)
+    raw.commit()
+    raw.close()
+    conn = connect(path)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_decisions)")}
+    assert {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"} <= cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+
+
+def test_ai_cache_roundtrip(repo):
+    assert repo.get_ai_cache("A", 100, "h") is None
+    repo.put_ai_cache("A", 100, "h", '{"approve": true}', created_at=5)
+    repo.put_ai_cache("A", 100, "h", '{"approve": false}', created_at=6)  # replace
+    assert repo.get_ai_cache("A", 100, "h") == '{"approve": false}'
+
+
+def test_ai_usage_and_rejected_signals(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    s1 = repo.insert_signal("r1", _signal("A", 100))
+    s2 = repo.insert_signal("r1", _signal("B", 100))
+    repo.insert_ai_decision("r1", s1, "claude", False, "noise", 0.8, 900, None, input_tokens=1200, output_tokens=80)
+    repo.insert_ai_decision("r1", s2, "claude", True, "fine", 0.6, 0, None)
+    u = repo.ai_usage("r1")
+    assert (u["calls"], u["input_tokens"], u["output_tokens"], u["decisions"]) == (1, 1200, 80, 2)
+    assert u["avg_latency_ms"] == 900
+    rej = repo.ai_rejected_signals("r1")
+    assert [(r["symbol"], r["reason"]) for r in rej] == [("A", "noise")]
+
+
+def test_positions_by_client_id(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 1, 100.0, 99.0, None, 5, "cid-a", "ema_rsi")
+    pid = repo.insert_position("r1", p)
+    repo.close_position(pid, 9, 101.0, "TARGET", 1.0)
+    m = repo.positions_by_client_id("r1")
+    assert m["cid-a"]["pnl"] == 1.0
+
+
+def _v1_db(path, extra_ddl=""):
+    raw = sqlite3.connect(str(path))
+    raw.executescript("""
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
+                           ended_at INTEGER, config_json TEXT NOT NULL);
+        CREATE TABLE ai_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
+                                   filter_kind TEXT NOT NULL, approved INTEGER NOT NULL, reason TEXT NOT NULL,
+                                   confidence REAL NOT NULL, latency_ms INTEGER NOT NULL, failure TEXT);
+        PRAGMA user_version = 1;
+    """ + extra_ddl)
+    raw.commit()
+    raw.close()
+
+
+def test_migration_is_atomic_and_a_failed_one_leaves_the_old_version(tmp_path, monkeypatch):
+    from tradebot.store import db as db_mod
+    path = tmp_path / "v1.db"
+    _v1_db(path)
+    monkeypatch.setitem(db_mod.MIGRATIONS, 1, db_mod.MIGRATIONS[1] + ["ALTER TABLE nope ADD COLUMN x INTEGER"])
+    with pytest.raises(sqlite3.OperationalError):
+        connect(path)
+    raw = sqlite3.connect(str(path))
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert "input_tokens" not in {r[1] for r in raw.execute("PRAGMA table_info(ai_decisions)")}
+    raw.close()
+    monkeypatch.undo()
+    conn = connect(path)  # retry after the fix succeeds cleanly
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_missing_migration_entry_refuses_to_open(tmp_path, monkeypatch):
+    from tradebot.store import db as db_mod
+    path = tmp_path / "v1.db"
+    _v1_db(path)
+    monkeypatch.delitem(db_mod.MIGRATIONS, 1)
+    with pytest.raises(SchemaVersionError, match="no migration defined"):
+        connect(path)
+
+
+def test_ai_usage_latency_includes_failed_calls(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    s1 = repo.insert_signal("r1", _signal("A", 100))
+    s2 = repo.insert_signal("r1", _signal("B", 200))
+    repo.insert_ai_decision("r1", s1, "claude", True, "ok", 0.5, 400, None, input_tokens=1000)
+    repo.insert_ai_decision("r1", s2, "claude", False, "ai_failure: timeout", 0.0, 60000, "timeout")
+    s3 = repo.insert_signal("r1", _signal("C", 300))
+    repo.insert_ai_decision("r1", s3, "claude", False, "ai_failure: max_calls", 0.0, 0, "max_calls_per_run")  # no call
+    s4 = repo.insert_signal("r1", _signal("D", 400))
+    repo.insert_ai_decision("r1", s4, "claude", True, "ok", 0.5, 300, None, cache_read_tokens=900)  # fully cached call
+    u = repo.ai_usage("r1")
+    assert u["calls"] == 2 and u["failures"] == 2 and u["avg_latency_ms"] == pytest.approx((400 + 60000 + 300) / 3)

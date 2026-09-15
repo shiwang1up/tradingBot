@@ -102,7 +102,22 @@ class EmaRsiStrategy(Strategy):
         return None
 
 
+def strategy_params(strategy_cfg: dict, name: str) -> dict:
+    """The params for one strategy from the config's `strategy` section, with the shared
+    `strategy.indicators` block attached as `indicators` unless the strategy sets its own. Keeps the
+    confluence strategy's indicator set identical to the engine's shared one."""
+    if name not in strategy_cfg:
+        raise ValueError(f"no config for strategy '{name}'")
+    params = dict(strategy_cfg[name])
+    if "indicators" not in params and strategy_cfg.get("indicators"):
+        params["indicators"] = dict(strategy_cfg["indicators"])
+    return params
+
+
 def build_strategy(name: str, params: dict) -> Strategy:
     if name == "ema_rsi":
         return EmaRsiStrategy(params)
+    if name == "confluence":
+        from tradebot.strategy.confluence import ConfluenceStrategy  # local import: no cycle with base/ta
+        return ConfluenceStrategy(params)
     raise ValueError(f"unknown strategy: {name}")

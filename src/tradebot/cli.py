@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import replace as dc_replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -10,24 +11,29 @@ from typing import Optional
 import click
 import requests
 
-from tradebot.ai.filter import build_filter
+from tradebot.ai.claude_client import ClaudeClient, ClaudeReviewError
+from tradebot.ai.filter import AIFilterAborted, build_filter
+from tradebot.ai.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT, render_candidates
 from tradebot.config import Config, load_config
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
 from tradebot.data.universe import load_universe
-from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.engine.clock import SessionClock, date_of, ist_epoch
 from tradebot.engine.logsetup import setup_logging
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.execution.groww_adapter import GrowwAdapter, is_non_retryable
+from tradebot.report.compare import Prices, build_compare, format_compare
 from tradebot.report.summary import build_summary, format_summary
 from tradebot.store.db import SchemaVersionError, connect
 from tradebot.store.repo import Repo
-from tradebot.strategy.ema_rsi import build_strategy
+from tradebot.strategy.ema_rsi import build_strategy, strategy_params
+from tradebot.strategy.ta import IndicatorSet
+from tradebot.types import Candidate, Signal
 
 # Operational failures that deserve a one-line message. sqlite3 programming errors (bad SQL) still traceback.
 _FRIENDLY = (ValueError, SchemaVersionError, sqlite3.OperationalError, sqlite3.DatabaseError,
-             requests.RequestException, NotImplementedError)
+             requests.RequestException, NotImplementedError, AIFilterAborted, ClaudeReviewError)
 _FATAL_AUTH_CODES = {"401", "403"}
 
 
@@ -159,8 +165,11 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
 @click.option("--end", required=True, type=click.DateTime(["%Y-%m-%d"]))
 @click.option("--strategy", "strategy_name", default="ema_rsi", show_default=True)
 @click.option("--run-id", default=None, help="Defaults to bt-<timestamp>")
+@click.option("--ai", "ai_filter", default=None, type=click.Choice(["stub", "claude", "claude_cached"]),
+              help="Override ai.filter from config for this run")
 @click.pass_obj
-def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, run_id: Optional[str]) -> None:
+def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, run_id: Optional[str],
+             ai_filter: Optional[str]) -> None:
     """Replay stored candles through the strategy, risk engine, AI filter, and simulated broker."""
     if start > end:
         raise click.ClickException("--start must not be after --end")
@@ -177,11 +186,13 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     if repo.get_run(run_id) is not None:
         raise click.ClickException(f"run '{run_id}' already exists; pick another --run-id")
     log_path = setup_logging(cfg.paths.logs, run_id=run_id)
-    strategy = build_strategy(strategy_name, cfg.strategy[strategy_name])
+    strategy = build_strategy(strategy_name, strategy_params(cfg.strategy, strategy_name))
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
-    engine = BacktestEngine(cfg, repo, source, [strategy], broker,
-                            build_filter(cfg.ai, cfg.secrets.anthropic_api_key),
-                            SessionClock(cfg.session, interval), lots, run_id)
+    ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
+    clock = SessionClock(cfg.session, interval)
+    ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
+    # The engine stores the resolved config with the run, so record the effective filter there too.
+    engine = BacktestEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id)
     rid = engine.run()
     click.echo(format_summary(build_summary(repo, rid)))
     if log_path:
@@ -189,11 +200,115 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
 
 
 @main.command()
-@click.option("--run", "run_id", required=True)
+@click.option("--run", "run_id", default=None)
+@click.option("--compare", "compare", nargs=2, default=None, metavar="RUN_A RUN_B",
+              help="Side-by-side of an unfiltered run A and a Claude-filtered run B")
 @click.pass_obj
-def report(cfg: Config, run_id: str) -> None:
-    """Print the summary for a stored run."""
+def report(cfg: Config, run_id: Optional[str], compare) -> None:
+    """Print the summary for a stored run, or compare two runs."""
+    if not Path(cfg.paths.db).exists():
+        raise click.ClickException(f"no database at {cfg.paths.db}")
+    if not run_id and not compare:
+        raise click.ClickException("give --run RUN or --compare RUN_A RUN_B")
+    if run_id and compare:
+        raise click.ClickException("--run and --compare are mutually exclusive")
+    repo = Repo(connect(cfg.paths.db))
+    if compare:
+        click.echo(format_compare(build_compare(repo, compare[0], compare[1], _prices(cfg))))
+        return
+    click.echo(format_summary(build_summary(repo, run_id)))
+
+
+def _estimate_candidate(cfg: Config, r, window) -> Candidate:
+    """A candidate shaped like the engine's, from a stored signal row and its candle window: the
+    shared indicators are computed on the window so the token count matches real prompts."""
+    ind = IndicatorSet(cfg.strategy.get("indicators"))
+    for cd in window:
+        ind.update(cd)
+    snap = {**ind.snapshot(), "ema_fast": r["entry"], "ema_slow": r["entry"], "rsi": 55.0, "atr": abs(r["entry"] - r["stop"])}
+    return Candidate(Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"],
+                            r["product"], r["bar_ts"]), 100, snap, tuple(window[-cfg.ai.candles_in_context:]))
+
+
+def _prices(cfg: Config) -> Prices:
+    return Prices(cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok,
+                  cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok)
+
+
+@main.command("estimate-ai")
+@click.option("--run", "run_id", required=True, help="A completed stub run whose risk-approved signals define the workload")
+@click.option("--sample", default=0, show_default=True,
+              help="Make this many real review calls on the largest bars to measure output tokens (costs cents)")
+@click.pass_obj
+def estimate_ai(cfg: Config, run_id: str, sample: int) -> None:
+    """Estimate calls, tokens and cost of replaying a run through the Claude filter, as a range.
+
+    Input tokens come from two free count_tokens calls on the run's real largest bar (one candidate and
+    all of them), which separates the fixed per-call cost from the per-candidate cost. The system prompt is
+    priced as one cache write plus cache reads. Output tokens are the unknown: --sample measures them with
+    real calls; without it the low end assumes a compact answer and the high end assumes ai.max_tokens."""
     if not Path(cfg.paths.db).exists():
         raise click.ClickException(f"no database at {cfg.paths.db}")
     repo = Repo(connect(cfg.paths.db))
-    click.echo(format_summary(build_summary(repo, run_id)))
+    if repo.get_run(run_id) is None:
+        raise click.ClickException(f"unknown run: {run_id}")
+    by_bar = repo.approved_signals_by_bar(run_id)
+    if not by_bar:
+        raise click.ClickException("that run has no risk-approved signals")
+    bars = len(by_bar)
+    candidates = sum(len(v) for v in by_bar.values())
+    biggest_ts, biggest_rows = max(by_bar.items(), key=lambda kv: len(kv[1]))
+    biggest = len(biggest_rows)
+    interval = cfg.execution.interval_minutes
+    clock = SessionClock(cfg.session, interval)
+    session = {"square_off": cfg.session.square_off, "entry_cutoff": cfg.session.no_new_entries_after,
+               "close": cfg.session.close,
+               "bars_left": max(0, (clock.square_off_bar_ts(date_of(biggest_ts)) - biggest_ts) // (interval * 60))}
+    window = repo.load_candles([r["symbol"] for r in biggest_rows], interval,
+                               biggest_ts - cfg.ai.candles_in_context * interval * 60, biggest_ts)
+    by_symbol: dict = {}
+    for cd in window:
+        by_symbol.setdefault(cd.symbol, []).append(cd)
+    cands = [_estimate_candidate(cfg, r, by_symbol.get(r["symbol"], ())) for r in biggest_rows]
+    client = ClaudeClient(cfg.secrets.anthropic_api_key, cfg.ai.model, cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec)
+    system_tokens = client.count_tokens(SYSTEM_PROMPT, "x", RESPONSE_SCHEMA)
+    one = client.count_tokens(SYSTEM_PROMPT, render_candidates(cands[:1], session), RESPONSE_SCHEMA)
+    per_cand = (client.count_tokens(SYSTEM_PROMPT, render_candidates(cands, session), RESPONSE_SCHEMA) - one) / (biggest - 1) \
+        if biggest > 1 else one - system_tokens
+    fixed_user = max(0.0, one - system_tokens - per_cand)  # envelope + schema + session facts, per call
+    uncached_input = int(bars * fixed_user + candidates * per_cand)
+    cache_read = system_tokens * max(0, bars - 1)
+    cache_write = system_tokens
+    measured = None
+    if sample > 0:
+        top = sorted(by_bar.items(), key=lambda kv: -len(kv[1]))[:sample]
+        flt = build_filter(dc_replace(cfg.ai, filter="claude"), cfg.secrets.anthropic_api_key, clock=clock)
+        for ts, rows in top:
+            w = repo.load_candles([r["symbol"] for r in rows], interval, ts - cfg.ai.candles_in_context * interval * 60, ts)
+            bs: dict = {}
+            for cd in w:
+                bs.setdefault(cd.symbol, []).append(cd)
+            flt.review([_estimate_candidate(cfg, r, bs.get(r["symbol"], ())) for r in rows])
+        if flt.successful_calls:
+            measured = flt.tokens["output"] / flt.successful_calls
+            click.echo(f"sampled {flt.successful_calls} real calls on the largest bars ({flt.calls - flt.successful_calls} failed): "
+                       f"mean output {measured:.0f} tokens, mean latency {flt.latency_total_ms // flt.successful_calls} ms, "
+                       f"spent ~${_prices(cfg).cost(flt.tokens['input'], flt.tokens['output'], flt.tokens['cache_read'], flt.tokens['cache_write']):.2f}")
+        else:
+            click.echo(f"all {flt.calls} sampled calls failed; output tokens stay unmeasured", err=True)
+    # A measured mean comes from the largest bars, so it leans high for a typical bar: the low bound
+    # uses it as-is and the high bound adds 50% headroom for variance.
+    low_out = int(bars * (measured if measured is not None else 60 * (candidates / bars) + 150))
+    high_out = int(bars * (measured * 1.5 if measured is not None else cfg.ai.max_tokens))
+    prices = _prices(cfg)
+    low = prices.cost(uncached_input, low_out, cache_read, cache_write)
+    high = prices.cost(uncached_input, high_out, cache_read, cache_write)
+    click.echo(f"API calls: {bars} bars with candidates   candidates: {candidates}   largest bar: {biggest}")
+    click.echo(f"tokens: system {system_tokens} (cached after the first call), per call {fixed_user:.0f} + {per_cand:.0f} per candidate")
+    click.echo(f"input: {uncached_input:,} uncached + {cache_read:,} cache reads;  output: {low_out:,} to {high_out:,}"
+               + ("" if measured is not None else "  (unmeasured: run with --sample 10 to measure)"))
+    click.echo(f"estimated cost ({cfg.ai.model}, {cfg.ai.effort} effort): ${low:,.2f} to ${high:,.2f}; a cached replay costs $0")
+    click.echo("note: a stub run under-counts candidates slightly, since Claude's rejections free position slots later on")
+    if bars > cfg.ai.max_calls_per_run:
+        click.echo(f"WARNING: {bars} calls exceed ai.max_calls_per_run={cfg.ai.max_calls_per_run}; the tail of the replay "
+                   f"would silently become on_failure decisions. Raise the cap first.", err=True)

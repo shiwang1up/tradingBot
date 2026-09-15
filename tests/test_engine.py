@@ -362,3 +362,42 @@ def test_day_whose_bars_end_early_still_squares_off_intraday(repo, tmp_path):
     _run(repo, cfg, candles)
     for r in repo.list_positions("t1"):
         assert date_of(r["closed_at"]) == date_of(r["opened_at"])
+
+
+def test_engine_persists_ai_token_usage(repo, tmp_path):
+    from tradebot.types import Decision
+
+    class Priced:
+        kind = "priced"
+
+        def review(self, cands):
+            return [Decision(c.signal, True, "ok", 0.5, self.kind, latency_ms=300, input_tokens=1000 if i == 0 else 0,
+                             output_tokens=50 if i == 0 else 0, cache_read_tokens=700 if i == 0 else 0)
+                    for i, c in enumerate(cands)]
+
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles(), ai=Priced())
+    u = repo.ai_usage("t1")
+    n_bars_with_batch = repo.conn.execute(
+        "SELECT COUNT(DISTINCT s.bar_ts) FROM ai_decisions d JOIN signals s ON s.id = d.signal_id WHERE d.run_id='t1'"
+    ).fetchone()[0]
+    assert u["calls"] == n_bars_with_batch >= 1
+    assert (u["input_tokens"], u["output_tokens"], u["cache_read_tokens"]) == (1000 * u["calls"], 50 * u["calls"], 700 * u["calls"])
+
+
+def test_candidates_carry_the_shared_indicator_snapshot(repo, tmp_path):
+    seen = []
+
+    class Spy(StubFilter):
+        def review(self, cands):
+            seen.extend(cands)
+            return super().review(cands)
+
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles(), ai=Spy())
+    assert seen
+    keys = set(seen[-1].indicators)
+    assert {"ema_fast", "ema_slow", "rsi", "atr", "trend", "macd_hist", "adx", "pct_b", "support", "resistance",
+            "volume_spike_pct", "engulfing"} <= keys
+    late = [c for c in seen if c.indicators.get("adx") is not None]
+    assert late, "once the windows fill the shared indicators are populated"

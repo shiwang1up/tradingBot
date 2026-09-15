@@ -137,3 +137,23 @@ def test_relative_paths_resolve_against_config_directory(tmp_path):
     assert cfg.paths.universe == str(sub / "universe.yaml")
     absolute = YAML.replace("db: data/tradebot.db", "db: /abs/elsewhere.db")
     assert load_config(_write(sub, absolute), sub / "x.env").paths.db == "/abs/elsewhere.db"
+
+
+def test_ai_section_defaults_and_validation(tmp_path):
+    cfg = load_config(_write(tmp_path), tmp_path / "x.env")
+    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 4000, 60, 10000)
+    assert (cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok) == (5.0, 25.0)
+    assert (cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok) == (0.5, 6.25)
+    over = load_config(_write(tmp_path, YAML.replace("on_failure: reject", 'on_failure: reject\n  effort: max\n  max_tokens: "2500"')),
+                       tmp_path / "x.env")
+    assert (over.ai.effort, over.ai.max_tokens) == ("max", 2500)  # YAML overrides a default and is coerced
+    for broken, frag in [
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  effort: turbo"), "ai.effort"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  max_calls_per_run: 0"), "ai.max_calls_per_run"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  max_tokens: 0"), "ai.max_tokens"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  timeout_sec: 0"), "ai.timeout_sec"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  price_out_per_mtok: -1"), "ai.price_out_per_mtok"),
+    ]:
+        with pytest.raises(ValueError) as e:
+            load_config(_write(tmp_path, broken), tmp_path / "x.env")
+        assert frag in str(e.value)

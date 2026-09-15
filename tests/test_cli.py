@@ -1,12 +1,20 @@
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 from click.testing import CliRunner
 
 from tests.helpers import make_config, synth_candles
 from tradebot import cli
+from tradebot.engine.clock import ist_epoch, to_ist
 from tradebot.store.db import connect
 from tradebot.store.repo import Repo
-from tradebot.types import Candle
+from tradebot.types import Candle, Signal
+
+
+def _bar_ts(end_ts):
+    """An in-session bar (10:00 IST the day before `end_ts`): fetch-data keeps only session bars, so a
+    bar stamped 'now' would vanish whenever the tests run outside market hours."""
+    return ist_epoch(to_ist(end_ts).date() - timedelta(days=1), "10:00")
 
 
 def _setup(tmp_path):
@@ -125,7 +133,7 @@ def test_fetch_data_isolates_symbol_failures(tmp_path, monkeypatch):
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
             if symbol == "B":
                 raise type("GrowwAPINotFoundException", (Exception,), {})("no such symbol")
-            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
+            return [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 10)]
 
     monkeypatch.setattr(cli, "GrowwAdapter", Flaky)
     res = _invoke(tmp_path, "fetch-data", "--days", "5", "--sleep", "0")
@@ -170,7 +178,7 @@ def test_env_is_read_next_to_config_or_from_override(tmp_path, monkeypatch):
             seen["key"] = k
 
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
-            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
+            return [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 10)]
 
     (cfg_dir / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
     (cfg_dir / "instruments.csv").write_text(
@@ -211,7 +219,7 @@ def test_fetch_data_uses_adapter_and_instruments(tmp_path, monkeypatch):
 
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
             calls.append((symbol, exchange, interval))
-            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
+            return [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 10)]
 
     monkeypatch.setattr(cli, "GrowwAdapter", FakeAdapter)
     monkeypatch.setattr(cli, "download_instruments", lambda p: p)
@@ -295,3 +303,155 @@ def test_403_on_market_data_explains_the_subscription(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "GrowwAdapter", Forbidden)
     res = _invoke(tmp_path, "fetch-data", "--sleep", "0")
     assert res.exit_code == 1 and "Trade API subscription" in res.output and "failed:" not in res.output
+
+
+def test_backtest_ai_override_and_compare_report(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    assert ok.exit_code == 0, ok.output
+
+    from tradebot.ai import filter as filter_mod
+    from tradebot.ai.claude_client import ReviewResponse
+
+    class FakeClaude:
+        def __init__(self, *a, **k):
+            pass
+
+        def review(self, system, user, schema):
+            import json
+            cands = json.loads(user)["candidates"]
+            return ReviewResponse({"decisions": [{"index": c["index"], "symbol": c["symbol"], "approve": c["index"] % 2 == 0,
+                                                  "confidence": 0.5, "reason": "test"} for c in cands]}, 10, 500, 20, 0, 0, None)
+
+    monkeypatch.setattr(filter_mod, "ClaudeClient", FakeClaude)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "claude-run",
+                  "--ai", "claude_cached")
+    assert res.exit_code == 0, res.output
+    assert "AI rejects" in res.output
+    cmp_ = _invoke(tmp_path, "report", "--compare", "stub-run", "claude-run")
+    assert cmp_.exit_code == 0, cmp_.output
+    assert "Rejected by Claude" in cmp_.output and "Estimated cost" in cmp_.output
+    # second claude_cached run makes zero calls: cost line shows 0 tokens
+    res2 = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "claude-run-2",
+                   "--ai", "claude_cached")
+    assert res2.exit_code == 0, res2.output
+    cmp2 = _invoke(tmp_path, "report", "--compare", "stub-run", "claude-run-2")
+    assert "Tokens in/out/cached    0 / 0 / 0 (cache writes 0)" in cmp2.output
+
+
+def test_backtest_claude_without_key_is_clean_error(tmp_path):
+    _setup(tmp_path)
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--ai", "claude")
+    assert res.exit_code == 1 and "ANTHROPIC_API_KEY" in res.output
+
+
+def test_estimate_ai_reports_a_range_and_records_the_ai_override(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run", "--ai", "stub")
+    assert ok.exit_code == 0, ok.output
+    import json
+    from tradebot.store.db import connect as _connect
+    from tradebot.store.repo import Repo as _Repo
+    stored = json.loads(_Repo(_connect(make_config(tmp_path).paths.db)).get_run("stub-run")["config_json"])
+    assert stored["ai"]["filter"] == "stub"
+    from tradebot import cli as cli_mod
+
+    class Counter:
+        def __init__(self, *a, **k):
+            pass
+
+        def count_tokens(self, system, user, schema=None):
+            return 700 if user == "x" else 700 + 150 + 900 * user.count('"index":')
+
+    monkeypatch.setattr(cli_mod, "ClaudeClient", Counter)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run")
+    assert res.exit_code == 0, res.output
+    assert "API calls: 9 bars with candidates" in res.output and "largest bar: 1" in res.output
+    assert "per call 0 + 1050 per candidate" in res.output  # one-candidate bar: no fixed/per-candidate split possible
+    assert "estimated cost" in res.output and " to $" in res.output and "unmeasured" in res.output
+
+
+def test_estimate_ai_separates_fixed_and_per_candidate_cost_and_samples(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    assert ok.exit_code == 0, ok.output
+    from tradebot import cli as cli_mod
+    from tradebot.ai import filter as filter_mod
+    from tradebot.ai.claude_client import ClaudeReviewError, ReviewResponse
+    from tradebot.store.db import connect as _connect
+    from tradebot.store.repo import Repo as _Repo
+    # Make the largest bar hold three candidates by approving two extra signals on one bar.
+    repo = _Repo(_connect(make_config(tmp_path).paths.db))
+    bar = repo.conn.execute("SELECT s.bar_ts FROM risk_decisions r JOIN signals s ON s.id=r.signal_id "
+                            "WHERE r.run_id='stub-run' AND r.approved=1 LIMIT 1").fetchone()[0]
+    for sym in ("P", "Q"):
+        sid = repo.insert_signal("stub-run", Signal("ema_rsi", sym, "LONG", 100.0, 99.0, 102.0, "MIS", bar))
+        repo.insert_risk_decision("stub-run", sid, True, "ok", 10)
+    repo.conn.close()
+
+    class Counter:
+        def __init__(self, *a, **k):
+            pass
+
+        def count_tokens(self, system, user, schema=None):
+            return 700 if user == "x" else 700 + 150 + 900 * user.count('"index":')
+
+    calls = {"n": 0}
+
+    class Sampled:
+        def __init__(self, *a, **k):
+            pass
+
+        def review(self, system, user, schema):
+            import json
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ClaudeReviewError("transient")  # a failed sample must not drag the mean down
+            cands = json.loads(user)["candidates"]
+            return ReviewResponse({"decisions": [{"index": c["index"], "symbol": c["symbol"], "approve": True,
+                                                  "confidence": 0.5, "reason": "r"} for c in cands]}, 100, 500, 400, 0, 0, None)
+
+    monkeypatch.setattr(cli_mod, "ClaudeClient", Counter)
+    monkeypatch.setattr(filter_mod, "ClaudeClient", Sampled)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run", "--sample", "3")
+    assert res.exit_code == 0, res.output
+    assert "largest bar: 3" in res.output and "per call 150 + 900 per candidate" in res.output
+    assert "sampled 2 real calls on the largest bars (1 failed): mean output 400 tokens" in res.output
+    assert "unmeasured" not in res.output
+
+
+def test_estimate_ai_zero_approved_and_exclusive_report_flags(tmp_path):
+    _setup(tmp_path)
+    Path(make_config(tmp_path).paths.kill_switch).write_text("")  # every signal is rejected: nothing to review
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "killed")
+    assert ok.exit_code == 0, ok.output
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "killed")
+    assert res.exit_code == 1 and "no risk-approved signals" in res.output
+    res = _invoke(tmp_path, "estimate-ai", "--run", "nope")
+    assert res.exit_code == 1 and "unknown run" in res.output
+    both = _invoke(tmp_path, "report", "--run", "a", "--compare", "a", "b")
+    assert both.exit_code == 1 and "mutually exclusive" in both.output
+
+
+def test_estimate_ai_api_failure_is_a_clean_error(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    assert ok.exit_code == 0, ok.output
+    from tradebot import cli as cli_mod
+    from tradebot.ai.claude_client import ClaudeReviewError
+
+    class Broken:
+        def __init__(self, *a, **k):
+            pass
+
+        def count_tokens(self, *a, **k):
+            raise ClaudeReviewError("API error 400: bad schema")
+
+    monkeypatch.setattr(cli_mod, "ClaudeClient", Broken)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run")
+    assert res.exit_code == 1 and res.output.strip().endswith("Error: API error 400: bad schema")

@@ -48,7 +48,11 @@ CREATE TABLE IF NOT EXISTS ai_decisions (
   reason      TEXT NOT NULL,
   confidence  REAL NOT NULL,
   latency_ms  INTEGER NOT NULL,
-  failure     TEXT
+  failure     TEXT,
+  input_tokens       INTEGER NOT NULL DEFAULT 0,
+  output_tokens      INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS ai_cache (

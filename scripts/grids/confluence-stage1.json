@@ -1,0 +1,10 @@
+{
+ "base": {},
+ "thr2.0": {"threshold": 2.0}, "thr2.5": {"threshold": 2.5}, "thr3.5": {"threshold": 3.5}, "thr4.0": {"threshold": 4.0}, "thr4.5": {"threshold": 4.5},
+ "adx15": {"adx_min": 15}, "adx25": {"adx_min": 25}, "adx30": {"adx_min": 30},
+ "atr1.0": {"atr_stop_mult": 1.0}, "atr2.0": {"atr_stop_mult": 2.0}, "atr2.5": {"atr_stop_mult": 2.5}, "atr3.0": {"atr_stop_mult": 3.0},
+ "rr1.0": {"reward_risk": 1.0}, "rr1.5": {"reward_risk": 1.5}, "rr3.0": {"reward_risk": 3.0},
+ "vol120": {"volume_spike_min": 120}, "vol200": {"volume_spike_min": 200},
+ "w_break2.5": {"weights": {"breakout": 2.5}}, "w_pattern0": {"weights": {"pattern": 0}}, "w_mom0": {"weights": {"momentum": 0}},
+ "w_trend2": {"weights": {"trend": 2.0}}, "w_exh-3": {"weights": {"exhaustion": -3.0}}, "w_exh0": {"weights": {"exhaustion": 0}}
+}

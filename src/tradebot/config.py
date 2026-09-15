@@ -38,6 +38,16 @@ class AIConfig:
     model: str
     candles_in_context: int
     on_failure: str
+    effort: str = "low"              # low | medium | high | xhigh | max
+    max_tokens: int = 4000           # a backstop, not a cost knob: unused output is not billed
+    timeout_sec: int = 60            # adaptive thinking can take a while; the SDK retries twice on top
+    max_calls_per_run: int = 10000   # hard stop on spend per backtest; later bars use on_failure
+    max_consecutive_failures: int = 20  # circuit breaker: abort the run when the API is dead
+    # USD per million tokens, used only for the cost line in reports (Opus 5 list prices).
+    price_in_per_mtok: float = 5.0
+    price_out_per_mtok: float = 25.0
+    price_cache_read_per_mtok: float = 0.5     # prompt-cache hits bill ~0.1x input
+    price_cache_write_per_mtok: float = 6.25   # prompt-cache writes bill ~1.25x input
 
 
 @dataclass(frozen=True)
@@ -131,7 +141,9 @@ def _section(raw: dict, name: str, cls):
     unknown = set(given) - set(fields)
     if unknown:
         raise ValueError(f"config.yaml section '{name}' has unknown keys: {sorted(unknown)}")
-    missing = set(fields) - set(given)
+    required = {n for n, f in fields.items()
+                if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING}
+    missing = required - set(given)
     if missing:
         raise ValueError(f"config.yaml section '{name}' missing keys: {sorted(missing)}")
     return cls(**{k: _coerce(name, k, fields[k].type, v) for k, v in given.items()})
@@ -140,6 +152,7 @@ def _section(raw: dict, name: str, cls):
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 AI_FILTERS = ("stub", "claude", "claude_cached")
 AI_ON_FAILURE = ("reject", "pass_through")
+AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def _validate(cfg: "Config") -> None:
@@ -160,6 +173,15 @@ def _validate(cfg: "Config") -> None:
         (a.candles_in_context >= 1, "ai.candles_in_context must be >= 1"),
         (a.filter in AI_FILTERS, f"ai.filter must be one of {AI_FILTERS}"),
         (a.on_failure in AI_ON_FAILURE, f"ai.on_failure must be one of {AI_ON_FAILURE}"),
+        (a.effort in AI_EFFORTS, f"ai.effort must be one of {AI_EFFORTS}"),
+        (a.max_tokens >= 1, "ai.max_tokens must be >= 1"),
+        (a.timeout_sec >= 1, "ai.timeout_sec must be >= 1"),
+        (a.max_calls_per_run >= 1, "ai.max_calls_per_run must be >= 1"),
+        (a.max_consecutive_failures >= 1, "ai.max_consecutive_failures must be >= 1"),
+        (a.price_in_per_mtok >= 0, "ai.price_in_per_mtok must be >= 0"),
+        (a.price_out_per_mtok >= 0, "ai.price_out_per_mtok must be >= 0"),
+        (a.price_cache_read_per_mtok >= 0, "ai.price_cache_read_per_mtok must be >= 0"),
+        (a.price_cache_write_per_mtok >= 0, "ai.price_cache_write_per_mtok must be >= 0"),
     ]
     for name in ("open", "close", "square_off", "no_new_entries_after"):
         checks.append((bool(_HHMM.match(getattr(s, name))), f'session.{name} must be a quoted "HH:MM" time'))

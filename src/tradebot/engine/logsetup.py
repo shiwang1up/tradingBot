@@ -41,6 +41,7 @@ def setup_logging(logs_dir: Union[str, Path, None], run_id: str, console_level: 
     console.setLevel(console_level)
     console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root.addHandler(console)
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # the Anthropic SDK logs every request at INFO otherwise
     if not logs_dir:
         return None
     d = Path(logs_dir)
