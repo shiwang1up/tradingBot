@@ -13,12 +13,12 @@ import requests
 
 from tradebot.ai.claude_client import ClaudeClient
 from tradebot.ai.filter import AIFilterAborted, build_filter
-from tradebot.ai.prompt import SYSTEM_PROMPT, render_candidates
+from tradebot.ai.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT, render_candidates
 from tradebot.config import Config, load_config
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
 from tradebot.data.universe import load_universe
-from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.engine.clock import SessionClock, date_of, ist_epoch
 from tradebot.engine.logsetup import setup_logging
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
@@ -28,7 +28,7 @@ from tradebot.report.summary import build_summary, format_summary
 from tradebot.store.db import SchemaVersionError, connect
 from tradebot.store.repo import Repo
 from tradebot.strategy.ema_rsi import build_strategy
-from tradebot.types import Candidate, Candle, Signal
+from tradebot.types import Candidate, Signal
 
 # Operational failures that deserve a one-line message. sqlite3 programming errors (bad SQL) still traceback.
 _FRIENDLY = (ValueError, SchemaVersionError, sqlite3.OperationalError, sqlite3.DatabaseError,
@@ -209,6 +209,8 @@ def report(cfg: Config, run_id: Optional[str], compare) -> None:
         raise click.ClickException(f"no database at {cfg.paths.db}")
     if not run_id and not compare:
         raise click.ClickException("give --run RUN or --compare RUN_A RUN_B")
+    if run_id and compare:
+        raise click.ClickException("--run and --compare are mutually exclusive")
     repo = Repo(connect(cfg.paths.db))
     if compare:
         click.echo(format_compare(build_compare(repo, compare[0], compare[1], _prices(cfg))))
@@ -223,37 +225,80 @@ def _prices(cfg: Config) -> Prices:
 
 @main.command("estimate-ai")
 @click.option("--run", "run_id", required=True, help="A completed stub run whose risk-approved signals define the workload")
+@click.option("--sample", default=0, show_default=True,
+              help="Make this many real review calls on the largest bars to measure output tokens (costs cents)")
 @click.pass_obj
-def estimate_ai(cfg: Config, run_id: str) -> None:
-    """Estimate calls, tokens and cost of replaying a run through the Claude filter.
+def estimate_ai(cfg: Config, run_id: str, sample: int) -> None:
+    """Estimate calls, tokens and cost of replaying a run through the Claude filter, as a range.
 
-    Counts tokens once on the largest bar's prompt via the API, then scales by the number of
-    bars that had at least one risk-approved candidate."""
+    Input tokens come from two free count_tokens calls on the run's real largest bar (one candidate and
+    all of them), which separates the fixed per-call cost from the per-candidate cost. The system prompt is
+    priced as one cache write plus cache reads. Output tokens are the unknown: --sample measures them with
+    real calls; without it the low end assumes a compact answer and the high end assumes ai.max_tokens."""
+    if not Path(cfg.paths.db).exists():
+        raise click.ClickException(f"no database at {cfg.paths.db}")
     repo = Repo(connect(cfg.paths.db))
     if repo.get_run(run_id) is None:
         raise click.ClickException(f"unknown run: {run_id}")
-    rows = repo.conn.execute(
-        "SELECT s.bar_ts, COUNT(*) AS n FROM risk_decisions r JOIN signals s ON s.id = r.signal_id "
-        "WHERE r.run_id=? AND r.approved=1 GROUP BY s.bar_ts", (run_id,)).fetchall()
-    if not rows:
+    by_bar = repo.approved_signals_by_bar(run_id)
+    if not by_bar:
         raise click.ClickException("that run has no risk-approved signals")
-    bars = len(rows)
-    candidates = sum(r["n"] for r in rows)
-    biggest = max(r["n"] for r in rows)
-    client = ClaudeClient(cfg.secrets.anthropic_api_key, cfg.ai.model, cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec)
-    sample = [Candidate(Signal("ema_rsi", f"SYM{i}", "LONG", 1280.0, 1275.5, 1289.0, "MIS", 1789357500), 200,
-                        {"ema_fast": 1280.1, "ema_slow": 1279.9, "rsi": 61.2, "atr": 3.1},
-                        tuple(Candle(f"SYM{i}", 1789357500 - 300 * k, 1279.0, 1281.0, 1278.0, 1280.0, 12345)
-                              for k in range(cfg.ai.candles_in_context, 0, -1)))
-              for i in range(biggest)]
+    bars = len(by_bar)
+    candidates = sum(len(v) for v in by_bar.values())
+    biggest_ts, biggest_rows = max(by_bar.items(), key=lambda kv: len(kv[1]))
+    biggest = len(biggest_rows)
+    interval = cfg.execution.interval_minutes
+    clock = SessionClock(cfg.session, interval)
     session = {"square_off": cfg.session.square_off, "entry_cutoff": cfg.session.no_new_entries_after,
-               "close": cfg.session.close, "bars_left": 40}
-    per_biggest = client.count_tokens(SYSTEM_PROMPT, render_candidates(sample, session))
-    per_candidate = per_biggest / biggest
-    input_tokens = int(candidates * per_candidate)
-    output_tokens = candidates * 60
-    cost = _prices(cfg).cost(input_tokens, output_tokens, 0, 0)
-    click.echo(f"bars with candidates: {bars}   candidates: {candidates}   largest bar: {biggest}")
-    click.echo(f"tokens per candidate: {per_candidate:.0f}   input total: {input_tokens:,}   output total ~{output_tokens:,}")
-    click.echo(f"estimated cost ({cfg.ai.model}): ${cost:,.2f} as an upper bound; the shared system prompt caches, "
-               f"and a cached replay costs $0")
+               "close": cfg.session.close,
+               "bars_left": max(0, (clock.square_off_bar_ts(date_of(biggest_ts)) - biggest_ts) // (interval * 60))}
+    window = repo.load_candles([r["symbol"] for r in biggest_rows], interval,
+                               biggest_ts - cfg.ai.candles_in_context * interval * 60, biggest_ts)
+    by_symbol: dict = {}
+    for cd in window:
+        by_symbol.setdefault(cd.symbol, []).append(cd)
+    cands = [Candidate(Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"],
+                              r["product"], r["bar_ts"]), 100,
+                       {"ema_fast": r["entry"], "ema_slow": r["entry"], "rsi": 55.0, "atr": abs(r["entry"] - r["stop"])},
+                       tuple(by_symbol.get(r["symbol"], ())[-cfg.ai.candles_in_context:]))
+             for r in biggest_rows]
+    client = ClaudeClient(cfg.secrets.anthropic_api_key, cfg.ai.model, cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec)
+    system_tokens = client.count_tokens(SYSTEM_PROMPT, "x", RESPONSE_SCHEMA)
+    one = client.count_tokens(SYSTEM_PROMPT, render_candidates(cands[:1], session), RESPONSE_SCHEMA)
+    per_cand = (client.count_tokens(SYSTEM_PROMPT, render_candidates(cands, session), RESPONSE_SCHEMA) - one) / (biggest - 1) \
+        if biggest > 1 else one - system_tokens
+    fixed_user = max(0.0, one - system_tokens - per_cand)  # envelope + schema + session facts, per call
+    uncached_input = int(bars * fixed_user + candidates * per_cand)
+    cache_read = system_tokens * max(0, bars - 1)
+    cache_write = system_tokens
+    measured = None
+    if sample > 0:
+        top = sorted(by_bar.items(), key=lambda kv: -len(kv[1]))[:sample]
+        flt = build_filter(dc_replace(cfg.ai, filter="claude"), cfg.secrets.anthropic_api_key, clock=clock)
+        for ts, rows in top:
+            w = repo.load_candles([r["symbol"] for r in rows], interval, ts - cfg.ai.candles_in_context * interval * 60, ts)
+            bs: dict = {}
+            for cd in w:
+                bs.setdefault(cd.symbol, []).append(cd)
+            flt.review([Candidate(Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"],
+                                         r["product"], r["bar_ts"]), 100,
+                                  {"ema_fast": r["entry"], "ema_slow": r["entry"], "rsi": 55.0, "atr": abs(r["entry"] - r["stop"])},
+                                  tuple(bs.get(r["symbol"], ())[-cfg.ai.candles_in_context:])) for r in rows])
+        if flt.calls:
+            measured = flt.tokens["output"] / flt.calls
+            click.echo(f"sampled {flt.calls} real calls: mean output {measured:.0f} tokens, "
+                       f"mean latency {flt.latency_total_ms // flt.calls} ms, spent ~${_prices(cfg).cost(flt.tokens['input'], flt.tokens['output'], flt.tokens['cache_read'], flt.tokens['cache_write']):.2f}")
+    low_out = int(bars * (measured if measured is not None else 60 * (candidates / bars) + 150))
+    high_out = int(bars * (measured * 1.5 if measured is not None else cfg.ai.max_tokens))
+    prices = _prices(cfg)
+    low = prices.cost(uncached_input, low_out, cache_read, cache_write)
+    high = prices.cost(uncached_input, high_out, cache_read, cache_write)
+    click.echo(f"API calls: {bars} bars with candidates   candidates: {candidates}   largest bar: {biggest}")
+    click.echo(f"tokens: system {system_tokens} (cached after the first call), per call {fixed_user:.0f} + {per_cand:.0f} per candidate")
+    click.echo(f"input: {uncached_input:,} uncached + {cache_read:,} cache reads;  output: {low_out:,} to {high_out:,}"
+               + ("" if measured is not None else "  (unmeasured: run with --sample 10 to measure)"))
+    click.echo(f"estimated cost ({cfg.ai.model}, {cfg.ai.effort} effort): ${low:,.2f} to ${high:,.2f}; a cached replay costs $0")
+    click.echo("note: a stub run under-counts candidates slightly, since Claude's rejections free position slots later on")
+    if bars > cfg.ai.max_calls_per_run:
+        click.echo(f"WARNING: {bars} calls exceed ai.max_calls_per_run={cfg.ai.max_calls_per_run}; the tail of the replay "
+                   f"would silently become on_failure decisions. Raise the cap first.", err=True)

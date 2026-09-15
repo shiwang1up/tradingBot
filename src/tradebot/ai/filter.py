@@ -18,6 +18,7 @@ from tradebot.types import Candidate, Decision
 
 log = logging.getLogger("tradebot.ai")
 REASON_MAX = 200
+PROGRESS_EVERY = 50
 
 
 class AIFilterAborted(RuntimeError):
@@ -59,6 +60,8 @@ class ClaudeFilter:
         self.clock = clock  # supplies the session facts the prompt's "bars left" rule needs
         self.calls = 0
         self.consecutive_failures = 0
+        self.tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        self.latency_total_ms = 0
 
     def _session(self, bar_ts: int) -> Optional[dict]:
         if self.clock is None:
@@ -87,6 +90,7 @@ class ClaudeFilter:
         except ClaudeReviewError as e:
             self._note_failure(str(e))
             return self._failed(candidates, str(e), latency_ms=int((time.monotonic() - t0) * 1000))
+        self._account(resp, len(candidates))
         by_index = {}
         for d in resp.data.get("decisions", []) if isinstance(resp.data, dict) else []:
             if isinstance(d, dict) and isinstance(d.get("index"), int) and not isinstance(d.get("index"), bool):
@@ -109,6 +113,21 @@ class ClaudeFilter:
         else:
             self.consecutive_failures = 0
         return out
+
+    def _account(self, resp: ReviewResponse, n: int) -> None:
+        """Running totals plus a per-call DEBUG line (request id for support) and a progress line
+        every 50 calls so a multi-hour paid replay shows it is alive and what it has spent."""
+        self.tokens["input"] += resp.input_tokens
+        self.tokens["output"] += resp.output_tokens
+        self.tokens["cache_read"] += resp.cache_read_tokens
+        self.tokens["cache_write"] += resp.cache_write_tokens
+        self.latency_total_ms += resp.latency_ms
+        log.debug("claude call %d: %d candidates, %d ms, in=%d out=%d cached=%d req=%s", self.calls, n,
+                  resp.latency_ms, resp.input_tokens, resp.output_tokens, resp.cache_read_tokens, resp.request_id)
+        if self.calls % PROGRESS_EVERY == 0:
+            log.info("claude filter progress: %d calls, tokens in=%d out=%d cached=%d, avg %d ms/call",
+                     self.calls, self.tokens["input"], self.tokens["output"], self.tokens["cache_read"],
+                     self.latency_total_ms // self.calls)
 
     def _note_failure(self, why: str) -> None:
         self.consecutive_failures += 1

@@ -338,21 +338,38 @@ def test_backtest_claude_without_key_is_clean_error(tmp_path):
     assert res.exit_code == 1 and "ANTHROPIC_API_KEY" in res.output
 
 
-def test_estimate_ai_reports_calls_and_cost(tmp_path, monkeypatch):
+def test_estimate_ai_reports_a_range_and_records_the_ai_override(tmp_path, monkeypatch):
     _setup(tmp_path)
-    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run", "--ai", "stub")
     assert ok.exit_code == 0, ok.output
+    import json
+    from tradebot.store.db import connect as _connect
+    from tradebot.store.repo import Repo as _Repo
+    stored = json.loads(_Repo(_connect(make_config(tmp_path).paths.db)).get_run("stub-run")["config_json"])
+    assert stored["ai"]["filter"] == "stub"
     from tradebot import cli as cli_mod
 
     class Counter:
         def __init__(self, *a, **k):
             pass
 
-        def count_tokens(self, system, user):
-            return 1500
+        def count_tokens(self, system, user, schema=None):
+            return 700 if user == "x" else 700 + 150 + 900 * user.count('"index":')
 
     monkeypatch.setattr(cli_mod, "ClaudeClient", Counter)
     (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
     res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run")
     assert res.exit_code == 0, res.output
-    assert "bars with candidates" in res.output and "estimated cost" in res.output
+    assert "API calls: 9 bars with candidates" in res.output and "largest bar: 1" in res.output
+    assert "per call 0 + 1050 per candidate" in res.output  # one-candidate bar: no fixed/per-candidate split possible
+    assert "estimated cost" in res.output and " to $" in res.output and "unmeasured" in res.output
+
+
+def test_estimate_ai_zero_approved_and_exclusive_report_flags(tmp_path):
+    _setup(tmp_path)
+    cfg_text = (tmp_path / "config.yaml").read_text().replace("max_open_positions: 5", "max_open_positions: 1")
+    (tmp_path / "config.yaml").write_text(cfg_text)
+    res = _invoke(tmp_path, "estimate-ai", "--run", "nope")
+    assert res.exit_code == 1 and "unknown run" in res.output
+    both = _invoke(tmp_path, "report", "--run", "a", "--compare", "a", "b")
+    assert both.exit_code == 1 and "mutually exclusive" in both.output

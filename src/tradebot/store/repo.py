@@ -127,6 +127,16 @@ class Repo:
             "FROM ai_decisions d JOIN signals s ON s.id = d.signal_id "
             "WHERE d.run_id=? AND d.approved=0 ORDER BY s.bar_ts, s.symbol", (run_id,)).fetchall()
 
+    def approved_signals_by_bar(self, run_id: str) -> dict:
+        """{bar_ts: [signal rows]} for risk-approved signals: the workload a Claude replay would review."""
+        rows = self.conn.execute(
+            "SELECT s.* FROM risk_decisions r JOIN signals s ON s.id = r.signal_id "
+            "WHERE r.run_id=? AND r.approved=1 ORDER BY s.bar_ts, s.symbol", (run_id,)).fetchall()
+        out: dict = {}
+        for row in rows:
+            out.setdefault(row["bar_ts"], []).append(row)
+        return out
+
     def positions_by_client_id(self, run_id: str) -> dict:
         """Backtest use only: adopted live positions share client_id '' and would collapse to one key."""
         return {r["client_id"]: r for r in self.list_positions(run_id)}

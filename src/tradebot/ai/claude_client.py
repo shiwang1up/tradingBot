@@ -89,9 +89,13 @@ class ClaudeClient:
             request_id=getattr(resp, "_request_id", None),
         )
 
-    def count_tokens(self, system: str, user: str) -> int:
-        """Exact input token count for a prompt, shaped like the real request, for estimate-ai."""
+    def count_tokens(self, system: str, user: str, schema: Optional[dict] = None) -> int:
+        """Exact input token count for a prompt shaped like the real request (the JSON schema is part
+        of the input too), for estimate-ai. Free endpoint."""
+        kwargs = {"model": self.model, "system": self._system_blocks(system),
+                  "messages": [{"role": "user", "content": user}]}
+        if schema is not None:
+            kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
         with _sdk_errors():
-            r = self._client.messages.count_tokens(model=self.model, system=self._system_blocks(system),
-                                                   messages=[{"role": "user", "content": user}])
+            r = self._client.messages.count_tokens(**kwargs)
         return int(r.input_tokens)
