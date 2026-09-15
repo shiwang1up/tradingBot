@@ -32,6 +32,7 @@ ai:
   max_tokens: 4000            # backstop only; thinking tokens count against it
   timeout_sec: 60
   max_calls_per_run: 10000    # spend guard per backtest; a 62-day replay is at most ~4650 calls
+  max_consecutive_failures: 20  # abort the run if the API fails this many bars in a row
   price_in_per_mtok: 5.0      # list prices, used only for the report's cost line
   price_out_per_mtok: 25.0
   price_cache_read_per_mtok: 0.5

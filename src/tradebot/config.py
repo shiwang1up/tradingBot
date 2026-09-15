@@ -42,6 +42,7 @@ class AIConfig:
     max_tokens: int = 4000           # a backstop, not a cost knob: unused output is not billed
     timeout_sec: int = 60            # adaptive thinking can take a while; the SDK retries twice on top
     max_calls_per_run: int = 10000   # hard stop on spend per backtest; later bars use on_failure
+    max_consecutive_failures: int = 20  # circuit breaker: abort the run when the API is dead
     # USD per million tokens, used only for the cost line in reports (Opus 5 list prices).
     price_in_per_mtok: float = 5.0
     price_out_per_mtok: float = 25.0
@@ -176,6 +177,7 @@ def _validate(cfg: "Config") -> None:
         (a.max_tokens >= 1, "ai.max_tokens must be >= 1"),
         (a.timeout_sec >= 1, "ai.timeout_sec must be >= 1"),
         (a.max_calls_per_run >= 1, "ai.max_calls_per_run must be >= 1"),
+        (a.max_consecutive_failures >= 1, "ai.max_consecutive_failures must be >= 1"),
         (a.price_in_per_mtok >= 0, "ai.price_in_per_mtok must be >= 0"),
         (a.price_out_per_mtok >= 0, "ai.price_out_per_mtok must be >= 0"),
         (a.price_cache_read_per_mtok >= 0, "ai.price_cache_read_per_mtok must be >= 0"),

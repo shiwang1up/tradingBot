@@ -36,6 +36,12 @@ class _Messages:
             raise self.outcome
         return self.outcome
 
+    def count_tokens(self, **kw):
+        self.calls.append(kw)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return types.SimpleNamespace(input_tokens=1234)
+
 
 def _client(outcome):
     c = ClaudeClient(api_key="k", model="claude-opus-5", effort="low", max_tokens=2000, timeout_sec=30)
@@ -94,3 +100,20 @@ def test_invalid_json_is_a_review_error():
 def test_missing_key_is_rejected_early():
     with pytest.raises(ValueError):
         ClaudeClient(api_key="", model="claude-opus-5", effort="low", max_tokens=10, timeout_sec=1)
+
+
+def test_empty_text_response_is_a_review_error():
+    resp = _Resp("")
+    resp.content = [_Block("thinking")]
+    with pytest.raises(ClaudeReviewError, match="no text block"):
+        _client(resp).review("S", "U", {})
+
+
+def test_count_tokens_mirrors_request_shape_and_maps_errors():
+    c = _client(_Resp("{}"))
+    assert c.count_tokens("SYS", "USER") == 1234
+    kw = c._client.messages.calls[0]
+    assert kw["system"][0]["text"] == "SYS" and kw["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert kw["messages"] == [{"role": "user", "content": "USER"}] and kw["model"] == "claude-opus-5"
+    with pytest.raises(ClaudeReviewError):
+        _client(_sdk_error(anthropic.APIConnectionError)).count_tokens("S", "U")

@@ -1,9 +1,10 @@
 """Thin wrapper over the Anthropic SDK: one structured-output request, typed failure, usage numbers.
-Nothing else in the project imports `anthropic`."""
+Nothing else in the project imports `anthropic`; every SDK failure leaves here as ClaudeReviewError."""
 from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -25,6 +26,22 @@ class ReviewResponse:
     request_id: Optional[str]
 
 
+@contextmanager
+def _sdk_errors():
+    """Map every SDK exception class to ClaudeReviewError. Most specific first: RateLimitError is an
+    APIStatusError; APITimeoutError is an APIConnectionError; validation errors are bare APIError."""
+    try:
+        yield
+    except anthropic.RateLimitError as e:
+        raise ClaudeReviewError(f"rate limited after retries: {e}") from e
+    except anthropic.APIStatusError as e:
+        raise ClaudeReviewError(f"API error {getattr(e, 'status_code', '?')}: {getattr(e, 'message', e)}") from e
+    except anthropic.APIConnectionError as e:
+        raise ClaudeReviewError(f"connection error: {e}") from e
+    except anthropic.APIError as e:
+        raise ClaudeReviewError(f"SDK error: {type(e).__name__}: {e}") from e
+
+
 class ClaudeClient:
     def __init__(self, api_key: str, model: str, effort: str, max_tokens: int, timeout_sec: int):
         if not api_key:
@@ -35,30 +52,28 @@ class ClaudeClient:
         # The SDK retries 429/5xx/connection errors twice with backoff on its own.
         self._client = anthropic.Anthropic(api_key=api_key, timeout=float(timeout_sec), max_retries=2)
 
+    @staticmethod
+    def _system_blocks(system: str) -> list:
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
     def review(self, system: str, user: str, schema: dict) -> ReviewResponse:
         t0 = time.monotonic()
-        try:
+        with _sdk_errors():
             resp = self._client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                system=self._system_blocks(system),
                 messages=[{"role": "user", "content": user}],
                 output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
             )
-        except anthropic.RateLimitError as e:
-            raise ClaudeReviewError(f"rate limited after retries: {e}") from e
-        except anthropic.APIStatusError as e:
-            raise ClaudeReviewError(f"API error {getattr(e, 'status_code', '?')}: {getattr(e, 'message', e)}") from e
-        except anthropic.APIConnectionError as e:  # includes timeouts
-            raise ClaudeReviewError(f"connection error: {e}") from e
-        except anthropic.APIError as e:  # response/webhook validation errors subclass APIError directly
-            raise ClaudeReviewError(f"SDK error: {type(e).__name__}: {e}") from e
         latency_ms = int((time.monotonic() - t0) * 1000)
         if resp.stop_reason == "refusal":
             raise ClaudeReviewError("refusal: the model declined the request")
         if resp.stop_reason == "max_tokens":
             raise ClaudeReviewError("max_tokens: response truncated; raise ai.max_tokens")
         text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+        if not text:
+            raise ClaudeReviewError("no text block in response")
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
@@ -75,7 +90,8 @@ class ClaudeClient:
         )
 
     def count_tokens(self, system: str, user: str) -> int:
-        """Exact input token count for a prompt, for the estimate-ai command."""
-        r = self._client.messages.count_tokens(model=self.model, system=system,
-                                               messages=[{"role": "user", "content": user}])
+        """Exact input token count for a prompt, shaped like the real request, for estimate-ai."""
+        with _sdk_errors():
+            r = self._client.messages.count_tokens(model=self.model, system=self._system_blocks(system),
+                                                   messages=[{"role": "user", "content": user}])
         return int(r.input_tokens)

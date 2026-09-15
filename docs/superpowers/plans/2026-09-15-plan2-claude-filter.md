@@ -106,6 +106,7 @@ class AIConfig:
     max_tokens: int = 4000           # a backstop, not a cost knob: unused output is not billed
     timeout_sec: int = 60            # adaptive thinking can take a while; the SDK retries twice on top
     max_calls_per_run: int = 10000   # hard stop on spend per backtest; later bars use on_failure
+    max_consecutive_failures: int = 20  # circuit breaker: abort the run when the API is dead
     # USD per million tokens, used only for the cost line in reports (Opus 5 list prices).
     price_in_per_mtok: float = 5.0
     price_out_per_mtok: float = 25.0
@@ -134,6 +135,7 @@ In `_validate`, add to `checks` after the `ai.on_failure` line:
         (a.max_tokens >= 1, "ai.max_tokens must be >= 1"),
         (a.timeout_sec >= 1, "ai.timeout_sec must be >= 1"),
         (a.max_calls_per_run >= 1, "ai.max_calls_per_run must be >= 1"),
+        (a.max_consecutive_failures >= 1, "ai.max_consecutive_failures must be >= 1"),
         (a.price_in_per_mtok >= 0, "ai.price_in_per_mtok must be >= 0"),
         (a.price_out_per_mtok >= 0, "ai.price_out_per_mtok must be >= 0"),
         (a.price_cache_read_per_mtok >= 0, "ai.price_cache_read_per_mtok must be >= 0"),
@@ -176,6 +178,7 @@ ai:
   max_tokens: 4000            # backstop only; thinking tokens count against it
   timeout_sec: 60
   max_calls_per_run: 10000    # spend guard per backtest; a 62-day replay is at most ~4650 calls
+  max_consecutive_failures: 20  # abort the run if the API fails this many bars in a row
   price_in_per_mtok: 5.0      # list prices, used only for the report's cost line
   price_out_per_mtok: 25.0
   price_cache_read_per_mtok: 0.5
@@ -614,7 +617,6 @@ git commit -m "feat(ai): deterministic prompt rendering, response schema and pro
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/test_claude_client.py
 import types
 
 import anthropic
@@ -652,6 +654,12 @@ class _Messages:
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
+
+    def count_tokens(self, **kw):
+        self.calls.append(kw)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return types.SimpleNamespace(input_tokens=1234)
 
 
 def _client(outcome):
@@ -711,6 +719,23 @@ def test_invalid_json_is_a_review_error():
 def test_missing_key_is_rejected_early():
     with pytest.raises(ValueError):
         ClaudeClient(api_key="", model="claude-opus-5", effort="low", max_tokens=10, timeout_sec=1)
+
+
+def test_empty_text_response_is_a_review_error():
+    resp = _Resp("")
+    resp.content = [_Block("thinking")]
+    with pytest.raises(ClaudeReviewError, match="no text block"):
+        _client(resp).review("S", "U", {})
+
+
+def test_count_tokens_mirrors_request_shape_and_maps_errors():
+    c = _client(_Resp("{}"))
+    assert c.count_tokens("SYS", "USER") == 1234
+    kw = c._client.messages.calls[0]
+    assert kw["system"][0]["text"] == "SYS" and kw["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert kw["messages"] == [{"role": "user", "content": "USER"}] and kw["model"] == "claude-opus-5"
+    with pytest.raises(ClaudeReviewError):
+        _client(_sdk_error(anthropic.APIConnectionError)).count_tokens("S", "U")
 ```
 
 - [ ] **Step 2: Run, expect ModuleNotFoundError**
@@ -721,11 +746,12 @@ Run: `.venv/bin/pytest tests/test_claude_client.py -q`
 
 ```python
 """Thin wrapper over the Anthropic SDK: one structured-output request, typed failure, usage numbers.
-Nothing else in the project imports `anthropic`."""
+Nothing else in the project imports `anthropic`; every SDK failure leaves here as ClaudeReviewError."""
 from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -747,6 +773,22 @@ class ReviewResponse:
     request_id: Optional[str]
 
 
+@contextmanager
+def _sdk_errors():
+    """Map every SDK exception class to ClaudeReviewError. Most specific first: RateLimitError is an
+    APIStatusError; APITimeoutError is an APIConnectionError; validation errors are bare APIError."""
+    try:
+        yield
+    except anthropic.RateLimitError as e:
+        raise ClaudeReviewError(f"rate limited after retries: {e}") from e
+    except anthropic.APIStatusError as e:
+        raise ClaudeReviewError(f"API error {getattr(e, 'status_code', '?')}: {getattr(e, 'message', e)}") from e
+    except anthropic.APIConnectionError as e:
+        raise ClaudeReviewError(f"connection error: {e}") from e
+    except anthropic.APIError as e:
+        raise ClaudeReviewError(f"SDK error: {type(e).__name__}: {e}") from e
+
+
 class ClaudeClient:
     def __init__(self, api_key: str, model: str, effort: str, max_tokens: int, timeout_sec: int):
         if not api_key:
@@ -757,30 +799,28 @@ class ClaudeClient:
         # The SDK retries 429/5xx/connection errors twice with backoff on its own.
         self._client = anthropic.Anthropic(api_key=api_key, timeout=float(timeout_sec), max_retries=2)
 
+    @staticmethod
+    def _system_blocks(system: str) -> list:
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
     def review(self, system: str, user: str, schema: dict) -> ReviewResponse:
         t0 = time.monotonic()
-        try:
+        with _sdk_errors():
             resp = self._client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                system=self._system_blocks(system),
                 messages=[{"role": "user", "content": user}],
                 output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
             )
-        except anthropic.RateLimitError as e:
-            raise ClaudeReviewError(f"rate limited after retries: {e}") from e
-        except anthropic.APIStatusError as e:
-            raise ClaudeReviewError(f"API error {getattr(e, 'status_code', '?')}: {getattr(e, 'message', e)}") from e
-        except anthropic.APIConnectionError as e:  # includes timeouts
-            raise ClaudeReviewError(f"connection error: {e}") from e
-        except anthropic.APIError as e:  # response/webhook validation errors subclass APIError directly
-            raise ClaudeReviewError(f"SDK error: {type(e).__name__}: {e}") from e
         latency_ms = int((time.monotonic() - t0) * 1000)
         if resp.stop_reason == "refusal":
             raise ClaudeReviewError("refusal: the model declined the request")
         if resp.stop_reason == "max_tokens":
             raise ClaudeReviewError("max_tokens: response truncated; raise ai.max_tokens")
         text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+        if not text:
+            raise ClaudeReviewError("no text block in response")
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
@@ -797,16 +837,17 @@ class ClaudeClient:
         )
 
     def count_tokens(self, system: str, user: str) -> int:
-        """Exact input token count for a prompt, for the estimate-ai command."""
-        r = self._client.messages.count_tokens(model=self.model, system=system,
-                                               messages=[{"role": "user", "content": user}])
+        """Exact input token count for a prompt, shaped like the real request, for estimate-ai."""
+        with _sdk_errors():
+            r = self._client.messages.count_tokens(model=self.model, system=self._system_blocks(system),
+                                                   messages=[{"role": "user", "content": user}])
         return int(r.input_tokens)
 ```
 
 - [ ] **Step 4: Run tests**
 
 Run: `.venv/bin/pytest tests/test_claude_client.py -q`
-Expected: 8 passed.
+Expected: 10 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -905,6 +946,15 @@ def test_claude_filter_spend_guard():
     assert f.review([_rich_cand("A")])[0].approved
     d = f.review([_rich_cand("A", bar_ts=1789357800)])[0]
     assert not d.approved and "max_calls_per_run" in d.failure and len(fake.calls) == 1
+
+
+def test_consecutive_failures_trip_the_circuit_breaker():
+    fake = FakeClaude(error=ClaudeReviewError("down"))
+    f = ClaudeFilter(_ai(max_consecutive_failures=3), fake)
+    f.review([_rich_cand("A")])
+    f.review([_rich_cand("A", bar_ts=1789357800)])
+    with pytest.raises(RuntimeError, match="3 consecutive failures"):
+        f.review([_rich_cand("A", bar_ts=1789358100)])
 
 
 def test_cached_filter_hits_skip_the_call_and_misses_populate(repo):
@@ -1053,6 +1103,7 @@ class ClaudeFilter:
         self.cache = cache
         self.clock = clock  # supplies the session facts the prompt's "bars left" rule needs
         self.calls = 0
+        self.consecutive_failures = 0
 
     def _session(self, bar_ts: int) -> Optional[dict]:
         if self.clock is None:
@@ -1077,8 +1128,13 @@ class ClaudeFilter:
         try:
             resp = self.client.review(SYSTEM_PROMPT, user, RESPONSE_SCHEMA)
         except ClaudeReviewError as e:
-            log.warning("claude review failed: %s", e)
+            self.consecutive_failures += 1
+            log.warning("claude review failed (%d in a row): %s", self.consecutive_failures, e)
+            if self.consecutive_failures >= self.cfg.max_consecutive_failures:
+                # Circuit breaker: a dead API must not quietly turn a whole replay into on_failure decisions.
+                raise RuntimeError(f"Claude filter: {self.consecutive_failures} consecutive failures, last: {e}") from e
             return self._failed(candidates, str(e))
+        self.consecutive_failures = 0
         by_index = {}
         for d in resp.data.get("decisions", []) if isinstance(resp.data, dict) else []:
             if isinstance(d, dict) and isinstance(d.get("index"), int):
