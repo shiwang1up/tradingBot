@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from tradebot.engine.clock import date_of
 from tradebot.strategy.base import Strategy
 from tradebot.strategy.indicators import ATR, EMA
 from tradebot.types import TICK, Candle, Signal, round_tick_down, round_tick_up
@@ -33,6 +34,7 @@ class _State:
     prev_low: Optional[float] = None
     prev_high: Optional[float] = None
     ready_bars: int = 0  # bars seen with every indicator warm
+    day: Optional[object] = None  # IST date of the last bar; a new day starts a clean cycle
 
 
 def _int(params: dict, key: str) -> int:
@@ -81,7 +83,7 @@ class PullbackStrategy(Strategy):
 
     def snapshot(self, symbol: str) -> dict:
         st = self._state.get(symbol)
-        if not st or not (st.fast.ready and st.slow.ready and st.atr.ready):
+        if not st or st.ready_bars < 2:  # same gate as is_ready: the base contract says empty until ready
             return {}
         f = lambda v: 0.0 if v is None else float(v)  # noqa: E731
         trend = {"LONG": 1, "SHORT": -1}.get(st.direction, 0)
@@ -98,15 +100,19 @@ class PullbackStrategy(Strategy):
             return None
         st.ready_bars += 1
         trend = "LONG" if fast > slow else ("SHORT" if fast < slow else None)
+        day = date_of(candle.ts)
+        new_day = day != st.day
+        st.day = day
         signal = None
-        if trend != st.direction:
-            # A trend change (or the first trend) starts a clean cycle. The flip bar itself only
-            # records state: it straddles the EMA by construction, so it must not arm a pullback.
+        if new_day or trend != st.direction:
+            # A new session, a trend change or the first trend starts a clean cycle. That bar only
+            # records state and never arms: a flip bar or an opening gap bar is not a pullback, and a
+            # pullback from yesterday afternoon must not confirm against this morning's gap.
             st.direction, st.phase = trend, IDLE
             st.swing_high, st.swing_low = candle.high, candle.low
             st.pullback_low = st.pullback_high = None
             st.pullback_bars = 0
-        elif trend is not None:  # the first ready bar always lands in the branch above (direction starts None)
+        elif trend is not None:  # the first ready bar always lands in the branch above (day starts None)
             signal = self._step(st, candle, trend, fast, atr)
         st.prev_low, st.prev_high = candle.low, candle.high
         return signal
@@ -133,13 +139,18 @@ class PullbackStrategy(Strategy):
             st.pullback_high = max(st.pullback_high, c.high)
             st.pullback_bars += 1
             if st.pullback_bars > self.max_pullback_bars:
-                st.phase = IDLE
+                # A pullback this old is a failing trend, not a dip: spend it like a trade, so a fresh
+                # swing extreme is required before another one can arm.
+                st.phase = DONE
                 return None
-            resumed = (c.close > fast and st.prev_low is not None and c.low > st.prev_low) if long else \
-                      (c.close < fast and st.prev_high is not None and c.high < st.prev_high)
+            if long:
+                resumed = c.close > fast and c.low > st.prev_low
+            else:
+                resumed = c.close < fast and c.high < st.prev_high
             if not resumed:
                 return None
             st.phase = DONE
+            self._track_swing(st, c, trend)  # a strong confirmation bar raises the bar for re-arming
             return self._signal(c, trend, st.pullback_low if long else st.pullback_high, atr)
         # DONE: wait for a new extreme beyond the pre-pullback swing before another pullback can arm
         if (long and c.high > st.swing_high) or (not long and c.low < st.swing_low):

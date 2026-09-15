@@ -56,11 +56,17 @@ def test_one_trade_per_pullback_until_a_new_swing_high():
     assert phases[9100] == DONE and phases[10000] == IDLE
 
 
-def test_pullback_longer_than_max_bars_resets_without_firing():
+def test_pullback_longer_than_max_bars_is_spent_until_a_new_swing_high():
     sinking = [(15, 16.5, 13.9, 16.4), (16.4, 16.5, 13.8, 16.3), (16.3, 16.5, 13.7, 16.2), (16.2, 16.5, 13.6, 16.1)]
     s, out = run(UP + [TOUCH] + sinking)     # every low is lower than the last: never confirms
     assert signals(out) == []
-    assert s.snapshot("X")["phase"] == IDLE  # 5 pullback bars > max_pullback_bars 4
+    assert s.snapshot("X")["phase"] == DONE  # 5 pullback bars > max_pullback_bars 4: spent, not re-armable
+    # a dip and a would-be confirmation right after the timeout must not trade ...
+    _, out2 = run(UP + [TOUCH] + sinking + [(16.1, 16.5, 13.5, 16.0), (16.0, 16.4, 14.0, 16.3)])
+    assert signals(out2) == []
+    # ... but a new swing high above 16.5 re-arms, and the next pullback trades
+    _, out3 = run(UP + [TOUCH] + sinking + [(16.1, 17.0, 16.0, 16.8), (16.8, 17.0, 15.0, 16.2), (16.2, 17.2, 15.6, 17.0)])
+    assert [x[1] for x in signals(out3)] == ["LONG"] and signals(out3)[0][0] == 1000 + 14 * 900
 
 
 def test_trend_flip_resets_and_the_flip_bar_does_not_arm():
@@ -100,9 +106,35 @@ def test_not_ready_until_two_warm_bars_and_first_ready_bar_never_fires():
 
 
 def test_recompute_replays_deterministically():
-    s, out = run(UP + [TOUCH, CONFIRM])
-    s.recompute("X", bars(UP + [TOUCH, CONFIRM]))
-    assert s.snapshot("X")["phase"] == DONE and s.is_ready("X")
+    s, out = run(UP + [TOUCH, CONFIRM, (16.4, 16.5, 16.2, 16.45), (16.45, 16.8, 16.3, 16.7)])   # ends IDLE after a breakout
+    before = s.snapshot("X")
+    fresh = PullbackStrategy(PARAMS)
+    fresh.recompute("X", bars(UP + [TOUCH, CONFIRM, (16.4, 16.5, 16.2, 16.45), (16.45, 16.8, 16.3, 16.7)]))
+    assert fresh.snapshot("X") == before and before["phase"] == IDLE
+    s.recompute("X", bars(UP))              # a shorter replay must not keep the old pullback state
+    assert s.snapshot("X")["phase"] == IDLE and s.snapshot("X")["pullback_low"] == 0.0
+
+
+def test_a_new_session_starts_clean_so_yesterdays_pullback_cannot_confirm_on_the_gap():
+    from tradebot.engine.clock import ist_epoch
+    from datetime import date
+    day1 = ist_epoch(date(2026, 9, 14), "09:15")
+    day2 = ist_epoch(date(2026, 9, 15), "09:15")
+    rows = UP + [TOUCH]                                    # the last bar of day 1 arms a pullback (low 14.0)
+    cs = [Candle("X", day1 + i * 900, o, h, l, c, 100) for i, (o, h, l, c) in enumerate(rows)]
+    gap = Candle("X", day2, 20.0, 20.5, 19.8, 20.4, 100)   # closes above the EMA with a "higher low"
+    s = PullbackStrategy(PARAMS)
+    out = [s.on_candle(c) for c in cs] + [s.on_candle(gap)]
+    assert all(sig is None for sig in out), "a gap bar must not confirm yesterday's pullback"
+    snap = s.snapshot("X")
+    assert snap["phase"] == IDLE and snap["swing_high"] == 20.5 and snap["pullback_low"] == 0.0
+
+
+def test_a_bar_with_equal_emas_has_no_trend_and_places_nothing():
+    flat = [(10, 10.5, 9.5, 10)] * 8
+    s, out = run(flat)
+    assert signals(out) == [] and s.is_ready("X")
+    assert s.snapshot("X")["trend"] == 0 and s.snapshot("X")["phase"] == IDLE
 
 
 @pytest.mark.parametrize("bad, msg", [
