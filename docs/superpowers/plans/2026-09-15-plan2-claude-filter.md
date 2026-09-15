@@ -281,7 +281,10 @@ Expected: 4 failed.
 `src/tradebot/store/db.py`: set `SCHEMA_VERSION = 2` and add, above `connect`:
 
 ```python
-# Forward migrations keyed by the version they upgrade FROM. Each list runs inside executescript.
+# Forward migrations keyed by the version they upgrade FROM. Each list runs inside one explicit
+# transaction (Python 3.9's sqlite3 autocommits DDL otherwise), so a crash mid-way leaves the
+# file at the old version rather than half-migrated. Every version below SCHEMA_VERSION must
+# have an entry: a missing one means a column was added to schema.sql without a migration.
 MIGRATIONS = {
     1: [
         "ALTER TABLE ai_decisions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
@@ -302,10 +305,21 @@ and replace the version check block with:
             f"{path} has schema version {found}, code expects {SCHEMA_VERSION}; upgrade the code or delete the file"
         )
     if 0 < found < SCHEMA_VERSION:  # a fresh database (0) is created at the current version by schema.sql
-        for v in range(found, SCHEMA_VERSION):
-            for stmt in MIGRATIONS.get(v, []):
-                conn.execute(stmt)
-        conn.commit()
+        missing = [v for v in range(found, SCHEMA_VERSION) if v not in MIGRATIONS]
+        if missing:
+            conn.close()
+            raise SchemaVersionError(f"no migration defined from schema version(s) {missing}; cannot open {path}")
+        conn.execute("BEGIN")
+        try:
+            for v in range(found, SCHEMA_VERSION):
+                for stmt in MIGRATIONS[v]:
+                    conn.execute(stmt)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
     schema = resources.files("tradebot.store").joinpath("schema.sql").read_text()
     conn.executescript(schema)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -314,6 +328,8 @@ and replace the version check block with:
 ```
 
 Update the existing `test_file_backed_connect_uses_wal_persists_and_versions` test: the "refuse" case must now set `user_version` to `SCHEMA_VERSION + 1` (it already does) and the error message check is unchanged.
+
+Also append the atomicity, missing-migration and failed-call-latency tests (see the repository's `tests/test_store.py` after this task: `_v1_db`, `test_migration_is_atomic_and_a_failed_one_leaves_the_old_version`, `test_missing_migration_entry_refuses_to_open`, `test_ai_usage_latency_includes_failed_calls`).
 
 `src/tradebot/store/repo.py`: change `insert_ai_decision` to:
 
@@ -335,12 +351,13 @@ and add these methods after `ai_rejection_count`:
 
 ```python
     def ai_usage(self, run_id: str) -> dict:
-        """Token totals, call count (decisions carrying input tokens) and mean latency of real calls."""
+        """Token totals, call count (decisions carrying input tokens), failures, and mean latency over
+        real calls including failed ones (a timeout is the slowest event and must not be excluded)."""
         row = self.conn.execute(
             "SELECT COUNT(*) AS decisions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
             "SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
             "SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
-            "AVG(CASE WHEN input_tokens > 0 THEN latency_ms END) AS avg_latency_ms, "
+            "AVG(CASE WHEN input_tokens > 0 OR failure IS NOT NULL THEN latency_ms END) AS avg_latency_ms, "
             "SUM(CASE WHEN failure IS NOT NULL THEN 1 ELSE 0 END) AS failures "
             "FROM ai_decisions WHERE run_id=?", (run_id,)).fetchone()
         return {k: (row[k] or 0) for k in row.keys()}
@@ -352,6 +369,7 @@ and add these methods after `ai_rejection_count`:
             "WHERE d.run_id=? AND d.approved=0 ORDER BY s.bar_ts, s.symbol", (run_id,)).fetchall()
 
     def positions_by_client_id(self, run_id: str) -> dict:
+        """Backtest use only: adopted live positions share client_id '' and would collapse to one key."""
         return {r["client_id"]: r for r in self.list_positions(run_id)}
 
     # -- ai cache ----------------------------------------------------------
@@ -371,7 +389,7 @@ and add these methods after `ai_rejection_count`:
 - [ ] **Step 4: Run the suite**
 
 Run: `.venv/bin/pytest -q`
-Expected: all pass (240). Then open the real database once so it migrates: `.venv/bin/python -c "from tradebot.store.db import connect; c=connect('data/tradebot.db'); print(c.execute('PRAGMA user_version').fetchone()[0])"` prints `2`.
+Expected: all pass (243). Then open the real database once so it migrates: `.venv/bin/python -c "from tradebot.store.db import connect; c=connect('data/tradebot.db'); print(c.execute('PRAGMA user_version').fetchone()[0])"` prints `2`.
 
 - [ ] **Step 5: Commit**
 
