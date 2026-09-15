@@ -75,7 +75,8 @@ class PathsConfig:
 @dataclass(frozen=True)
 class Secrets:
     groww_api_key: str
-    groww_totp_secret: str
+    groww_totp_secret: str  # TOTP flow: base32 secret from the API keys page (no daily approval)
+    groww_api_secret: str   # approval flow: API secret paired with the JWT api key (needs daily approval)
     anthropic_api_key: str
 
 
@@ -201,6 +202,7 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         secrets=Secrets(
             groww_api_key=os.environ.get("GROWW_API_KEY", ""),
             groww_totp_secret=os.environ.get("GROWW_TOTP_SECRET", ""),
+            groww_api_secret=os.environ.get("GROWW_API_SECRET", ""),
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         ),
         raw=raw,

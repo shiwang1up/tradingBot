@@ -6,10 +6,14 @@ Plan 1 (this code) is the backtester. Plan 2 adds the Claude filter; Plan 3 adds
 ## Setup
 
     python3 -m venv .venv && .venv/bin/pip install -U pip setuptools && .venv/bin/pip install -e ".[dev]"
-    cp .env.example .env   # fill in GROWW_API_KEY, GROWW_TOTP_SECRET, ANTHROPIC_API_KEY
+    cp .env.example .env   # fill in GROWW_API_KEY, one of GROWW_TOTP_SECRET / GROWW_API_SECRET, ANTHROPIC_API_KEY
 
 Python 3.9 or newer. Secrets are read from `.env` next to `config.yaml` (or `--env <path>`);
 a variable already exported in the shell wins over the file.
+
+Groww offers two login flows. The TOTP flow pairs a TOTP api key with a base32 secret and never
+expires. The approval flow pairs a JWT api key with an API secret and must be approved daily on
+the Groww API keys page. Set `GROWW_TOTP_SECRET` for the first or `GROWW_API_SECRET` for the second.
 
 ## Backtest
 

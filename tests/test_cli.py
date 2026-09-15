@@ -52,7 +52,7 @@ def test_missing_credentials_is_a_clean_error(tmp_path, monkeypatch):
         "NSE,2885,RELIANCE,CASH,EQ,1,0.05,1,1\n")
     monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
     res = _invoke(tmp_path, "fetch-data")
-    assert res.exit_code == 1 and "Error: GROWW_API_KEY and GROWW_TOTP_SECRET must be set" in res.output
+    assert res.exit_code == 1 and "Error: GROWW_API_KEY must be set" in res.output
     assert "Traceback" not in res.output
 
 
@@ -66,7 +66,10 @@ def test_groww_auth_failure_is_a_clean_error(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
 
     class Auth:
-        def __init__(self, k, s):
+        flow = "fake"
+        client = object()
+
+        def __init__(self, k, s, a=""):
             pass
 
         def fetch_candles(self, *a):
@@ -87,7 +90,10 @@ def test_generic_groww_exception_with_auth_code_aborts_on_first_symbol(tmp_path,
     calls = []
 
     class Expired:
-        def __init__(self, k, s):
+        flow = "fake"
+        client = object()
+
+        def __init__(self, k, s, a=""):
             pass
 
         def fetch_candles(self, symbol, *a):
@@ -110,7 +116,10 @@ def test_fetch_data_isolates_symbol_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
 
     class Flaky:
-        def __init__(self, k, s):
+        flow = "fake"
+        client = object()
+
+        def __init__(self, k, s, a=""):
             pass
 
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
@@ -154,7 +163,10 @@ def test_env_is_read_next_to_config_or_from_override(tmp_path, monkeypatch):
     seen = {}
 
     class Spy:
-        def __init__(self, k, s):
+        flow = "fake"
+        client = object()
+
+        def __init__(self, k, s, a=""):
             seen["key"] = k
 
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
@@ -191,7 +203,10 @@ def test_fetch_data_uses_adapter_and_instruments(tmp_path, monkeypatch):
     calls = []
 
     class FakeAdapter:
-        def __init__(self, key, secret):
+        flow = "fake"
+        client = object()
+
+        def __init__(self, key, secret, api_secret=""):
             pass
 
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
@@ -217,7 +232,10 @@ def test_first_fetch_with_no_candles_at_all_is_an_error(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
 
     class Empty:
-        def __init__(self, k, s):
+        flow = "fake"
+        client = object()
+
+        def __init__(self, k, s, a=""):
             pass
 
         def fetch_candles(self, *a):
@@ -244,3 +262,12 @@ def test_backtest_writes_a_jsonl_log_and_warns_without_instruments(tmp_path):
     assert "WARNING: instrument master missing" in res.output
     logs = list((tmp_path / "logs").glob("*.jsonl"))
     assert logs and any('"run_id": "logged"' in ln for ln in logs[0].read_text().splitlines())
+
+
+def test_bad_totp_secret_aborts_before_any_symbol(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=jwt\nGROWW_TOTP_SECRET=TY#Fnotbase32\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    monkeypatch.setattr(cli, "download_instruments", lambda p: (_ for _ in ()).throw(AssertionError("downloaded")))
+    res = _invoke(tmp_path, "fetch-data")
+    assert res.exit_code == 1 and "not a base32 TOTP secret" in res.output and "failed:" not in res.output

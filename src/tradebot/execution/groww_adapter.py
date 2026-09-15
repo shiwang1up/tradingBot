@@ -3,6 +3,7 @@ Order, feed, position, and margin methods are added in Plan 3."""
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -97,23 +98,56 @@ def groww_symbol(exchange: str, trading_symbol: str) -> str:
     return f"{exchange}-{trading_symbol}"
 
 
+_BASE32 = re.compile(r"^[A-Z2-7]+=*$")
+
+
+class GrowwAuthenticationError(RuntimeError):
+    """Credential problem detected before or during login. Never retried; aborts the run."""
+
+
 class GrowwAdapter:
-    def __init__(self, api_key: str, totp_secret: str):
-        if not api_key or not totp_secret:
-            raise ValueError("GROWW_API_KEY and GROWW_TOTP_SECRET must be set in .env")
+    """Two Groww login flows (spec 2):
+    - TOTP flow: GROWW_API_KEY is the TOTP api key and GROWW_TOTP_SECRET a base32 secret; no expiry.
+    - Approval flow: GROWW_API_KEY is the JWT api key and GROWW_API_SECRET its secret; the key must be
+      approved daily on https://groww.in/trade-api/api-keys.
+    """
+
+    def __init__(self, api_key: str, totp_secret: str = "", api_secret: str = ""):
+        if not api_key:
+            raise GrowwAuthenticationError("GROWW_API_KEY must be set in .env")
+        if not totp_secret and not api_secret:
+            raise GrowwAuthenticationError("set GROWW_TOTP_SECRET (TOTP flow) or GROWW_API_SECRET (approval flow) in .env")
+        if totp_secret and not _BASE32.match(totp_secret.replace(" ", "").upper()):
+            raise GrowwAuthenticationError(
+                "GROWW_TOTP_SECRET is not a base32 TOTP secret. If Groww gave you an API key and an API "
+                "secret (approval flow), put the secret in GROWW_API_SECRET instead.")
         self._api_key = api_key
-        self._totp_secret = totp_secret
+        self._totp_secret = totp_secret.replace(" ", "").upper() if totp_secret else ""
+        self._api_secret = api_secret
         self._client = None
+
+    @property
+    def flow(self) -> str:
+        return "totp" if self._totp_secret else "approval"
 
     @property
     def client(self):
         """Authenticate lazily, once. A failed auth raises; never loop on it."""
         if self._client is None:
-            import pyotp
             from growwapi import GrowwAPI
 
-            totp = pyotp.TOTP(self._totp_secret).now()
-            token = GrowwAPI.get_access_token(api_key=self._api_key, totp=totp)
+            try:
+                if self._totp_secret:
+                    import pyotp
+                    token = GrowwAPI.get_access_token(api_key=self._api_key, totp=pyotp.TOTP(self._totp_secret).now())
+                else:
+                    token = GrowwAPI.get_access_token(api_key=self._api_key, secret=self._api_secret)
+            except Exception as e:  # noqa: BLE001 - any login failure is fatal and must read clearly
+                hint = (" Approval-flow keys must be approved daily at https://groww.in/trade-api/api-keys."
+                        if not self._totp_secret else "")
+                raise GrowwAuthenticationError(f"Groww login failed ({self.flow} flow): {type(e).__name__}: {e}.{hint}") from e
+            if not token:
+                raise GrowwAuthenticationError("Groww login returned no access token")
             self._client = GrowwAPI(token)
         return self._client
 

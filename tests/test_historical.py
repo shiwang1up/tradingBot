@@ -2,8 +2,8 @@
 import pytest
 
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
-from tradebot.execution.groww_adapter import (GrowwAdapter, candle_interval_name, groww_symbol, parse_candles,
-                                              with_retry)
+from tradebot.execution.groww_adapter import (GrowwAdapter, GrowwAuthenticationError, candle_interval_name,
+                                              groww_symbol, parse_candles, with_retry)
 from tradebot.types import Candle
 
 DAY = 86400
@@ -147,9 +147,31 @@ def test_fetch_candles_validates_interval_before_any_call():
         adapter.fetch_candles("RELIANCE", "NSE", 0, 1, 7)
 
 
-def test_adapter_requires_credentials():
-    with pytest.raises(ValueError):
+def test_adapter_requires_credentials_and_validates_totp_format():
+    with pytest.raises(GrowwAuthenticationError):
         GrowwAdapter("", "")
+    with pytest.raises(GrowwAuthenticationError, match="GROWW_TOTP_SECRET|GROWW_API_SECRET"):
+        GrowwAdapter("key")
+    with pytest.raises(GrowwAuthenticationError, match="not a base32"):
+        GrowwAdapter("key", totp_secret="TY#Fnotbase32")
+    assert GrowwAdapter("key", totp_secret="jbsw y3dp ehpk 3pxp").flow == "totp"
+    assert GrowwAdapter("key", api_secret="whatever-shape").flow == "approval"
+
+
+def test_adapter_login_failure_is_a_single_clear_error(monkeypatch):
+    import sys, types
+    fake = types.ModuleType("growwapi")
+
+    class GrowwAPI:
+        @staticmethod
+        def get_access_token(api_key, totp=None, secret=None):
+            raise RuntimeError("403 not approved")
+
+    fake.GrowwAPI = GrowwAPI
+    monkeypatch.setitem(sys.modules, "growwapi", fake)
+    a = GrowwAdapter("jwt", api_secret="s")
+    with pytest.raises(GrowwAuthenticationError, match="approval flow.*approved daily"):
+        a.client
 
 
 class FakeFetcher:
