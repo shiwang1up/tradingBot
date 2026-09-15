@@ -91,9 +91,9 @@ Sleeping stays out of the clock: `PaperEngine` takes `now` and `sleep` callables
    the daily row and `last_bar_ts` after each. A machine that slept simply finds several bars ready.
 5. When the last bar of the session has been processed: `_end_day`, `end_run`, return.
 
-A `stop` flag set by the SIGINT/SIGTERM handler is checked after each bar; when set the loop
-performs step 5 immediately (positions are left open on the books; a resume later the same day
-picks them up).
+A `stop` flag set by the SIGINT/SIGTERM handler is checked after each bar and inside the sleep; when set
+the loop finishes the current bar, writes the daily row and returns without ending the run. Positions
+and pending entries stay on the books, so a resume later the same day picks them up.
 
 ### Warm-up
 
