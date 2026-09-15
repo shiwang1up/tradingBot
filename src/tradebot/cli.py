@@ -284,10 +284,15 @@ def estimate_ai(cfg: Config, run_id: str, sample: int) -> None:
                                          r["product"], r["bar_ts"]), 100,
                                   {"ema_fast": r["entry"], "ema_slow": r["entry"], "rsi": 55.0, "atr": abs(r["entry"] - r["stop"])},
                                   tuple(bs.get(r["symbol"], ())[-cfg.ai.candles_in_context:])) for r in rows])
-        if flt.calls:
-            measured = flt.tokens["output"] / flt.calls
-            click.echo(f"sampled {flt.calls} real calls: mean output {measured:.0f} tokens, "
-                       f"mean latency {flt.latency_total_ms // flt.calls} ms, spent ~${_prices(cfg).cost(flt.tokens['input'], flt.tokens['output'], flt.tokens['cache_read'], flt.tokens['cache_write']):.2f}")
+        if flt.successful_calls:
+            measured = flt.tokens["output"] / flt.successful_calls
+            click.echo(f"sampled {flt.successful_calls} real calls on the largest bars ({flt.calls - flt.successful_calls} failed): "
+                       f"mean output {measured:.0f} tokens, mean latency {flt.latency_total_ms // flt.successful_calls} ms, "
+                       f"spent ~${_prices(cfg).cost(flt.tokens['input'], flt.tokens['output'], flt.tokens['cache_read'], flt.tokens['cache_write']):.2f}")
+        else:
+            click.echo(f"all {flt.calls} sampled calls failed; output tokens stay unmeasured", err=True)
+    # A measured mean comes from the largest bars, so it leans high for a typical bar: the low bound
+    # uses it as-is and the high bound adds 50% headroom for variance.
     low_out = int(bars * (measured if measured is not None else 60 * (candidates / bars) + 150))
     high_out = int(bars * (measured * 1.5 if measured is not None else cfg.ai.max_tokens))
     prices = _prices(cfg)

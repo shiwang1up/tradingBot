@@ -62,6 +62,7 @@ class ClaudeFilter:
         self.consecutive_failures = 0
         self.tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         self.latency_total_ms = 0
+        self.successful_calls = 0  # calls that returned usage; failed calls are not in the token means
 
     def _session(self, bar_ts: int) -> Optional[dict]:
         if self.clock is None:
@@ -122,6 +123,7 @@ class ClaudeFilter:
         self.tokens["cache_read"] += resp.cache_read_tokens
         self.tokens["cache_write"] += resp.cache_write_tokens
         self.latency_total_ms += resp.latency_ms
+        self.successful_calls += 1
         log.debug("claude call %d: %d candidates, %d ms, in=%d out=%d cached=%d req=%s", self.calls, n,
                   resp.latency_ms, resp.input_tokens, resp.output_tokens, resp.cache_read_tokens, resp.request_id)
         if self.calls % PROGRESS_EVERY == 0:

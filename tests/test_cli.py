@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -6,7 +7,7 @@ from tests.helpers import make_config, synth_candles
 from tradebot import cli
 from tradebot.store.db import connect
 from tradebot.store.repo import Repo
-from tradebot.types import Candle
+from tradebot.types import Candle, Signal
 
 
 def _setup(tmp_path):
@@ -365,10 +366,64 @@ def test_estimate_ai_reports_a_range_and_records_the_ai_override(tmp_path, monke
     assert "estimated cost" in res.output and " to $" in res.output and "unmeasured" in res.output
 
 
+def test_estimate_ai_separates_fixed_and_per_candidate_cost_and_samples(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    assert ok.exit_code == 0, ok.output
+    from tradebot import cli as cli_mod
+    from tradebot.ai import filter as filter_mod
+    from tradebot.ai.claude_client import ClaudeReviewError, ReviewResponse
+    from tradebot.store.db import connect as _connect
+    from tradebot.store.repo import Repo as _Repo
+    # Make the largest bar hold three candidates by approving two extra signals on one bar.
+    repo = _Repo(_connect(make_config(tmp_path).paths.db))
+    bar = repo.conn.execute("SELECT s.bar_ts FROM risk_decisions r JOIN signals s ON s.id=r.signal_id "
+                            "WHERE r.run_id='stub-run' AND r.approved=1 LIMIT 1").fetchone()[0]
+    for sym in ("P", "Q"):
+        sid = repo.insert_signal("stub-run", Signal("ema_rsi", sym, "LONG", 100.0, 99.0, 102.0, "MIS", bar))
+        repo.insert_risk_decision("stub-run", sid, True, "ok", 10)
+    repo.conn.close()
+
+    class Counter:
+        def __init__(self, *a, **k):
+            pass
+
+        def count_tokens(self, system, user, schema=None):
+            return 700 if user == "x" else 700 + 150 + 900 * user.count('"index":')
+
+    calls = {"n": 0}
+
+    class Sampled:
+        def __init__(self, *a, **k):
+            pass
+
+        def review(self, system, user, schema):
+            import json
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ClaudeReviewError("transient")  # a failed sample must not drag the mean down
+            cands = json.loads(user)["candidates"]
+            return ReviewResponse({"decisions": [{"index": c["index"], "symbol": c["symbol"], "approve": True,
+                                                  "confidence": 0.5, "reason": "r"} for c in cands]}, 100, 500, 400, 0, 0, None)
+
+    monkeypatch.setattr(cli_mod, "ClaudeClient", Counter)
+    monkeypatch.setattr(filter_mod, "ClaudeClient", Sampled)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run", "--sample", "3")
+    assert res.exit_code == 0, res.output
+    assert "largest bar: 3" in res.output and "per call 150 + 900 per candidate" in res.output
+    assert "sampled 2 real calls on the largest bars (1 failed): mean output 400 tokens" in res.output
+    assert "unmeasured" not in res.output
+
+
 def test_estimate_ai_zero_approved_and_exclusive_report_flags(tmp_path):
     _setup(tmp_path)
-    cfg_text = (tmp_path / "config.yaml").read_text().replace("max_open_positions: 5", "max_open_positions: 1")
-    (tmp_path / "config.yaml").write_text(cfg_text)
+    Path(make_config(tmp_path).paths.kill_switch).write_text("")  # every signal is rejected: nothing to review
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "killed")
+    assert ok.exit_code == 0, ok.output
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "killed")
+    assert res.exit_code == 1 and "no risk-approved signals" in res.output
     res = _invoke(tmp_path, "estimate-ai", "--run", "nope")
     assert res.exit_code == 1 and "unknown run" in res.output
     both = _invoke(tmp_path, "report", "--run", "a", "--compare", "a", "b")
