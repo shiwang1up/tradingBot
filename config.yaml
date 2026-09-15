@@ -71,6 +71,8 @@ session:
 
 data:
   official_fetch_concurrency: 5
+  bar_grace_sec: 5              # paper: wait this long after the boundary before fetching the closed bar
+  warmup_bars: 300              # paper: stored bars replayed per symbol before the first live bar (~4 days)
 
 paths:
   db: data/tradebot.db
