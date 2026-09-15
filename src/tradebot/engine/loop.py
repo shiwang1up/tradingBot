@@ -1,4 +1,4 @@
-"""The per-bar cycle (spec sections 4-8). Mode-independent given a source, broker, and clock.
+"""The per-bar cycle (spec sections 4-8). Mode-independent given a broker and clock; subclasses supply the loop.
 
 Order inside a bar:
   1. broker.on_bar        fills pending entries at this bar's open, simulates exits
@@ -7,6 +7,9 @@ Order inside a bar:
   4. kill switch          flatten if requested
   5. strategies           every candle feeds every strategy (indicators stay warm)
   6. risk -> AI -> place  only if entries are allowed; a live kill switch rejects inside evaluate()
+
+A bar handed in with now_ts past the deadline (paper) records its signals as `stale` and places
+nothing (spec 8.6).
 
 "PnL for the day" (spec 6.2) is realised today plus the change in unrealised since the day
 opened, so a position carried overnight only charges today's move against today's cap.
@@ -19,6 +22,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import date
+from typing import Optional
 
 from tradebot.ai.filter import AIFilter
 from tradebot.config import Config, resolved_config
@@ -45,13 +49,14 @@ class _DayCounters:
     unrealised_at_open: float = 0.0  # mark of positions carried in from earlier days
 
 
-class BacktestEngine:
-    def __init__(self, cfg: Config, repo: Repo, source: HistoricalSource, strategies: list[Strategy],
-                 broker: Broker, ai_filter: AIFilter, clock: SessionClock, lot_sizes: dict[str, int],
-                 run_id: str, mode: str = "backtest"):
+class Engine:
+    """Mode-independent per-bar cycle. BacktestEngine replays stored bars; PaperEngine (engine/paper.py)
+    feeds live bars on the wall clock. Everything below `run` is shared."""
+
+    def __init__(self, cfg: Config, repo: Repo, strategies: list[Strategy], broker: Broker, ai_filter: AIFilter,
+                 clock: SessionClock, lot_sizes: dict[str, int], run_id: str, mode: str):
         self.cfg = cfg
         self.repo = repo
-        self.source = source
         self.strategies = strategies
         self.broker = broker
         self.ai_filter = ai_filter
@@ -67,40 +72,6 @@ class BacktestEngine:
         self._cooldown_until: dict[str, int] = {}
         self.disabled_strategies: set[str] = set()
         self._day = _DayCounters()
-
-    # -- lifecycle -------------------------------------------------------------
-    def run(self) -> str:
-        self.repo.create_run(self.run_id, self.mode, int(time.time()), json.dumps(resolved_config(self.cfg), default=str))
-        current: date | None = None
-        last_ts = 0
-        bars = self.source.bar_timestamps()
-        log.info("run %s (%s) started: %d bars, strategies=%s", self.run_id, self.mode, len(bars),
-                 [s.name for s in self.strategies])
-        try:
-            for ts in bars:
-                d = date_of(ts)
-                if not self.clock.is_trading_day(d):
-                    continue
-                if d != current:
-                    if current is not None:
-                        self._end_day(current, last_ts)
-                    self._start_day()
-                    current = d
-                last_ts = ts  # set before processing so a failure mid-bar still stamps this bar
-                self.process_bar(ts, self.source.candles_at(ts))
-        finally:
-            # A mid-run exception still leaves a closed run and, where possible, the last day's row.
-            # Cleanup must never mask the original exception or skip end_run.
-            try:
-                if current is not None:
-                    self._end_day(current, last_ts)
-            except Exception:  # noqa: BLE001
-                log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
-            finally:
-                self.repo.end_run(self.run_id, int(time.time()))
-                log.info("run %s ended: realised %.2f on last day, %d closed positions",
-                         self.run_id, self._day.realised, len(getattr(self.broker, "closed", [])))
-        return self.run_id
 
     def _start_day(self) -> None:
         # A strategy disabled yesterday missed bars; its incremental indicators would silently
@@ -121,6 +92,9 @@ class BacktestEngine:
             self._record(leftovers)
         # Entries queued on the last bar must not fill against tomorrow's open on a stale signal.
         self._record(self.broker.cancel_pending(ts, "day_end"))
+        self._write_daily_row(d)
+
+    def _write_daily_row(self, d: date) -> None:
         self.repo.upsert_daily_pnl(self.run_id, d.isoformat(), self._day.realised, self._unrealised_today(),
                                    self._day.fills, self._day.entries_placed)
 
@@ -131,13 +105,19 @@ class BacktestEngine:
         return self._unrealised_now() - self._day.unrealised_at_open
 
     # -- per bar ----------------------------------------------------------------
-    def process_bar(self, ts: int, candles: dict[str, Candle]) -> None:
+    def _observe(self, candles: dict[str, Candle]) -> None:
+        """Update last closes, the AI context history and the shared indicators. Also used by the
+        paper warm-up, which must not touch the broker."""
         for sym, c in candles.items():
             self._last_close[sym] = c.close
             self._history.setdefault(sym, deque(maxlen=self.cfg.ai.candles_in_context)).append(c)
             if sym not in self._indicators:  # not setdefault: that would build a throwaway set every bar
                 self._indicators[sym] = IndicatorSet(self._indicator_params)
             self._indicators[sym].update(c)
+
+    def process_bar(self, ts: int, candles: dict[str, Candle], now_ts: Optional[int] = None) -> None:
+        """`now_ts` is the wall clock when the bar is handed in (paper); None means the bar is on time."""
+        self._observe(candles)
 
         self._record(self.broker.on_bar(ts, candles))
         if not self._day.squared_off and self.clock.square_off_due(ts):
@@ -160,6 +140,14 @@ class BacktestEngine:
 
         signals = self._run_strategies(candles)
         if not signals:
+            return
+        late_by = 0 if now_ts is None else now_ts - (ts + self.interval_sec)
+        if late_by > self.cfg.execution.bar_deadline_sec:
+            for _, sig in signals:
+                sid = self.repo.insert_signal(self.run_id, sig)
+                self.repo.insert_risk_decision(self.run_id, sid, False, "stale", 0)
+            log.warning("bar %s handed in %ds after its close; %d signal(s) dropped as stale",
+                        iso_ist(ts), late_by, len(signals))
             return
         if not self.clock.entries_allowed(ts):
             # Audit trail: every dropped signal gets a row (spec 6), even outside entry hours.
@@ -277,3 +265,45 @@ class BacktestEngine:
                 if p.exit_reason == "STOP":
                     # Wall-clock cooldown: an overnight gap absorbs it, which is intended (intraday rule).
                     self._cooldown_until[p.symbol] = p.closed_ts + self.cfg.risk.cooldown_bars * self.interval_sec
+
+
+class BacktestEngine(Engine):
+    def __init__(self, cfg: Config, repo: Repo, source: HistoricalSource, strategies: list[Strategy],
+                 broker: Broker, ai_filter: AIFilter, clock: SessionClock, lot_sizes: dict[str, int],
+                 run_id: str, mode: str = "backtest"):
+        super().__init__(cfg, repo, strategies, broker, ai_filter, clock, lot_sizes, run_id, mode)
+        self.source = source
+
+    # -- lifecycle -------------------------------------------------------------
+    def run(self) -> str:
+        self.repo.create_run(self.run_id, self.mode, int(time.time()), json.dumps(resolved_config(self.cfg), default=str))
+        current: date | None = None
+        last_ts = 0
+        bars = self.source.bar_timestamps()
+        log.info("run %s (%s) started: %d bars, strategies=%s", self.run_id, self.mode, len(bars),
+                 [s.name for s in self.strategies])
+        try:
+            for ts in bars:
+                d = date_of(ts)
+                if not self.clock.is_trading_day(d):
+                    continue
+                if d != current:
+                    if current is not None:
+                        self._end_day(current, last_ts)
+                    self._start_day()
+                    current = d
+                last_ts = ts  # set before processing so a failure mid-bar still stamps this bar
+                self.process_bar(ts, self.source.candles_at(ts))
+        finally:
+            # A mid-run exception still leaves a closed run and, where possible, the last day's row.
+            # Cleanup must never mask the original exception or skip end_run.
+            try:
+                if current is not None:
+                    self._end_day(current, last_ts)
+            except Exception:  # noqa: BLE001
+                log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
+            finally:
+                self.repo.end_run(self.run_id, int(time.time()))
+                log.info("run %s ended: realised %.2f on last day, %d closed positions",
+                         self.run_id, self._day.realised, len(getattr(self.broker, "closed", [])))
+        return self.run_id
