@@ -46,9 +46,10 @@ def test_stub_satisfies_filter_contract():
 
 
 # -- Claude filters against a fake client --------------------------------------------------------
+import time
 from tradebot.ai.cache import AICache
 from tradebot.ai.claude_client import ClaudeReviewError, ReviewResponse
-from tradebot.ai.filter import CachedClaudeFilter, ClaudeFilter
+from tradebot.ai.filter import AIFilterAborted, CachedClaudeFilter, ClaudeFilter
 from tradebot.types import Candle
 
 
@@ -126,8 +127,54 @@ def test_consecutive_failures_trip_the_circuit_breaker():
     f = ClaudeFilter(_ai(max_consecutive_failures=3), fake)
     f.review([_rich_cand("A")])
     f.review([_rich_cand("A", bar_ts=1789357800)])
-    with pytest.raises(RuntimeError, match="3 consecutive failures"):
+    with pytest.raises(AIFilterAborted, match="3 consecutive failures"):
         f.review([_rich_cand("A", bar_ts=1789358100)])
+
+
+def test_breaker_also_counts_batches_that_match_no_candidate():
+    fake = FakeClaude([{"index": 9, "symbol": "ZZZ", "approve": True, "confidence": 0.5, "reason": "?"}])
+    f = ClaudeFilter(_ai(max_consecutive_failures=2), fake)
+    f.review([_rich_cand("A")])
+    with pytest.raises(AIFilterAborted):
+        f.review([_rich_cand("A", bar_ts=1789357800)])
+
+
+def test_failed_call_records_its_latency_and_guard_rows_do_not():
+    class Slow:
+        def review(self, *a):
+            time.sleep(0.02)
+            raise ClaudeReviewError("timeout")
+
+    d = ClaudeFilter(_ai(), Slow()).review([_rich_cand("A")])[0]
+    assert d.latency_ms >= 15 and d.failure == "timeout"
+    f = ClaudeFilter(_ai(max_calls_per_run=1), FakeClaude([{"index": 0, "symbol": "A", "approve": True,
+                                                            "confidence": 0.5, "reason": "ok"}]))
+    f.review([_rich_cand("A")])
+    assert f.review([_rich_cand("A", bar_ts=1789357800)])[0].latency_ms == 0
+
+
+def test_malformed_decision_without_approve_is_a_failure_not_a_silent_reject():
+    fake = FakeClaude([{"index": 0, "symbol": "A", "confidence": 0.5, "reason": None}])
+    d = ClaudeFilter(_ai(), fake).review([_rich_cand("A")])[0]
+    assert d.failure and not d.approved
+
+
+def test_cache_key_includes_model_and_effort(repo):
+    fake = FakeClaude([{"index": 0, "symbol": "A", "approve": True, "confidence": 0.5, "reason": "ok"}])
+    CachedClaudeFilter(_ai(filter="claude_cached", model="claude-opus-5"), fake, AICache(repo)).review([_rich_cand("A")])
+    CachedClaudeFilter(_ai(filter="claude_cached", model="claude-haiku-4-5"), fake, AICache(repo)).review([_rich_cand("A")])
+    CachedClaudeFilter(_ai(filter="claude_cached", model="claude-opus-5", effort="max"), fake, AICache(repo)).review([_rich_cand("A")])
+    assert len(fake.calls) == 3
+
+
+def test_corrupt_cache_row_is_a_miss(repo):
+    from tradebot.ai.prompt import SYSTEM_PROMPT, prompt_hash, render_candidates
+    cand = _rich_cand("A")
+    h = prompt_hash(f"claude-opus-5|low|{SYSTEM_PROMPT}", render_candidates([cand], None))
+    repo.put_ai_cache("A", cand.signal.bar_ts, h, "{not json", 0)
+    fake = FakeClaude([{"index": 0, "symbol": "A", "approve": True, "confidence": 0.5, "reason": "ok"}])
+    assert CachedClaudeFilter(_ai(filter="claude_cached"), fake, AICache(repo)).review([cand])[0].approved
+    assert len(fake.calls) == 1
 
 
 def test_cached_filter_hits_skip_the_call_and_misses_populate(repo):

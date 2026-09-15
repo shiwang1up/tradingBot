@@ -10,7 +10,7 @@ from typing import Optional
 import click
 import requests
 
-from tradebot.ai.filter import build_filter
+from tradebot.ai.filter import AIFilterAborted, build_filter
 from tradebot.config import Config, load_config
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
@@ -27,7 +27,7 @@ from tradebot.strategy.ema_rsi import build_strategy
 
 # Operational failures that deserve a one-line message. sqlite3 programming errors (bad SQL) still traceback.
 _FRIENDLY = (ValueError, SchemaVersionError, sqlite3.OperationalError, sqlite3.DatabaseError,
-             requests.RequestException, NotImplementedError)
+             requests.RequestException, NotImplementedError, AIFilterAborted)
 _FATAL_AUTH_CODES = {"401", "403"}
 
 

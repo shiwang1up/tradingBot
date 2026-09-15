@@ -14,7 +14,13 @@ class AICache:
 
     def get(self, symbol: str, bar_ts: int, prompt_hash: str) -> Optional[dict]:
         raw = self.repo.get_ai_cache(symbol, bar_ts, prompt_hash)
-        return json.loads(raw) if raw else None
+        if not raw:
+            return None
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            return None  # a corrupt row is a miss, not a crash
+        return d if isinstance(d, dict) else None
 
     def put(self, symbol: str, bar_ts: int, prompt_hash: str, decision: dict) -> None:
         self.repo.put_ai_cache(symbol, bar_ts, prompt_hash, json.dumps(decision, sort_keys=True), int(time.time()))

@@ -214,5 +214,7 @@ def test_ai_usage_latency_includes_failed_calls(repo):
     s2 = repo.insert_signal("r1", _signal("B", 200))
     repo.insert_ai_decision("r1", s1, "claude", True, "ok", 0.5, 400, None, input_tokens=1000)
     repo.insert_ai_decision("r1", s2, "claude", False, "ai_failure: timeout", 0.0, 60000, "timeout")
+    s3 = repo.insert_signal("r1", _signal("C", 300))
+    repo.insert_ai_decision("r1", s3, "claude", False, "ai_failure: max_calls", 0.0, 0, "max_calls_per_run")  # no call
     u = repo.ai_usage("r1")
-    assert u["calls"] == 1 and u["failures"] == 1 and u["avg_latency_ms"] == pytest.approx(30200)
+    assert u["calls"] == 1 and u["failures"] == 2 and u["avg_latency_ms"] == pytest.approx(30200)

@@ -360,7 +360,8 @@ and add these methods after `ai_rejection_count`:
             "SELECT COUNT(*) AS decisions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
             "SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
             "SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
-            "AVG(CASE WHEN input_tokens > 0 OR failure IS NOT NULL THEN latency_ms END) AS avg_latency_ms, "
+            "AVG(CASE WHEN input_tokens > 0 OR (failure IS NOT NULL AND latency_ms > 0) THEN latency_ms END) "
+            "AS avg_latency_ms, "
             "SUM(CASE WHEN failure IS NOT NULL THEN 1 ELSE 0 END) AS failures "
             "FROM ai_decisions WHERE run_id=?", (run_id,)).fetchone()
         return {k: (row[k] or 0) for k in row.keys()}
@@ -870,12 +871,11 @@ git commit -m "feat(ai): Anthropic client wrapper with structured outputs and ty
 Append to `tests/test_ai_filter.py`:
 
 ```python
-
-
 # -- Claude filters against a fake client --------------------------------------------------------
+import time
 from tradebot.ai.cache import AICache
 from tradebot.ai.claude_client import ClaudeReviewError, ReviewResponse
-from tradebot.ai.filter import CachedClaudeFilter, ClaudeFilter
+from tradebot.ai.filter import AIFilterAborted, CachedClaudeFilter, ClaudeFilter
 from tradebot.types import Candle
 
 
@@ -953,8 +953,54 @@ def test_consecutive_failures_trip_the_circuit_breaker():
     f = ClaudeFilter(_ai(max_consecutive_failures=3), fake)
     f.review([_rich_cand("A")])
     f.review([_rich_cand("A", bar_ts=1789357800)])
-    with pytest.raises(RuntimeError, match="3 consecutive failures"):
+    with pytest.raises(AIFilterAborted, match="3 consecutive failures"):
         f.review([_rich_cand("A", bar_ts=1789358100)])
+
+
+def test_breaker_also_counts_batches_that_match_no_candidate():
+    fake = FakeClaude([{"index": 9, "symbol": "ZZZ", "approve": True, "confidence": 0.5, "reason": "?"}])
+    f = ClaudeFilter(_ai(max_consecutive_failures=2), fake)
+    f.review([_rich_cand("A")])
+    with pytest.raises(AIFilterAborted):
+        f.review([_rich_cand("A", bar_ts=1789357800)])
+
+
+def test_failed_call_records_its_latency_and_guard_rows_do_not():
+    class Slow:
+        def review(self, *a):
+            time.sleep(0.02)
+            raise ClaudeReviewError("timeout")
+
+    d = ClaudeFilter(_ai(), Slow()).review([_rich_cand("A")])[0]
+    assert d.latency_ms >= 15 and d.failure == "timeout"
+    f = ClaudeFilter(_ai(max_calls_per_run=1), FakeClaude([{"index": 0, "symbol": "A", "approve": True,
+                                                            "confidence": 0.5, "reason": "ok"}]))
+    f.review([_rich_cand("A")])
+    assert f.review([_rich_cand("A", bar_ts=1789357800)])[0].latency_ms == 0
+
+
+def test_malformed_decision_without_approve_is_a_failure_not_a_silent_reject():
+    fake = FakeClaude([{"index": 0, "symbol": "A", "confidence": 0.5, "reason": None}])
+    d = ClaudeFilter(_ai(), fake).review([_rich_cand("A")])[0]
+    assert d.failure and not d.approved
+
+
+def test_cache_key_includes_model_and_effort(repo):
+    fake = FakeClaude([{"index": 0, "symbol": "A", "approve": True, "confidence": 0.5, "reason": "ok"}])
+    CachedClaudeFilter(_ai(filter="claude_cached", model="claude-opus-5"), fake, AICache(repo)).review([_rich_cand("A")])
+    CachedClaudeFilter(_ai(filter="claude_cached", model="claude-haiku-4-5"), fake, AICache(repo)).review([_rich_cand("A")])
+    CachedClaudeFilter(_ai(filter="claude_cached", model="claude-opus-5", effort="max"), fake, AICache(repo)).review([_rich_cand("A")])
+    assert len(fake.calls) == 3
+
+
+def test_corrupt_cache_row_is_a_miss(repo):
+    from tradebot.ai.prompt import SYSTEM_PROMPT, prompt_hash, render_candidates
+    cand = _rich_cand("A")
+    h = prompt_hash(f"claude-opus-5|low|{SYSTEM_PROMPT}", render_candidates([cand], None))
+    repo.put_ai_cache("A", cand.signal.bar_ts, h, "{not json", 0)
+    fake = FakeClaude([{"index": 0, "symbol": "A", "approve": True, "confidence": 0.5, "reason": "ok"}])
+    assert CachedClaudeFilter(_ai(filter="claude_cached"), fake, AICache(repo)).review([cand])[0].approved
+    assert len(fake.calls) == 1
 
 
 def test_cached_filter_hits_skip_the_call_and_misses_populate(repo):
@@ -1039,7 +1085,13 @@ class AICache:
 
     def get(self, symbol: str, bar_ts: int, prompt_hash: str) -> Optional[dict]:
         raw = self.repo.get_ai_cache(symbol, bar_ts, prompt_hash)
-        return json.loads(raw) if raw else None
+        if not raw:
+            return None
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            return None  # a corrupt row is a miss, not a crash
+        return d if isinstance(d, dict) else None
 
     def put(self, symbol: str, bar_ts: int, prompt_hash: str, decision: dict) -> None:
         self.repo.put_ai_cache(symbol, bar_ts, prompt_hash, json.dumps(decision, sort_keys=True), int(time.time()))
@@ -1056,6 +1108,7 @@ when the exact prompt was seen before, so AI-replay backtests are free after the
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional, Protocol
 
 from tradebot.ai.cache import AICache
@@ -1067,6 +1120,10 @@ from tradebot.types import Candidate, Decision
 
 log = logging.getLogger("tradebot.ai")
 REASON_MAX = 200
+
+
+class AIFilterAborted(RuntimeError):
+    """The circuit breaker tripped: the run must stop rather than degrade into on_failure decisions."""
 
 
 class AIFilter(Protocol):
@@ -1117,7 +1174,8 @@ class ClaudeFilter:
         if not candidates:
             return []
         user = render_candidates(candidates, self._session(candidates[0].signal.bar_ts))
-        h = prompt_hash(SYSTEM_PROMPT, user)
+        # The key covers model and effort too: a replay with a different model must miss the cache.
+        h = prompt_hash(f"{self.cfg.model}|{self.cfg.effort}|{SYSTEM_PROMPT}", user)
         if self.cache is not None:
             cached = [self.cache.get(c.signal.symbol, c.signal.bar_ts, h) for c in candidates]
             if all(d is not None for d in cached):
@@ -1125,36 +1183,47 @@ class ClaudeFilter:
         if self.calls >= self.cfg.max_calls_per_run:
             return self._failed(candidates, f"max_calls_per_run ({self.cfg.max_calls_per_run}) reached")
         self.calls += 1
+        t0 = time.monotonic()
         try:
             resp = self.client.review(SYSTEM_PROMPT, user, RESPONSE_SCHEMA)
         except ClaudeReviewError as e:
-            self.consecutive_failures += 1
-            log.warning("claude review failed (%d in a row): %s", self.consecutive_failures, e)
-            if self.consecutive_failures >= self.cfg.max_consecutive_failures:
-                # Circuit breaker: a dead API must not quietly turn a whole replay into on_failure decisions.
-                raise RuntimeError(f"Claude filter: {self.consecutive_failures} consecutive failures, last: {e}") from e
-            return self._failed(candidates, str(e))
-        self.consecutive_failures = 0
+            self._note_failure(str(e))
+            return self._failed(candidates, str(e), latency_ms=int((time.monotonic() - t0) * 1000))
         by_index = {}
         for d in resp.data.get("decisions", []) if isinstance(resp.data, dict) else []:
-            if isinstance(d, dict) and isinstance(d.get("index"), int):
+            if isinstance(d, dict) and isinstance(d.get("index"), int) and not isinstance(d.get("index"), bool):
                 by_index[d["index"]] = d
         out = []
+        matched = 0
         for i, c in enumerate(candidates):
             d = by_index.get(i)
-            if d is None or d.get("symbol") != c.signal.symbol:
-                out.append(self._failed([c], f"no decision for index {i} {c.signal.symbol}", resp, i)[0])
+            if d is None or d.get("symbol") != c.signal.symbol or not isinstance(d.get("approve"), bool):
+                out.append(self._failed([c], f"no usable decision for index {i} {c.signal.symbol}", resp, i)[0])
                 continue
+            matched += 1
             out.append(self._from_dict(c, d, resp, i))
             if self.cache is not None:
+                # One entry per (symbol, bar) is safe: the risk engine rejects a second signal for a symbol
+                # that already has a pending entry, so a batch never holds the same symbol twice.
                 self.cache.put(c.signal.symbol, c.signal.bar_ts, h, d)
+        if matched == 0:
+            self._note_failure("response matched no candidate")  # a live API returning garbage counts too
+        else:
+            self.consecutive_failures = 0
         return out
+
+    def _note_failure(self, why: str) -> None:
+        self.consecutive_failures += 1
+        log.warning("claude review failed (%d in a row): %s", self.consecutive_failures, why)
+        if self.consecutive_failures >= self.cfg.max_consecutive_failures:
+            # Circuit breaker: a dead API must not quietly turn a whole replay into on_failure decisions.
+            raise AIFilterAborted(f"Claude filter: {self.consecutive_failures} consecutive failures, last: {why}")
 
     # -- helpers ----------------------------------------------------------------------------
     def _from_dict(self, c: Candidate, d: dict, resp: Optional[ReviewResponse], i: int) -> Decision:
         usage = resp if (resp is not None and i == 0) else None  # batch usage attributed to decision 0
         return Decision(
-            c.signal, bool(d.get("approve")), str(d.get("reason", ""))[:REASON_MAX], _clamp(d.get("confidence")),
+            c.signal, bool(d["approve"]), str(d.get("reason") or "")[:REASON_MAX], _clamp(d.get("confidence")),
             self.kind, latency_ms=resp.latency_ms if resp is not None else 0, failure=None,
             input_tokens=usage.input_tokens if usage else 0, output_tokens=usage.output_tokens if usage else 0,
             cache_read_tokens=usage.cache_read_tokens if usage else 0,
@@ -1162,14 +1231,16 @@ class ClaudeFilter:
         )
 
     def _failed(self, candidates: list[Candidate], why: str, resp: Optional[ReviewResponse] = None,
-                first_index: int = 0) -> list[Decision]:
+                first_index: int = 0, latency_ms: int = 0) -> list[Decision]:
+        """on_failure decisions. `latency_ms` carries the wall time of a failed call (a timeout is the
+        slowest event and must enter the average); a spend-guard rejection has none."""
         approved = self.cfg.on_failure == "pass_through"
         out = []
         for i, c in enumerate(candidates):
             usage = resp if (resp is not None and first_index + i == 0) else None
             out.append(Decision(
                 c.signal, approved, f"ai_failure: {why}"[:REASON_MAX], 0.0, self.kind,
-                latency_ms=resp.latency_ms if resp is not None else 0, failure=why[:REASON_MAX],
+                latency_ms=resp.latency_ms if resp is not None else latency_ms, failure=why[:REASON_MAX],
                 input_tokens=usage.input_tokens if usage else 0, output_tokens=usage.output_tokens if usage else 0,
                 cache_read_tokens=usage.cache_read_tokens if usage else 0,
                 cache_write_tokens=usage.cache_write_tokens if usage else 0,
@@ -1553,7 +1624,7 @@ def test_estimate_ai_reports_calls_and_cost(tmp_path, monkeypatch):
 
 - [ ] **Step 3: Implement in `src/tradebot/cli.py`**
 
-Add imports:
+Add imports (and change the existing `from tradebot.ai.filter import build_filter` to also import `AIFilterAborted`, then append `AIFilterAborted` to the `_FRIENDLY` tuple so a tripped circuit breaker prints a one-line error):
 
 ```python
 from dataclasses import replace as dc_replace

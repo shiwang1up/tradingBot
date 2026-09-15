@@ -114,7 +114,8 @@ class Repo:
             "SELECT COUNT(*) AS decisions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
             "SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
             "SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
-            "AVG(CASE WHEN input_tokens > 0 OR failure IS NOT NULL THEN latency_ms END) AS avg_latency_ms, "
+            "AVG(CASE WHEN input_tokens > 0 OR (failure IS NOT NULL AND latency_ms > 0) THEN latency_ms END) "
+            "AS avg_latency_ms, "
             "SUM(CASE WHEN failure IS NOT NULL THEN 1 ELSE 0 END) AS failures "
             "FROM ai_decisions WHERE run_id=?", (run_id,)).fetchone()
         return {k: (row[k] or 0) for k in row.keys()}
