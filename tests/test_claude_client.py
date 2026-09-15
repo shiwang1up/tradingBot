@@ -72,6 +72,7 @@ def _sdk_error(cls, status=None):
     _sdk_error(anthropic.APIConnectionError),
     _sdk_error(anthropic.RateLimitError, 429),
     _sdk_error(anthropic.APIStatusError, 500),
+    _sdk_error(anthropic.APIResponseValidationError),
 ])
 def test_transport_errors_become_review_errors(exc):
     with pytest.raises(ClaudeReviewError):

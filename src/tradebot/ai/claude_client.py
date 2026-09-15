@@ -51,6 +51,8 @@ class ClaudeClient:
             raise ClaudeReviewError(f"API error {getattr(e, 'status_code', '?')}: {getattr(e, 'message', e)}") from e
         except anthropic.APIConnectionError as e:  # includes timeouts
             raise ClaudeReviewError(f"connection error: {e}") from e
+        except anthropic.APIError as e:  # response/webhook validation errors subclass APIError directly
+            raise ClaudeReviewError(f"SDK error: {type(e).__name__}: {e}") from e
         latency_ms = int((time.monotonic() - t0) * 1000)
         if resp.stop_reason == "refusal":
             raise ClaudeReviewError("refusal: the model declined the request")

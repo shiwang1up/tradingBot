@@ -689,6 +689,7 @@ def _sdk_error(cls, status=None):
     _sdk_error(anthropic.APIConnectionError),
     _sdk_error(anthropic.RateLimitError, 429),
     _sdk_error(anthropic.APIStatusError, 500),
+    _sdk_error(anthropic.APIResponseValidationError),
 ])
 def test_transport_errors_become_review_errors(exc):
     with pytest.raises(ClaudeReviewError):
@@ -772,6 +773,8 @@ class ClaudeClient:
             raise ClaudeReviewError(f"API error {getattr(e, 'status_code', '?')}: {getattr(e, 'message', e)}") from e
         except anthropic.APIConnectionError as e:  # includes timeouts
             raise ClaudeReviewError(f"connection error: {e}") from e
+        except anthropic.APIError as e:  # response/webhook validation errors subclass APIError directly
+            raise ClaudeReviewError(f"SDK error: {type(e).__name__}: {e}") from e
         latency_ms = int((time.monotonic() - t0) * 1000)
         if resp.stop_reason == "refusal":
             raise ClaudeReviewError("refusal: the model declined the request")
@@ -803,7 +806,7 @@ class ClaudeClient:
 - [ ] **Step 4: Run tests**
 
 Run: `.venv/bin/pytest tests/test_claude_client.py -q`
-Expected: 7 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Commit**
 
