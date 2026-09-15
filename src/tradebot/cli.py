@@ -54,8 +54,17 @@ class _FriendlyGroup(click.Group):
             raise click.ClickException(str(e)) from e
         except Exception as e:  # noqa: BLE001
             if type(e).__name__.startswith("Groww"):
-                raise click.ClickException(f"{type(e).__name__}: {e}") from e
+                raise click.ClickException(f"{type(e).__name__}: {e}{_groww_hint(e)}") from e
             raise
+
+
+def _groww_hint(e: BaseException) -> str:
+    """Groww returns a bare 403 for market-data calls on accounts without the Trade API data plan."""
+    if str(getattr(e, "code", "")) == "403":
+        return ("\nHint: login succeeded but market data (LTP, quotes, historical candles) needs the Groww "
+                "Trade API subscription. Subscribe at https://groww.in/trade-api, then retry. "
+                "Approval-flow keys also need daily approval on the API keys page.")
+    return ""
 
 
 @click.group(cls=_FriendlyGroup)

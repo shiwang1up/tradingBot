@@ -271,3 +271,27 @@ def test_bad_totp_secret_aborts_before_any_symbol(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "download_instruments", lambda p: (_ for _ in ()).throw(AssertionError("downloaded")))
     res = _invoke(tmp_path, "fetch-data")
     assert res.exit_code == 1 and "not a base32 TOTP secret" in res.output and "failed:" not in res.output
+
+
+def test_403_on_market_data_explains_the_subscription(tmp_path, monkeypatch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=jwt\nGROWW_API_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    (tmp_path / "instruments.csv").write_text(
+        "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+        "NSE,1,A,CASH,EQ,1,0.05,1,1\n")
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+
+    class Forbidden:
+        flow = "approval"
+        client = object()
+
+        def __init__(self, k, s, a=""):
+            pass
+
+        def fetch_candles(self, *a):
+            raise type("GrowwAPIException", (Exception,), {"code": "403"})("Access forbidden for this request.")
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Forbidden)
+    res = _invoke(tmp_path, "fetch-data", "--sleep", "0")
+    assert res.exit_code == 1 and "Trade API subscription" in res.output and "failed:" not in res.output
