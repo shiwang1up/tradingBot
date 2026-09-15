@@ -51,6 +51,24 @@ def test_parse_candles_rejects_non_finite_or_inconsistent_ohlc():
         parse_candles("X", {"candles": [[1, 1, 2, 0.5, 5.0, 10]]})  # close above high
 
 
+def test_parse_candles_skips_pre_open_rows_with_null_prices():
+    resp = {"candles": [
+        ["2026-09-11T09:00:00", None, None, None, None, 37779, None],
+        ["2026-09-11T09:05:00", None, 1267.0, 1267.0, 1267.0, 52886, None],
+        ["2026-09-11T09:15:00", 1267.0, 1268.0, 1266.0, 1267.5, 100, None],
+    ]}
+    out = parse_candles("RELIANCE", resp)
+    assert len(out) == 1 and out[0].close == 1267.5
+
+
+def test_fetch_incremental_keep_filter_drops_bars(repo):
+    def f(symbol, exchange, start_ts, end_ts, interval):
+        return [Candle(symbol, t, 1, 2, 0.5, 1.5, 1) for t in range(start_ts, end_ts, 300)]
+
+    only_even = fetch_incremental(repo, f, ["A"], "NSE", 5, 1, 2 * DAY, keep=lambda c: (c.ts // 300) % 2 == 0)
+    assert 0 < only_even["A"] < (DAY // 300)
+
+
 def test_parse_candles_empty():
     assert parse_candles("X", {}) == []
     assert parse_candles("X", {"candles": None}) == []

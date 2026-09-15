@@ -131,11 +131,13 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
             if pause:
                 time.sleep(pause)
 
+    clock = SessionClock(cfg.session, cfg.execution.interval_minutes)
     total = 0
     for sym in symbols:
         try:
             total += fetch_incremental(repo, throttled, [sym], exchange, cfg.execution.interval_minutes,
-                                       days, int(time.time()), full=full, log=click.echo)[sym]
+                                       days, int(time.time()), full=full, log=click.echo,
+                                       keep=lambda cd: clock.in_session(cd.ts))[sym]
         except Exception as e:  # noqa: BLE001 - isolate per symbol; auth errors are fatal
             if _is_fatal_auth(e):
                 raise

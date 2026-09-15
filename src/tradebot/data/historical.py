@@ -17,13 +17,16 @@ Fetcher = Callable[[str, str, int, int, int], list[Candle]]  # (symbol, exchange
 
 def fetch_incremental(repo: Repo, fetcher: Fetcher, symbols: list[str], exchange: str, interval: int,
                       lookback_days: int, now_ts: int, full: bool = False,
-                      log: Callable[[str], None] = lambda s: None) -> dict[str, int]:
+                      log: Callable[[str], None] = lambda s: None,
+                      keep: Callable[[Candle], bool] | None = None) -> dict[str, int]:
     """For each symbol, fetch from (latest stored ts + 1) or (now - lookback) up to the last
     COMPLETED bar before now_ts, so an in-progress candle is never stored.
 
     Idempotent: inserts use INSERT OR IGNORE on (symbol, ts, interval). `full` deletes the window
     first so a refetch repairs bad rows. Consecutive windows share their boundary instant, so the
-    result is the same whether Groww treats end_time as inclusive or exclusive. Returns inserted counts.
+    result is the same whether Groww treats end_time as inclusive or exclusive. `keep` filters bars
+    before storage (the CLI passes the session clock so pre-open and post-close rows are dropped).
+    Returns inserted counts.
     """
     if interval not in CHUNK_DAYS:
         raise ValueError(f"unsupported candle interval: {interval} minutes")
@@ -39,7 +42,8 @@ def fetch_incremental(repo: Repo, fetcher: Fetcher, symbols: list[str], exchange
         n = 0
         while start < limit:
             end = min(start + chunk, limit)
-            candles = [c for c in fetcher(sym, exchange, start, end, interval) if start <= c.ts <= end]
+            candles = [c for c in fetcher(sym, exchange, start, end, interval)
+                       if start <= c.ts <= end and (keep is None or keep(c))]
             n += repo.insert_candles(candles, interval)
             start = end
         inserted[sym] = n

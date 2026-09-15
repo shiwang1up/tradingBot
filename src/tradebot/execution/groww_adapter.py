@@ -2,6 +2,7 @@
 Order, feed, position, and margin methods are added in Plan 3."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
@@ -64,16 +65,25 @@ def _to_epoch(v: Any) -> int:
 
 
 def parse_candles(symbol: str, resp: dict | None) -> list[Candle]:
-    """Rows are [ts, o, h, l, c, volume, ...]; V2 appends open interest, which is ignored."""
+    """Rows are [ts, o, h, l, c, volume, ...]; V2 appends open interest, which is ignored.
+
+    Groww emits pre-open rows (09:00, 09:05) whose prices are null, or partly null: those are
+    not tradeable bars and are skipped. A malformed row is still an error."""
     rows = (resp or {}).get("candles") or []
     out = []
+    skipped = 0
     for r in rows:
         if not isinstance(r, (list, tuple)) or len(r) < 6:
             raise ValueError(f"{symbol}: malformed candle row {r!r}")
+        if any(r[i] is None for i in (1, 2, 3, 4)):
+            skipped += 1
+            continue
         o, h, l, c = (float(r[i]) for i in (1, 2, 3, 4))
         if not all(math.isfinite(x) for x in (o, h, l, c)) or not (l <= min(o, c) and max(o, c) <= h):
             raise ValueError(f"{symbol}: bad OHLC in candle row {r!r}")
         out.append(Candle(symbol, _to_epoch(r[0]), o, h, l, c, int(float(r[5] or 0))))
+    if skipped:
+        logging.getLogger("tradebot.groww").debug("%s: skipped %d candle rows with null prices", symbol, skipped)
     return out
 
 
