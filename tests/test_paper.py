@@ -243,3 +243,19 @@ def test_bookkeeping_failure_does_not_stop_the_loop(repo, tmp_path, caplog, monk
     assert "bookkeeping for bar" in caplog.text
     assert repo.get_run("db-hiccup")["ended_at"] is not None
     assert repo.get_run("db-hiccup")["last_bar_ts"] == ist_epoch(TODAY, "15:25")
+
+
+def test_resume_restores_the_cooldown_after_a_stop_out(repo, tmp_path):
+    from tradebot.types import Position
+    cfg = make_config(tmp_path)   # cooldown_bars 3
+    market = _market()
+    eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "10:00")), run_id="cool")
+    repo.create_run("cool", "paper", 0, "{}")
+    stopped_at = ist_epoch(TODAY, "09:50")
+    pid = repo.insert_position("cool", Position("A", "MIS", "LONG", 5, 100.0, 99.0, 102.0, ist_epoch(TODAY, "09:40"), "c1", "ema_rsi"))
+    repo.close_position(pid, stopped_at, 99.0, "STOP", -5.0)
+    pid2 = repo.insert_position("cool", Position("B", "MIS", "SHORT", 5, 50.0, 51.0, 48.0, ist_epoch(TODAY, "09:40"), "c2", "ema_rsi"))
+    repo.close_position(pid2, stopped_at, 48.0, "TARGET", 10.0)
+    assert eng.resume(TODAY) is True
+    assert eng._cooldown_until == {"A": stopped_at + 3 * 300}
+    assert eng._state().cooldown_until == {"A": stopped_at + 3 * 300}
