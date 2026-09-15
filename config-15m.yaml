@@ -1,0 +1,92 @@
+# 15-minute variant of config.yaml: same database, universe and risk; only the interval and the strategy differ.
+capital: 100000
+
+risk:
+  per_trade_pct: 1.0          # max loss per trade as % of capital
+  daily_loss_cap_pct: 3.0     # realised + unrealised; stop new entries when breached
+  flatten_on_daily_cap: false
+  max_entries_per_day: 20     # entry orders only; exits are never blocked
+  max_open_positions: 5
+  cooldown_bars: 3            # bars to wait on a symbol after a stop-out
+  mis_leverage: 5.0           # simulated intraday leverage in backtest/paper
+  adopted_stop_pct: 1.5       # fallback stop for orphaned positions (live)
+
+strategy:
+  ema_rsi:
+    fast: 9
+    slow: 21
+    rsi_period: 14
+    rsi_long_min: 55
+    rsi_short_max: 45
+    atr_period: 14
+    atr_stop_mult: 1.5
+    reward_risk: 2.0
+    min_stop_pct: 0.1         # skip signals whose stop is closer than this % of price
+    product: MIS
+  confluence:                 # weighted votes from the technical layers; see the indicators spec
+    weights: {trend: 1.0, macd: 1.0, momentum: 1.0, breakout: 1.5, pattern: 1.0, exhaustion: -1.5}
+    threshold: 3.0            # LONG when the score reaches this, SHORT at minus this
+    adx_min: 20               # no trend, no trade
+    volume_spike_min: 150     # percent of the 20-bar average a break needs to count
+    rsi_overbought: 70
+    rsi_oversold: 30
+    pct_b_high: 0.8
+    pct_b_low: 0.2
+    atr_stop_mult: 1.5
+    reward_risk: 2.0
+    min_stop_pct: 0.1
+    product: MIS
+  pullback:                   # pullback to EMA20 in an EMA20/EMA50 trend; see the 2026-09-15 pullback spec
+    ema_fast: 20
+    ema_slow: 50
+    atr_period: 14
+    max_pullback_bars: 8      # a pullback older than this is spent without a trade
+    reward_risk: 2.0
+    min_stop_pct: 0.1         # skip a stop closer than this % of price
+    max_stop_atr: 3.0         # skip a stop further than this many ATRs
+    product: MIS
+  indicators:                 # shared technical set (also feeds the AI filter's context)
+    ema_fast: 20
+    ema_slow: 50
+    levels_period: 100
+    pattern_tolerance_pct: 0.3
+
+ai:
+  filter: stub                # stub | claude | claude_cached
+  model: claude-sonnet-5      # claude-opus-5 for stronger judgment at about 2.5x the price
+  candles_in_context: 30
+  on_failure: reject          # reject | pass_through
+  effort: low                 # classification-style task; raise if reasons look shallow
+  max_tokens: 4000            # backstop only; thinking tokens count against it
+  timeout_sec: 60
+  max_calls_per_run: 10000    # spend guard per backtest; a 62-day replay is at most ~4650 calls
+  max_consecutive_failures: 20  # abort the run if the API fails this many bars in a row
+  price_in_per_mtok: 2.0      # Sonnet 5 list prices, used only for the report's cost line
+  price_out_per_mtok: 10.0
+  price_cache_read_per_mtok: 0.2
+  price_cache_write_per_mtok: 2.5
+
+execution:
+  slippage_pct: 0.05           # percent: 0.05 = 5 bps
+  entry_buffer_pct: 0.1       # marketable limit buffer (live)
+  bar_deadline_sec: 60
+  interval_minutes: 15
+
+session:
+  open: "09:15"
+  close: "15:30"
+  square_off: "15:10"
+  no_new_entries_after: "14:45"
+  holidays: []                # ISO dates, e.g. "2026-10-02"
+
+data:
+  official_fetch_concurrency: 5
+  bar_grace_sec: 5              # paper: wait this long after the boundary before fetching the closed bar
+  warmup_bars: 300              # paper: stored bars replayed per symbol before the first live bar (~4 days)
+
+paths:
+  db: data/tradebot.db
+  logs: data/logs
+  instruments: data/instruments.csv
+  kill_switch: KILL
+  universe: universe.yaml
