@@ -1,9 +1,11 @@
 import logging
+import time
 from datetime import date
 
 from tests.helpers import make_config, synth_candles
 from tradebot.data.live import LiveBarSource
 from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.types import Candle
 
 D = date(2026, 9, 14)
 
@@ -63,3 +65,33 @@ def test_fetch_range_groups_bars_by_open_time(repo, tmp_path):
     got = src.fetch_range(first, last)
     assert sorted(got) == [first, first + 300, last]
     assert all(got[t]["A"].ts == t for t in got)
+
+
+def test_pre_open_rows_are_neither_stored_nor_returned(repo, tmp_path):
+    a = synth_candles("A", [D])
+    early = Candle("A", ist_epoch(D, "09:05"), 1.0, 1.0, 1.0, 1.0, 1)
+
+    def fetcher(sym, exch, start, end, interval):
+        return [early] + [c for c in a if start <= c.ts <= end]
+
+    src, _ = _source(repo, tmp_path, fetcher, symbols=("A",))
+    got = src.fetch_range(ist_epoch(D, "09:05"), ist_epoch(D, "09:20"))
+    assert sorted(got) == [ist_epoch(D, "09:15"), ist_epoch(D, "09:20")]
+    assert repo.load_candles(["A"], 5, 0, 2_000_000_000)[0].ts == ist_epoch(D, "09:15")
+
+
+def test_a_symbol_slower_than_the_budget_is_skipped_for_the_bar(repo, tmp_path, caplog):
+    a, b = synth_candles("A", [D]), synth_candles("B", [D], phase=4.0, seed=99)
+
+    def slow_b(sym, exch, start, end, interval):
+        if sym == "B":
+            time.sleep(0.5)
+        return [c for c in (a if sym == "A" else b) if start <= c.ts <= end]
+
+    cfg = make_config(tmp_path)
+    src = LiveBarSource(slow_b, repo, ["A", "B"], "NSE", 5, 2, SessionClock(cfg.session, 5), budget_sec=0.1)
+    with caplog.at_level(logging.INFO, logger="tradebot.live"):
+        got = src.fetch_bar(ist_epoch(D, "09:20"))
+    assert set(got) == {"A"}
+    assert "candle fetch for B did not finish" in caplog.text
+    assert "1 of 2 symbols" in caplog.text and "1 failed" in caplog.text
