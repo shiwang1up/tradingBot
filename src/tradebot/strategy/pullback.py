@@ -106,10 +106,8 @@ class PullbackStrategy(Strategy):
             st.swing_high, st.swing_low = candle.high, candle.low
             st.pullback_low = st.pullback_high = None
             st.pullback_bars = 0
-        elif trend is not None and st.ready_bars >= 2:  # the first ready bar only records state
+        elif trend is not None:  # the first ready bar always lands in the branch above (direction starts None)
             signal = self._step(st, candle, trend, fast, atr)
-        elif trend is not None:
-            self._track_swing(st, candle, trend)
         st.prev_low, st.prev_high = candle.low, candle.high
         return signal
 
