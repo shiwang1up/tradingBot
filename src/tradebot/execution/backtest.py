@@ -67,6 +67,14 @@ class BacktestBroker:
     def open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
 
+    def restore(self, positions: list[Position], pending: list[ApprovedOrder], cash: float) -> None:
+        """Load the state an earlier process left in SQLite (paper resume). Replaces whatever is
+        held; `closed` starts empty because the earlier process already recorded its closes."""
+        self.cash = float(cash)
+        self._positions = {p.symbol: p for p in positions}
+        self._pending = {o.signal.symbol: o for o in pending}
+        self.closed = []
+
     def _beyond_buffer(self, sig, open_price: float) -> bool:
         if self.buffer is None:
             return False
