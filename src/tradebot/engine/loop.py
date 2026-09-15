@@ -29,6 +29,7 @@ from tradebot.risk.engine import PortfolioState, evaluate
 from tradebot.risk.killswitch import KillState, read_kill_switch
 from tradebot.store.repo import Repo
 from tradebot.strategy.base import Strategy
+from tradebot.strategy.ta import IndicatorSet
 from tradebot.types import ApprovedOrder, Candidate, Candle, Rejection, Signal
 
 log = logging.getLogger("tradebot.engine")
@@ -60,6 +61,7 @@ class BacktestEngine:
         self.mode = mode
         self.interval_sec = cfg.execution.interval_minutes * 60
         self._history: dict[str, deque[Candle]] = {}
+        self._indicators: dict[str, IndicatorSet] = {}  # shared technical context, one set per symbol
         self._last_close: dict[str, float] = {}
         self._cooldown_until: dict[str, int] = {}
         self.disabled_strategies: set[str] = set()
@@ -132,6 +134,7 @@ class BacktestEngine:
         for sym, c in candles.items():
             self._last_close[sym] = c.close
             self._history.setdefault(sym, deque(maxlen=self.cfg.ai.candles_in_context)).append(c)
+            self._indicators.setdefault(sym, IndicatorSet(self.cfg.strategy.get("indicators"))).update(c)
 
         self._record(self.broker.on_bar(ts, candles))
         if not self._day.squared_off and self.clock.square_off_due(ts):
@@ -211,7 +214,9 @@ class BacktestEngine:
             state.pending_symbols.add(sig.symbol)
             state.entries_today += 1
             reserved_cash += sig.entry_price * res.quantity / self._lev(sig.product)
-            cand = Candidate(sig, res.quantity, strat.snapshot(sig.symbol), tuple(self._history.get(sig.symbol, ())))
+            shared = self._indicators[sig.symbol].snapshot() if sig.symbol in self._indicators else {}
+            cand = Candidate(sig, res.quantity, {**shared, **strat.snapshot(sig.symbol)},
+                             tuple(self._history.get(sig.symbol, ())))
             batch.append((sid, res, cand))
         if not batch:
             return

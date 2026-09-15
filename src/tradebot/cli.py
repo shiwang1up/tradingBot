@@ -28,6 +28,7 @@ from tradebot.report.summary import build_summary, format_summary
 from tradebot.store.db import SchemaVersionError, connect
 from tradebot.store.repo import Repo
 from tradebot.strategy.ema_rsi import build_strategy
+from tradebot.strategy.ta import IndicatorSet
 from tradebot.types import Candidate, Signal
 
 # Operational failures that deserve a one-line message. sqlite3 programming errors (bad SQL) still traceback.
@@ -218,6 +219,17 @@ def report(cfg: Config, run_id: Optional[str], compare) -> None:
     click.echo(format_summary(build_summary(repo, run_id)))
 
 
+def _estimate_candidate(cfg: Config, r, window) -> Candidate:
+    """A candidate shaped like the engine's, from a stored signal row and its candle window: the
+    shared indicators are computed on the window so the token count matches real prompts."""
+    ind = IndicatorSet(cfg.strategy.get("indicators"))
+    for cd in window:
+        ind.update(cd)
+    snap = {**ind.snapshot(), "ema_fast": r["entry"], "ema_slow": r["entry"], "rsi": 55.0, "atr": abs(r["entry"] - r["stop"])}
+    return Candidate(Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"],
+                            r["product"], r["bar_ts"]), 100, snap, tuple(window[-cfg.ai.candles_in_context:]))
+
+
 def _prices(cfg: Config) -> Prices:
     return Prices(cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok,
                   cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok)
@@ -257,11 +269,7 @@ def estimate_ai(cfg: Config, run_id: str, sample: int) -> None:
     by_symbol: dict = {}
     for cd in window:
         by_symbol.setdefault(cd.symbol, []).append(cd)
-    cands = [Candidate(Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"],
-                              r["product"], r["bar_ts"]), 100,
-                       {"ema_fast": r["entry"], "ema_slow": r["entry"], "rsi": 55.0, "atr": abs(r["entry"] - r["stop"])},
-                       tuple(by_symbol.get(r["symbol"], ())[-cfg.ai.candles_in_context:]))
-             for r in biggest_rows]
+    cands = [_estimate_candidate(cfg, r, by_symbol.get(r["symbol"], ())) for r in biggest_rows]
     client = ClaudeClient(cfg.secrets.anthropic_api_key, cfg.ai.model, cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec)
     system_tokens = client.count_tokens(SYSTEM_PROMPT, "x", RESPONSE_SCHEMA)
     one = client.count_tokens(SYSTEM_PROMPT, render_candidates(cands[:1], session), RESPONSE_SCHEMA)
@@ -280,10 +288,7 @@ def estimate_ai(cfg: Config, run_id: str, sample: int) -> None:
             bs: dict = {}
             for cd in w:
                 bs.setdefault(cd.symbol, []).append(cd)
-            flt.review([Candidate(Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"],
-                                         r["product"], r["bar_ts"]), 100,
-                                  {"ema_fast": r["entry"], "ema_slow": r["entry"], "rsi": 55.0, "atr": abs(r["entry"] - r["stop"])},
-                                  tuple(bs.get(r["symbol"], ())[-cfg.ai.candles_in_context:])) for r in rows])
+            flt.review([_estimate_candidate(cfg, r, bs.get(r["symbol"], ())) for r in rows])
         if flt.successful_calls:
             measured = flt.tokens["output"] / flt.successful_calls
             click.echo(f"sampled {flt.successful_calls} real calls on the largest bars ({flt.calls - flt.successful_calls} failed): "

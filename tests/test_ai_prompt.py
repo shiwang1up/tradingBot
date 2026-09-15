@@ -72,6 +72,14 @@ def test_response_schema_shape():
 
 def test_system_prompt_states_the_things_the_model_needs():
     for needle in ("[time, open, high, low, close, volume]", "MM-DD HH:MM", "overnight gap", "square-off",
-                   "1 / (1 + R)", "between 0 and 1", "Approve a candidate unless"):
+                   "1 / (1 + R)", "between 0 and 1", "Approve a candidate unless", "macd_turned", "volume_spike_pct",
+                   "double_bottom", "exhaustion"):
         assert needle in SYSTEM_PROMPT, needle
     assert len(SYSTEM_PROMPT.split()) >= 480, "must stay well above Opus 5's 512-token cacheable minimum"
+
+
+def test_null_indicators_render_as_null_while_windows_fill():
+    c = _cand()
+    c = Candidate(c.signal, c.quantity, {"adx": None, "rsi": 61.0, "breakout": 0}, c.candles)
+    ind = json.loads(render_candidates([c], SESSION))["candidates"][0]["indicators"]
+    assert ind == {"adx": None, "breakout": 0, "rsi": 61.0}

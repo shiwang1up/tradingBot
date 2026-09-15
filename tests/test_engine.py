@@ -383,3 +383,21 @@ def test_engine_persists_ai_token_usage(repo, tmp_path):
     ).fetchone()[0]
     assert u["calls"] == n_bars_with_batch >= 1
     assert (u["input_tokens"], u["output_tokens"], u["cache_read_tokens"]) == (1000 * u["calls"], 50 * u["calls"], 700 * u["calls"])
+
+
+def test_candidates_carry_the_shared_indicator_snapshot(repo, tmp_path):
+    seen = []
+
+    class Spy(StubFilter):
+        def review(self, cands):
+            seen.extend(cands)
+            return super().review(cands)
+
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles(), ai=Spy())
+    assert seen
+    keys = set(seen[-1].indicators)
+    assert {"ema_fast", "ema_slow", "rsi", "atr", "trend", "macd_hist", "adx", "pct_b", "support", "resistance",
+            "volume_spike_pct", "engulfing"} <= keys
+    late = [c for c in seen if c.indicators.get("adx") is not None]
+    assert late, "once the windows fill the shared indicators are populated"
