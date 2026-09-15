@@ -170,3 +170,11 @@ def test_data_section_defaults_and_validation(tmp_path):
         make_config(tmp_path, data={"official_fetch_concurrency": 5, "warmup_bars": 0})
     with pytest.raises(ValueError, match="data.bar_grace_sec must be >= 0"):
         make_config(tmp_path, data={"official_fetch_concurrency": 5, "bar_grace_sec": -1})
+
+
+def test_bar_grace_must_fit_under_the_deadline_and_inside_a_bar(tmp_path):
+    with pytest.raises(ValueError, match="below execution.bar_deadline_sec"):
+        make_config(tmp_path, data={"official_fetch_concurrency": 5, "bar_grace_sec": 60})
+    with pytest.raises(ValueError, match="shorter than a bar"):
+        make_config(tmp_path, execution={"slippage_pct": 0.05, "entry_buffer_pct": 0.1, "bar_deadline_sec": 900,
+                                         "interval_minutes": 5}, data={"official_fetch_concurrency": 5, "bar_grace_sec": 300})

@@ -53,7 +53,7 @@ only its replay loop over `HistoricalSource.bar_timestamps()`. `PaperEngine(Engi
 ### `data/live.py`: `LiveBarSource`
 
 ```
-LiveBarSource(fetcher, repo, symbols, exchange, interval, concurrency, clock)
+LiveBarSource(fetcher, repo, symbols, exchange, interval, concurrency, clock, budget_sec=None)
   fetch_bar(bar_ts) -> dict[str, Candle]
   fetch_range(start_ts, end_ts) -> dict[int, dict[str, Candle]]
 ```
@@ -65,7 +65,9 @@ using the adapter's `fetch_candles` (already wrapped in `with_retry`), on a thre
 that failed after retries or has no bar is absent, and the failure is logged with the symbol. If
 every symbol fails on a bar, the source logs an error and returns an empty dict; the engine treats it
 like a bar with no candles. `fetch_range` is the same over several bars, used for catch-up after a
-restart or a late wake-up.
+restart or a late wake-up. `budget_sec` bounds one window's wall time: a symbol still fetching when it
+runs out is skipped for that bar and logged, so one slow name cannot push every other symbol's signals
+past the deadline. The CLI passes the bar deadline minus the grace. Each window logs one timing line.
 
 `fetcher` is the same `Fetcher` callable type `historical.py` uses, so tests pass a fake and the
 CLI passes `GrowwAdapter.fetch_candles`.
@@ -79,7 +81,9 @@ Sleeping stays out of the clock: `PaperEngine` takes `now` and `sleep` callables
 
 ### Scheduling (`PaperEngine.run()`)
 
-1. Today is not a trading day or `now >= close`: log and return without creating a run.
+1. Today is not a trading day, or `now >= close` and there is no open run for today: log and return
+   without creating a run. An open run started today may be started after the close: it replays the
+   missed bars (stale, so no entries), squares off and ends. A run from an earlier day is refused.
 2. Create or resume the run. Warm up (Warm-up below).
 3. If resuming, `last_ts` is `runs.last_bar_ts` (see Store). Fetch and replay every bar from
    `last_ts + interval` up to the last completed bar with the broker active. Signals from these bars
@@ -98,9 +102,11 @@ and pending entries stay on the books, so a resume later the same day picks them
 ### Warm-up
 
 `fetch_incremental` runs for the universe with the CLI's usual session filter (lookback 10 days if
-the cache is empty). Then the last `data.warmup_bars` stored bars for each symbol, ending before
-today's open, are replayed through `warm`. Readiness is whatever the strategies report; a symbol
-with fewer stored bars than needed simply stays not-ready until it warms live.
+the cache is empty, paced like `fetch-data`). Then the last `data.warmup_bars` stored bars for each
+symbol, up to now and including today's completed bars, are replayed through `warm`. On a new run
+today's warmed bars count as processed (nothing was at the broker); on a resume the engine trims the
+warm-up to `runs.last_bar_ts` so every later bar is replayed with the broker. Readiness is whatever the
+strategies report; a symbol with fewer stored bars than needed simply stays not-ready until it warms live.
 
 ### Store
 

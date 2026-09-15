@@ -271,3 +271,27 @@ def test_restart_after_a_clean_finish_is_a_quiet_no_op_and_a_stale_day_is_refuse
     repo.create_run("old", "paper", ist_epoch(date(2026, 9, 11), "10:00"), "{}")   # crashed on Friday, still open
     with pytest.raises(ValueError, match="started on 2026-09-11"):
         _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "10:00")), run_id="old").run([])
+
+
+def test_a_failing_fetch_window_is_one_empty_bar_not_the_end_of_the_day(repo, tmp_path, caplog, monkeypatch):
+    """A transient store or pool failure inside fetch_range (e.g. SQLite locked by a concurrent report)
+    must not end the run early and make the day unresumable."""
+    cfg = make_config(tmp_path)
+    market = _market()
+    eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="locked")
+    real = eng.source.fetch_range
+    hits = []
+
+    def flaky(first, latest):
+        if not hits:
+            hits.append(first)
+            raise RuntimeError("database is locked")
+        return real(first, latest)
+
+    monkeypatch.setattr(eng.source, "fetch_range", flaky)
+    with caplog.at_level(logging.ERROR, logger="tradebot.paper"):
+        eng.run(_warm(market))
+    assert "treating the window as empty" in caplog.text
+    run = repo.get_run("locked")
+    assert run["ended_at"] is not None and run["last_bar_ts"] == ist_epoch(TODAY, "15:25")
+    assert repo.list_positions("locked"), "the rest of the day still trades"

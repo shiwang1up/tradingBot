@@ -1,9 +1,9 @@
 """Command-line entry point: fetch-data, backtest, report, estimate-ai, paper. Live trading arrives in the live plan."""
 from __future__ import annotations
 
-import signal as os_signal
 import logging
 import os
+import signal as os_signal
 import sqlite3
 import time
 from dataclasses import replace as dc_replace
@@ -309,6 +309,9 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
         raise click.ClickException(f"run '{run_id}' exists and is not a paper run; pick another --run-id")
     if existing is not None and existing["ended_at"] is not None and now < clock.close_ts(today):
         raise click.ClickException(f"run '{run_id}' already ended today; pass a different --run-id to start another session")
+    if existing is not None and date_of(existing["started_at"]) != today:
+        raise click.ClickException(f"run '{run_id}' was started on {date_of(existing['started_at'])} and is still open; "
+                                   f"paper runs are one per day, pass a different --run-id")
     resumable = existing is not None and existing["ended_at"] is None
     if not clock.is_trading_day(today) or (now >= clock.close_ts(today) and not resumable):
         click.echo(f"nothing to trade: {today} is not a trading day or the session has closed")
@@ -346,6 +349,8 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
         click.echo("nothing to trade: the session closed while warming up")
         return
     click.echo(format_summary(build_summary(repo, rid)))
+    if repo.get_run(rid)["ended_at"] is None:
+        click.echo(f"run {rid} is still open: start the command again today to resume it")
     if log_path:
         click.echo(f"log: {log_path}")
 

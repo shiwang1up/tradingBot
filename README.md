@@ -1,7 +1,8 @@
 # tradebot
 
 NSE/BSE trading bot on the Groww Trade API. Spec: `docs/superpowers/specs/2026-09-14-nse-bse-trading-bot-design.md`.
-Plan 1 (this code) is the backtester. Plan 2 adds the Claude filter; Plan 3 adds paper and live trading.
+Plan 1 is the backtester, Plan 2 the Claude filter and compare report, Plan 3 paper trading on live
+candles. Live order placement is a separate, later plan.
 
 ## Setup
 
@@ -34,8 +35,10 @@ Survivorship bias: `universe.yaml` is today's constituent list, so backtests ove
 
 Runs today's session on live 5-minute candles fetched over REST at each bar boundary, through the
 same strategy, risk, AI filter and simulated broker as the backtester. It places no real orders.
-Start it before 09:15 IST (it waits) or any time during the session (it warms up from the cache and
-catches up; signals on bars older than `execution.bar_deadline_sec` are dropped as `stale`). One run
+Start it before 09:15 IST (it waits) or any time during the session: a fresh start mid-session warms
+up on the bars already gone (no entries on them) and trades from the next bar; a restart replays the
+missed bars with the simulated broker, dropping their signals as `stale` past
+`execution.bar_deadline_sec`, so exits are settled but nothing is entered late. One run
 per day, id `paper-YYYY-MM-DD`; `report --run paper-YYYY-MM-DD` prints the summary and the daily
 fill rate. Ctrl-C finishes the current bar and leaves the run resumable: start the command again the
 same day and it reloads open positions and pending entries from SQLite. A run left open by a crash

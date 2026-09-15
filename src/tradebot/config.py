@@ -173,6 +173,8 @@ def _validate(cfg: "Config") -> None:
         (e.interval_minutes > 0, "execution.interval_minutes must be > 0"),
         (d.official_fetch_concurrency >= 1, "data.official_fetch_concurrency must be >= 1"),
         (d.bar_grace_sec >= 0, "data.bar_grace_sec must be >= 0"),
+        (d.bar_grace_sec < e.bar_deadline_sec, "data.bar_grace_sec must be below execution.bar_deadline_sec"),
+        (d.bar_grace_sec < e.interval_minutes * 60, "data.bar_grace_sec must be shorter than a bar"),
         (d.warmup_bars >= 1, "data.warmup_bars must be >= 1"),
         (a.candles_in_context >= 1, "ai.candles_in_context must be >= 1"),
         (a.filter in AI_FILTERS, f"ai.filter must be one of {AI_FILTERS}"),

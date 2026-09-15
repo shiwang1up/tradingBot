@@ -75,12 +75,12 @@ class LiveBarSource:
             for c in completed:
                 if c.ts >= start_ts:
                     out.setdefault(c.ts, {})[sym] = c
-        self.repo.insert_candles(stored, self.interval)
+        new_bars = self.repo.insert_candles(stored, self.interval)  # the whole window is offered: earlier gaps heal
         if self.symbols and failed == len(self.symbols):
             log.error("every candle fetch failed for bars %s..%s", iso_ist(start_ts), iso_ist(end_ts))
-        log.info("bars %s..%s: %d of %d symbols in %.1fs, %d failed, %d bars stored", iso_ist(start_ts),
+        log.info("bars %s..%s: %d of %d symbols in %.1fs, %d failed, %d new bars stored", iso_ist(start_ts),
                  iso_ist(end_ts), len(self.symbols) - failed, len(self.symbols), time.monotonic() - t0, failed,
-                 len(stored))
+                 new_bars)
         return out
 
     def fetch_bar(self, bar_ts: int) -> dict[str, Candle]:

@@ -147,7 +147,11 @@ class PaperEngine(Engine):
                     self._sleep_until(last + 2 * self.interval_sec + self.grace)  # close of the next bar + grace
                     continue
                 first = last + self.interval_sec
-                bars = self.source.fetch_range(first, latest)
+                try:
+                    bars = self.source.fetch_range(first, latest)
+                except Exception:  # noqa: BLE001 - a store or pool failure is one empty window, not the end of the day
+                    log.exception("fetch for bars %s..%s failed; treating the window as empty", iso_ist(first), iso_ist(latest))
+                    bars = {}
                 for ts in range(first, latest + 1, self.interval_sec):
                     self._bar(ts, bars.get(ts, {}))
                     last = ts

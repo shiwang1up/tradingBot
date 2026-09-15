@@ -1,3 +1,4 @@
+import logging
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -522,6 +523,53 @@ def test_paper_full_day_end_to_end(tmp_path, monkeypatch):
     assert run["last_bar_ts"] == ist_epoch(TODAY, "15:25")
     assert repo.latest_candle_ts("A", 5) == ist_epoch(TODAY, "15:25")     # the day's bars grew the cache
     assert repo.list_positions("p2"), "the warm-up from the prior days must make trades possible today"
+
+
+def test_paper_wires_the_fetch_budget_below_the_deadline(tmp_path, monkeypatch):
+    market = {"A": synth_candles("A", PRIOR + [TODAY]), "B": synth_candles("B", PRIOR + [TODAY], phase=4.0, seed=99)}
+    _paper_setup(tmp_path, monkeypatch, lambda sym, ex, s, e, i: [c for c in market[sym] if s <= c.ts <= e])
+    seen = {}
+    real = cli.LiveBarSource
+
+    def spy(*args, **kwargs):
+        src = real(*args, **kwargs)
+        seen["budget"] = src.budget_sec
+        return src
+
+    monkeypatch.setattr(cli, "LiveBarSource", spy)
+    t = FakeTime(ist_epoch(TODAY, "15:29"))
+    monkeypatch.setattr(cli.time, "time", t.now)
+    monkeypatch.setattr(cli.time, "sleep", t.sleep)
+    res = _invoke(tmp_path, "paper", "--run-id", "p3", "--ai", "stub")
+    assert res.exit_code == 0, res.output
+    cfg = make_config(tmp_path)
+    assert seen["budget"] == cfg.execution.bar_deadline_sec - cfg.data.bar_grace_sec
+
+
+def test_warm_fetch_isolates_symbol_failures_and_reraises_auth(tmp_path, caplog):
+    cfg = make_config(tmp_path)
+    repo = Repo(connect(cfg.paths.db))
+    clock = cli.SessionClock(cfg.session, 5)
+    now = ist_epoch(TODAY, "09:00")
+
+    class Flaky:
+        def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
+            if symbol == "B":
+                raise RuntimeError("boom")
+            return [Candle(symbol, ist_epoch(date(2026, 9, 11), "10:00"), 1, 2, 0.5, 1.5, 10)]
+
+    with caplog.at_level(logging.WARNING, logger="tradebot.cli"):
+        failed = cli._warm_fetch(cfg, Flaky(), repo, ["A", "B", "C"], "NSE", clock, now, pause=0)
+    assert failed == ["B"] and "warm-up fetch failed for B" in caplog.text
+    assert repo.latest_candle_ts("A", 5) is not None and repo.latest_candle_ts("C", 5) is not None
+
+    class Expired:
+        def fetch_candles(self, *a):
+            raise type("GrowwAPIAuthenticationException", (Exception,), {})("401 token expired")
+
+    import pytest
+    with pytest.raises(Exception, match="401"):
+        cli._warm_fetch(cfg, Expired(), repo, ["A"], "NSE", clock, now, pause=0)
 
 
 def test_paper_refuses_foreign_and_already_ended_runs_before_logging_in(tmp_path, monkeypatch):
