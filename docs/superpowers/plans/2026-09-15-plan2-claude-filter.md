@@ -10,7 +10,7 @@
 
 **Conventions:** as Plan 1. Every task ends with a commit. `.venv/bin/pytest -q` must stay green (currently 234 tests). Never call the network from tests; `ClaudeClient` is replaced by a fake in every test.
 
-**Cost note for the operator:** a full replay of the 62-day window makes one request per bar that had at least one risk-approved candidate. Task 8 adds `tradebot estimate-ai` to measure this before spending; expect low tens of US dollars on Opus 5 for the first replay and zero for reruns thanks to the cache.
+**Cost note for the operator:** a full replay of the 62-day window makes one request per bar that had at least one risk-approved candidate. Task 8 adds `tradebot estimate-ai` to measure this before spending; the first Opus 5 replay of the 62-day window is likely in the range of one to two hundred US dollars (about 2,000 input tokens per call, adaptive thinking on output, roughly 4,650 calls at most); reruns cost zero thanks to the cache, and `claude-sonnet-5` cuts the first pass by about 60%.
 
 ---
 
@@ -57,7 +57,7 @@ Append to `tests/test_config.py`:
 
 def test_ai_section_defaults_and_validation(tmp_path):
     cfg = load_config(_write(tmp_path), tmp_path / "x.env")
-    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 2000, 60, 10000)
+    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 4000, 60, 10000)
     assert (cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok) == (5.0, 25.0)
     assert (cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok) == (0.5, 6.25)
     over = load_config(_write(tmp_path, YAML.replace("on_failure: reject", 'on_failure: reject\n  effort: max\n  max_tokens: "2500"')),
@@ -103,7 +103,7 @@ class AIConfig:
     candles_in_context: int
     on_failure: str
     effort: str = "low"              # low | medium | high | xhigh | max
-    max_tokens: int = 2000
+    max_tokens: int = 4000           # a backstop, not a cost knob: unused output is not billed
     timeout_sec: int = 60            # adaptive thinking can take a while; the SDK retries twice on top
     max_calls_per_run: int = 10000   # hard stop on spend per backtest; later bars use on_failure
     # USD per million tokens, used only for the cost line in reports (Opus 5 list prices).
@@ -173,7 +173,7 @@ ai:
   candles_in_context: 30
   on_failure: reject          # reject | pass_through
   effort: low                 # classification-style task; raise if reasons look shallow
-  max_tokens: 2000
+  max_tokens: 4000            # backstop only; thinking tokens count against it
   timeout_sec: 60
   max_calls_per_run: 10000    # spend guard per backtest; a 62-day replay is at most ~4650 calls
   price_in_per_mtok: 5.0      # list prices, used only for the report's cost line
@@ -416,40 +416,61 @@ import json
 from tradebot.ai.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT, prompt_hash, render_candidates
 from tradebot.types import Candidate, Candle, Signal
 
+BAR = 1789357500  # 2026-09-14 09:15 IST
 
-def _cand(sym="RELIANCE", bar_ts=1789357500, direction="LONG"):
+
+def _cand(sym="RELIANCE", bar_ts=BAR, direction="LONG", n=3):
     sig = Signal("ema_rsi", sym, direction, 1280.0, 1275.5, 1289.0, "MIS", bar_ts)
-    candles = tuple(Candle(sym, bar_ts - 300 * (3 - i), 1279.0 + i, 1281.0 + i, 1278.0 + i, 1280.0 + i, 1000 * (i + 1))
-                    for i in range(3))
-    return Candidate(sig, 222, {"ema_fast": 1280.123456, "ema_slow": 1279.5, "rsi": 61.234567, "atr": 3.0}, candles)
+    candles = tuple(Candle(sym, bar_ts - 300 * (n - i), 1279.0 + i, 1281.0 + i, 1278.0 + i, 1280.0 + i, 1000 * (i + 1))
+                    for i in range(n))
+    return Candidate(sig, 222, {"rsi": 61.234567, "ema_fast": 1280.123456, "ema_slow": 1279.5, "atr": 3.0}, candles)
+
+
+SESSION = {"square_off": "15:10", "entry_cutoff": "14:45", "close": "15:30", "bars_left": 70}
 
 
 def test_render_is_deterministic_and_compact():
-    a = render_candidates([_cand(), _cand("TCS")])
-    b = render_candidates([_cand(), _cand("TCS")])
-    assert a == b
+    a = render_candidates([_cand(), _cand("TCS")], SESSION)
+    b = render_candidates([_cand(), _cand("TCS")], SESSION)
+    assert a == b and ": " not in a and ", " not in a
     data = json.loads(a)
-    assert data["bar_time"] == "2026-09-14T09:15:00+05:30"
+    assert data["bar_time"] == "2026-09-14T09:15:00+05:30" and data["session"] == SESSION
     c0 = data["candidates"][0]
+    assert list(c0.keys())[:4] == ["index", "symbol", "direction", "product"] and list(c0.keys())[-1] == "candles"
     assert c0["index"] == 0 and c0["symbol"] == "RELIANCE" and c0["direction"] == "LONG"
     assert c0["entry"] == 1280.0 and c0["stop"] == 1275.5 and c0["target"] == 1289.0
-    assert c0["stop_pct"] == 0.352 and c0["reward_risk"] == 2.0 and c0["quantity"] == 222
+    assert c0["stop_pct"] == 0.352 and c0["reward_risk"] == 2.0 and c0["quantity"] == 222 and c0["notional"] == 284160
+    assert list(c0["indicators"]) == ["atr", "ema_fast", "ema_slow", "rsi"]  # sorted regardless of insertion order
     assert c0["indicators"]["rsi"] == 61.2346 and c0["indicators"]["ema_fast"] == 1280.1235
-    assert c0["candles"][0] == ["09:00", 1279.0, 1281.0, 1278.0, 1280.0, 1000]
+    assert c0["candles"][0] == ["09-14 09:00", 1279.0, 1281.0, 1278.0, 1280.0, 1000]
     assert len(c0["candles"]) == 3
 
 
+def test_candle_rows_carry_the_date_so_overnight_gaps_are_visible():
+    c = _cand(n=6)  # 09:15 with six prior 5-minute bars, but pretend the window spans a day boundary
+    prev_day = tuple(Candle("RELIANCE", ts - 86400 * 3, 1, 2, 0.5, 1.5, 10) for ts in (BAR - 600, BAR - 300))
+    c = Candidate(c.signal, c.quantity, c.indicators, prev_day + c.candles[-2:])
+    rows = json.loads(render_candidates([c], SESSION))["candidates"][0]["candles"]
+    assert rows[0][0].startswith("09-11") and rows[-1][0].startswith("09-14")
+
+
 def test_render_order_follows_input_order():
-    data = json.loads(render_candidates([_cand("TCS"), _cand("RELIANCE")]))
+    data = json.loads(render_candidates([_cand("TCS"), _cand("RELIANCE")], SESSION))
     assert [c["symbol"] for c in data["candidates"]] == ["TCS", "RELIANCE"]
     assert [c["index"] for c in data["candidates"]] == [0, 1]
 
 
+def test_render_without_session_and_empty_batch():
+    assert json.loads(render_candidates([_cand()]))["session"] is None
+    assert render_candidates([]) == '{"bar_time":null,"session":null,"candidates":[]}'
+
+
 def test_prompt_hash_is_sha256_of_system_and_user():
-    user = render_candidates([_cand()])
+    user = render_candidates([_cand()], SESSION)
     h = prompt_hash(SYSTEM_PROMPT, user)
     assert h == hashlib.sha256((SYSTEM_PROMPT + "\n\n" + user).encode()).hexdigest()
-    assert h != prompt_hash(SYSTEM_PROMPT, render_candidates([_cand("TCS")]))
+    assert h != prompt_hash(SYSTEM_PROMPT, render_candidates([_cand("TCS")], SESSION))
+    assert h != prompt_hash(SYSTEM_PROMPT + " ", user)  # a prompt edit misses the cache on purpose
 
 
 def test_response_schema_shape():
@@ -457,11 +478,14 @@ def test_response_schema_shape():
     item = RESPONSE_SCHEMA["properties"]["decisions"]["items"]
     assert set(item["required"]) == {"index", "symbol", "approve", "confidence", "reason"}
     assert item["additionalProperties"] is False
+    assert item["properties"]["confidence"] == {"type": "number", "minimum": 0, "maximum": 1}
 
 
-def test_system_prompt_is_stable_text():
-    assert "approve" in SYSTEM_PROMPT and "reject" in SYSTEM_PROMPT
-    assert "{" not in SYSTEM_PROMPT  # no formatting placeholders: it must be byte-stable for caching
+def test_system_prompt_states_the_things_the_model_needs():
+    for needle in ("[time, open, high, low, close, volume]", "MM-DD HH:MM", "overnight gap", "square-off",
+                   "1 / (1 + R)", "between 0 and 1", "Approve a candidate unless"):
+        assert needle in SYSTEM_PROMPT, needle
+    assert len(SYSTEM_PROMPT.split()) >= 480, "must stay well above Opus 5's 512-token cacheable minimum"
 ```
 
 - [ ] **Step 2: Run, expect ModuleNotFoundError**
@@ -473,29 +497,33 @@ Run: `.venv/bin/pytest tests/test_ai_prompt.py -q`
 ```python
 """Prompt text for the Claude filter. Byte-stable: the system prompt never changes between
 calls (so it caches), and the user message is deterministic JSON so (symbol, bar_ts,
-sha256(prompt)) is a reliable cache key (spec 7)."""
+sha256(prompt)) is a reliable cache key (spec 7). Session facts (square-off time, bars left)
+travel in the user message, never in the system prompt, so the cached prefix stays fixed."""
 from __future__ import annotations
 
 import hashlib
 import json
+from typing import Optional
 
 from tradebot.engine.clock import iso_ist, to_ist
 from tradebot.types import Candidate
 
-SYSTEM_PROMPT = """You review intraday equity trade candidates for an automated NSE strategy and decide, for each one, whether to approve or reject it.
+SYSTEM_PROMPT = """You review intraday equity trade candidates for an automated NSE strategy and decide, for each one, whether to approve or reject it. Your review is the last check before an order goes to the exchange, so both kinds of mistake cost money: a rejected winner is a real loss, and an approved loser is a real loss. Neither approving everything nor rejecting everything is useful.
 
-Each candidate was produced by an EMA crossover confirmed by RSI, with a stop at an ATR multiple and a target at a reward-to-risk multiple. You receive the candidate's prices, indicator values and the most recent 5-minute candles (oldest first, times in IST). You do not receive news or any data outside these candles.
+How the candidates arise. A fast EMA crossing a slow EMA, confirmed by RSI, produces a candidate. Its stop is an ATR multiple from the entry and its target is a reward-to-risk multiple of that stop distance. Entries fill at the next bar's open. Intraday (MIS) positions that reach neither level are squared off at the session's square-off time, which the message states.
 
-Reject a candidate when the setup is more likely noise than a move worth the stop:
-- the recent candles are flat or choppy and the crossover is a wiggle rather than a change of direction
-- the stop is inside the ordinary bar-to-bar range, so it will be hit by noise
+What you receive. For each candidate: the symbol, direction (LONG or SHORT), entry, stop and target prices, the stop distance as a percent of price, the reward-to-risk ratio, the planned quantity and notional, indicator values (ema_fast, ema_slow, rsi, atr), and recent 5-minute candles. Each candle row is [time, open, high, low, close, volume] with the time as MM-DD HH:MM in IST, oldest first; a change of date between rows is an overnight gap, not an intraday move. The message also gives the session facts: the current bar time, the square-off time, the entry cutoff, and how many 5-minute bars remain before square-off. You do not receive news or any data outside these candles.
+
+Approve a candidate unless one of these clearly applies:
+- the recent candles are flat or choppy, so the crossover is a wiggle rather than a change of direction
+- the stop is inside the ordinary bar-to-bar range of the recent candles, so noise alone will hit it
 - the candidate trades against the clear direction of the recent candles
-- RSI is at an extreme after a stretch of near-identical closes, which means the indicator is stale rather than strong
-- it is late in the session and there is little room for the target before square-off
+- RSI reads as extreme after a stretch of near-identical closes, which means the indicator is stale rather than strong
+- too few bars remain before square-off for the target to be reached at the pace the candles show
 
-Approve when the crossover follows a visible shift in direction with expanding ranges, the stop sits beyond the recent swing, and the target is plausible within the remaining session.
+Two worked examples of the judgment. A LONG at 1280 with a stop at 1275.5 and a target at 1289, after eight candles whose closes drifted between 1278 and 1282 with ranges of 4 to 6 points each: the stop sits inside the ordinary bar range and the crossover is a wiggle, so reject with a confidence around 0.25. A SHORT at 842 with a stop at 847 and a target at 832, after a run of falling closes with widening ranges, a bounce that failed below the prior high, and 40 bars left: the direction is clear, the stop is beyond the failed bounce, and the target fits the pace, so approve with a confidence around 0.45.
 
-Be selective: approving everything is the same as having no reviewer. Give a one-sentence reason in plain words. Confidence is your probability that the trade reaches its target before its stop. Respond only with the JSON object described by the schema, one decision per candidate, keeping the candidate's index and symbol."""
+Confidence is your probability, between 0 and 1, that the trade reaches its target before its stop or the square-off. A trade with reward-to-risk R is worth taking when that probability exceeds 1 / (1 + R): about 0.33 at R = 2. Let the approve decision follow from that comparison rather than from a 0.5 threshold. Give a one-sentence reason in plain words. Return one decision per candidate, keeping the candidate's index and symbol."""
 
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -508,7 +536,7 @@ RESPONSE_SCHEMA = {
                     "index": {"type": "integer"},
                     "symbol": {"type": "string"},
                     "approve": {"type": "boolean"},
-                    "confidence": {"type": "number"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "reason": {"type": "string"},
                 },
                 "required": ["index", "symbol", "approve", "confidence", "reason"],
@@ -520,15 +548,20 @@ RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
-
-def _hhmm(ts: int) -> str:
-    return to_ist(ts).strftime("%H:%M")
+_JSON = {"sort_keys": False, "separators": (",", ":")}
 
 
-def render_candidates(candidates: list[Candidate]) -> str:
-    """Deterministic JSON for one bar's batch. Floats are rounded so equal inputs give equal bytes."""
+def _stamp(ts: int) -> str:
+    """MM-DD HH:MM in IST: the date is what lets the model see an overnight gap in the window."""
+    return to_ist(ts).strftime("%m-%d %H:%M")
+
+
+def render_candidates(candidates: list[Candidate], session: Optional[dict] = None) -> str:
+    """Deterministic JSON for one bar's batch. Key order is fixed by construction (trade parameters
+    before the candle rows); indicators are sorted; floats are rounded so equal inputs give equal bytes.
+    `session` is the dict of session facts (square_off, entry_cutoff, close, bars_left) or None."""
     if not candidates:
-        return json.dumps({"bar_time": None, "candidates": []}, sort_keys=True)
+        return json.dumps({"bar_time": None, "session": session, "candidates": []}, **_JSON)
     bar_ts = candidates[0].signal.bar_ts
     items = []
     for i, c in enumerate(candidates):
@@ -543,15 +576,15 @@ def render_candidates(candidates: list[Candidate]) -> str:
             "entry": round(s.entry_price, 2),
             "stop": round(s.stop_price, 2),
             "target": None if s.target_price is None else round(s.target_price, 2),
-            "stop_pct": round(risk / s.entry_price * 100, 3),
+            "stop_pct": round(risk / s.entry_price * 100, 3) if s.entry_price else None,
             "reward_risk": None if reward is None or risk == 0 else round(reward / risk, 2),
             "quantity": c.quantity,
-            "notional": round(c.quantity * s.entry_price, 0),
+            "notional": int(round(c.quantity * s.entry_price)),
             "indicators": {k: round(v, 4) for k, v in sorted(c.indicators.items())},
-            "candles": [[_hhmm(cd.ts), round(cd.open, 2), round(cd.high, 2), round(cd.low, 2), round(cd.close, 2), cd.volume]
+            "candles": [[_stamp(cd.ts), round(cd.open, 2), round(cd.high, 2), round(cd.low, 2), round(cd.close, 2), cd.volume]
                         for cd in c.candles],
         })
-    return json.dumps({"bar_time": iso_ist(bar_ts), "candidates": items}, sort_keys=True, separators=(",", ":"))
+    return json.dumps({"bar_time": iso_ist(bar_ts), "session": session, "candidates": items}, **_JSON)
 
 
 def prompt_hash(system: str, user: str) -> str:
@@ -561,7 +594,7 @@ def prompt_hash(system: str, user: str) -> str:
 - [ ] **Step 4: Run tests**
 
 Run: `.venv/bin/pytest tests/test_ai_prompt.py -q`
-Expected: 5 passed.
+Expected: 7 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -905,6 +938,20 @@ def test_cached_filter_does_not_cache_failures(repo):
     assert f.review([_rich_cand("A")])[0].approved and len(fake.calls) == 2
 
 
+def test_claude_filter_passes_session_facts_when_given_a_clock():
+    import json
+    from tradebot.config import SessionConfig
+    from tradebot.engine.clock import SessionClock
+    clock = SessionClock(SessionConfig("09:15", "15:30", "15:10", "14:45", ()), 5)
+    fake = FakeClaude([{"index": 0, "symbol": "A", "approve": True, "confidence": 0.5, "reason": "ok"}])
+    ClaudeFilter(_ai(), fake, clock=clock).review([_rich_cand("A", bar_ts=1789357500)])  # 09:15 IST
+    sent = json.loads(fake.calls[0])
+    assert sent["session"] == {"square_off": "15:10", "entry_cutoff": "14:45", "close": "15:30", "bars_left": 70}
+    fake2 = FakeClaude([{"index": 0, "symbol": "A", "approve": True, "confidence": 0.5, "reason": "ok"}])
+    ClaudeFilter(_ai(), fake2).review([_rich_cand("A")])
+    assert json.loads(fake2.calls[0])["session"] is None
+
+
 def test_build_filter_claude_variants_need_key_and_repo(repo):
     with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
         build_filter(_ai(filter="claude"), api_key="")
@@ -962,6 +1009,7 @@ from tradebot.ai.cache import AICache
 from tradebot.ai.claude_client import ClaudeClient, ClaudeReviewError, ReviewResponse
 from tradebot.ai.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT, prompt_hash, render_candidates
 from tradebot.config import AIConfig
+from tradebot.engine.clock import SessionClock, date_of
 from tradebot.types import Candidate, Decision
 
 log = logging.getLogger("tradebot.ai")
@@ -995,17 +1043,26 @@ def _clamp(x) -> float:
 class ClaudeFilter:
     kind = "claude"
 
-    def __init__(self, cfg: AIConfig, client: ClaudeClient, cache: Optional[AICache] = None):
+    def __init__(self, cfg: AIConfig, client: ClaudeClient, cache: Optional[AICache] = None,
+                 clock: Optional[SessionClock] = None):
         self.cfg = cfg
         self.client = client
         self.cache = cache
+        self.clock = clock  # supplies the session facts the prompt's "bars left" rule needs
         self.calls = 0
+
+    def _session(self, bar_ts: int) -> Optional[dict]:
+        if self.clock is None:
+            return None
+        sq = self.clock.square_off_bar_ts(date_of(bar_ts))
+        return {"square_off": self.clock.session.square_off, "entry_cutoff": self.clock.session.no_new_entries_after,
+                "close": self.clock.session.close, "bars_left": max(0, (sq - bar_ts) // self.clock.interval_sec)}
 
     # -- interface --------------------------------------------------------------------------
     def review(self, candidates: list[Candidate]) -> list[Decision]:
         if not candidates:
             return []
-        user = render_candidates(candidates)
+        user = render_candidates(candidates, self._session(candidates[0].signal.bar_ts))
         h = prompt_hash(SYSTEM_PROMPT, user)
         if self.cache is not None:
             cached = [self.cache.get(c.signal.symbol, c.signal.bar_ts, h) for c in candidates]
@@ -1064,11 +1121,11 @@ class ClaudeFilter:
 class CachedClaudeFilter(ClaudeFilter):
     kind = "claude_cached"
 
-    def __init__(self, cfg: AIConfig, client: ClaudeClient, cache: AICache):
-        super().__init__(cfg, client, cache)
+    def __init__(self, cfg: AIConfig, client: ClaudeClient, cache: AICache, clock: Optional[SessionClock] = None):
+        super().__init__(cfg, client, cache, clock)
 
 
-def build_filter(cfg: AIConfig, api_key: str, repo=None) -> AIFilter:
+def build_filter(cfg: AIConfig, api_key: str, repo=None, clock: Optional[SessionClock] = None) -> AIFilter:
     if cfg.filter == "stub":
         return StubFilter()
     if cfg.filter not in ("claude", "claude_cached"):
@@ -1077,10 +1134,10 @@ def build_filter(cfg: AIConfig, api_key: str, repo=None) -> AIFilter:
         raise ValueError("ANTHROPIC_API_KEY must be set in .env to use the Claude filter")
     client = ClaudeClient(api_key, cfg.model, cfg.effort, cfg.max_tokens, cfg.timeout_sec)
     if cfg.filter == "claude":
-        return ClaudeFilter(cfg, client)
+        return ClaudeFilter(cfg, client, clock=clock)
     if repo is None:
         raise ValueError("claude_cached needs a repo for the ai_cache table")
-    return CachedClaudeFilter(cfg, client, AICache(repo))
+    return CachedClaudeFilter(cfg, client, AICache(repo), clock)
 ```
 
 - [ ] **Step 5: Run the suite**
@@ -1459,7 +1516,8 @@ and the function signature gains `ai_filter: Optional[str]`. Replace the `build_
 
 ```python
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
-    ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo)
+    clock = SessionClock(cfg.session, interval)
+    ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
 ```
 
 and pass `ai` to `BacktestEngine`. Also store the effective filter in the run: after `engine.run()` nothing else changes (the resolved config is stored by the engine from `cfg`; to record the override, construct the engine with `dc_replace(cfg, ai=ai_cfg)` instead of `cfg`).
@@ -1518,7 +1576,9 @@ def estimate_ai(cfg: Config, run_id: str) -> None:
                         tuple(Candle(f"SYM{i}", 1789357500 - 300 * k, 1279.0, 1281.0, 1278.0, 1280.0, 12345)
                               for k in range(cfg.ai.candles_in_context, 0, -1)))
               for i in range(biggest)]
-    per_biggest = client.count_tokens(SYSTEM_PROMPT, render_candidates(sample))
+    session = {"square_off": cfg.session.square_off, "entry_cutoff": cfg.session.no_new_entries_after,
+               "close": cfg.session.close, "bars_left": 40}
+    per_biggest = client.count_tokens(SYSTEM_PROMPT, render_candidates(sample, session))
     per_candidate = per_biggest / biggest
     input_tokens = int(candidates * per_candidate)
     output_tokens = candidates * 60

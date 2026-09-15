@@ -29,7 +29,7 @@ ai:
   candles_in_context: 30
   on_failure: reject          # reject | pass_through
   effort: low                 # classification-style task; raise if reasons look shallow
-  max_tokens: 2000
+  max_tokens: 4000            # backstop only; thinking tokens count against it
   timeout_sec: 60
   max_calls_per_run: 10000    # spend guard per backtest; a 62-day replay is at most ~4650 calls
   price_in_per_mtok: 5.0      # list prices, used only for the report's cost line

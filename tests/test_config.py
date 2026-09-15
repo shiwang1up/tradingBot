@@ -141,7 +141,7 @@ def test_relative_paths_resolve_against_config_directory(tmp_path):
 
 def test_ai_section_defaults_and_validation(tmp_path):
     cfg = load_config(_write(tmp_path), tmp_path / "x.env")
-    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 2000, 60, 10000)
+    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 4000, 60, 10000)
     assert (cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok) == (5.0, 25.0)
     assert (cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok) == (0.5, 6.25)
     over = load_config(_write(tmp_path, YAML.replace("on_failure: reject", 'on_failure: reject\n  effort: max\n  max_tokens: "2500"')),

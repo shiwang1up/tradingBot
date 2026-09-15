@@ -39,7 +39,7 @@ class AIConfig:
     candles_in_context: int
     on_failure: str
     effort: str = "low"              # low | medium | high | xhigh | max
-    max_tokens: int = 2000
+    max_tokens: int = 4000           # a backstop, not a cost knob: unused output is not billed
     timeout_sec: int = 60            # adaptive thinking can take a while; the SDK retries twice on top
     max_calls_per_run: int = 10000   # hard stop on spend per backtest; later bars use on_failure
     # USD per million tokens, used only for the cost line in reports (Opus 5 list prices).
