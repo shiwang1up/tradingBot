@@ -378,4 +378,8 @@ def test_engine_persists_ai_token_usage(repo, tmp_path):
     cfg = make_config(tmp_path)
     _run(repo, cfg, _candles(), ai=Priced())
     u = repo.ai_usage("t1")
-    assert u["calls"] >= 1 and u["input_tokens"] == 1000 * u["calls"] and u["cache_read_tokens"] == 700 * u["calls"]
+    n_bars_with_batch = repo.conn.execute(
+        "SELECT COUNT(DISTINCT s.bar_ts) FROM ai_decisions d JOIN signals s ON s.id = d.signal_id WHERE d.run_id='t1'"
+    ).fetchone()[0]
+    assert u["calls"] == n_bars_with_batch >= 1
+    assert (u["input_tokens"], u["output_tokens"], u["cache_read_tokens"]) == (1000 * u["calls"], 50 * u["calls"], 700 * u["calls"])

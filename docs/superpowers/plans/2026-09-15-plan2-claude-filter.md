@@ -354,14 +354,15 @@ and add these methods after `ai_rejection_count`:
 
 ```python
     def ai_usage(self, run_id: str) -> dict:
-        """Token totals, call count (decisions carrying input tokens), failures, and mean latency over
-        real calls including failed ones (a timeout is the slowest event and must not be excluded)."""
+        """Token totals, call count (decisions carrying any token usage: a fully prompt-cached request
+        still has cache_read tokens), failures, and mean latency over real calls including failed ones
+        (a timeout is the slowest event and must not be excluded)."""
         row = self.conn.execute(
             "SELECT COUNT(*) AS decisions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
             "SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
-            "SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
-            "AVG(CASE WHEN input_tokens > 0 OR (failure IS NOT NULL AND latency_ms > 0) THEN latency_ms END) "
-            "AS avg_latency_ms, "
+            "SUM(CASE WHEN input_tokens + cache_read_tokens + cache_write_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
+            "AVG(CASE WHEN input_tokens + cache_read_tokens + cache_write_tokens > 0 "
+            "OR (failure IS NOT NULL AND latency_ms > 0) THEN latency_ms END) AS avg_latency_ms, "
             "SUM(CASE WHEN failure IS NOT NULL THEN 1 ELSE 0 END) AS failures "
             "FROM ai_decisions WHERE run_id=?", (run_id,)).fetchone()
         return {k: (row[k] or 0) for k in row.keys()}
@@ -1295,8 +1296,6 @@ git commit -m "feat(ai): ClaudeFilter with batch prompt, failure policy, spend g
 Append to `tests/test_engine.py`:
 
 ```python
-
-
 def test_engine_persists_ai_token_usage(repo, tmp_path):
     from tradebot.types import Decision
 
@@ -1311,7 +1310,11 @@ def test_engine_persists_ai_token_usage(repo, tmp_path):
     cfg = make_config(tmp_path)
     _run(repo, cfg, _candles(), ai=Priced())
     u = repo.ai_usage("t1")
-    assert u["calls"] >= 1 and u["input_tokens"] == 1000 * u["calls"] and u["cache_read_tokens"] == 700 * u["calls"]
+    n_bars_with_batch = repo.conn.execute(
+        "SELECT COUNT(DISTINCT s.bar_ts) FROM ai_decisions d JOIN signals s ON s.id = d.signal_id WHERE d.run_id='t1'"
+    ).fetchone()[0]
+    assert u["calls"] == n_bars_with_batch >= 1
+    assert (u["input_tokens"], u["output_tokens"], u["cache_read_tokens"]) == (1000 * u["calls"], 50 * u["calls"], 700 * u["calls"])
 ```
 
 - [ ] **Step 2: Run, expect failure** (`input_tokens` stays 0 because `_place` does not pass them).
