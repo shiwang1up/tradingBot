@@ -68,3 +68,16 @@ def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int =
             prev_close = c
             i += 1
     return out
+
+
+class FakeTime:
+    """Deterministic wall clock for the paper engine: `sleep` advances `now`."""
+
+    def __init__(self, start_ts: int):
+        self.t = float(start_ts)
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
