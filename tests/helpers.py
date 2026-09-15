@@ -17,7 +17,7 @@ BASE_CONFIG = {
     "strategy": {"ema_rsi": {"fast": 9, "slow": 21, "rsi_period": 14, "rsi_long_min": 55,
                              "rsi_short_max": 45, "atr_period": 14, "atr_stop_mult": 1.5,
                              "reward_risk": 2.0, "min_stop_pct": 0.1, "product": "MIS"}},
-    "ai": {"filter": "stub", "model": "claude-sonnet-5", "candles_in_context": 30, "on_failure": "reject"},
+    "ai": {"filter": "stub", "model": "claude-opus-5", "candles_in_context": 30, "on_failure": "reject"},
     "execution": {"slippage_pct": 0.05, "entry_buffer_pct": 0.1, "bar_deadline_sec": 60, "interval_minutes": 5},
     "session": {"open": "09:15", "close": "15:30", "square_off": "15:10",
                 "no_new_entries_after": "14:45", "holidays": []},

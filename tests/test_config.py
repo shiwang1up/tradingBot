@@ -137,3 +137,17 @@ def test_relative_paths_resolve_against_config_directory(tmp_path):
     assert cfg.paths.universe == str(sub / "universe.yaml")
     absolute = YAML.replace("db: data/tradebot.db", "db: /abs/elsewhere.db")
     assert load_config(_write(sub, absolute), sub / "x.env").paths.db == "/abs/elsewhere.db"
+
+
+def test_ai_section_defaults_and_validation(tmp_path):
+    cfg = load_config(_write(tmp_path), tmp_path / "x.env")
+    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 2000, 30, 5000)
+    assert (cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok) == (5.0, 25.0)
+    for broken, frag in [
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  effort: turbo"), "ai.effort"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  max_calls_per_run: 0"), "ai.max_calls_per_run"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  max_tokens: 0"), "ai.max_tokens"),
+    ]:
+        with pytest.raises(ValueError) as e:
+            load_config(_write(tmp_path, broken), tmp_path / "x.env")
+        assert frag in str(e.value)

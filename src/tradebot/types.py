@@ -119,3 +119,6 @@ class Decision:
     filter_kind: str
     latency_ms: int = 0
     failure: str | None = None
+    input_tokens: int = 0        # usage is attributed to the first decision of a batch
+    output_tokens: int = 0
+    cache_read_tokens: int = 0

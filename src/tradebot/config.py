@@ -38,6 +38,12 @@ class AIConfig:
     model: str
     candles_in_context: int
     on_failure: str
+    effort: str = "low"              # low | medium | high | xhigh | max
+    max_tokens: int = 2000
+    timeout_sec: int = 30
+    max_calls_per_run: int = 5000    # hard stop on spend per backtest; later bars use on_failure
+    price_in_per_mtok: float = 5.0   # USD per million input tokens, for the cost line in reports
+    price_out_per_mtok: float = 25.0
 
 
 @dataclass(frozen=True)
@@ -131,7 +137,9 @@ def _section(raw: dict, name: str, cls):
     unknown = set(given) - set(fields)
     if unknown:
         raise ValueError(f"config.yaml section '{name}' has unknown keys: {sorted(unknown)}")
-    missing = set(fields) - set(given)
+    required = {n for n, f in fields.items()
+                if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING}
+    missing = required - set(given)
     if missing:
         raise ValueError(f"config.yaml section '{name}' missing keys: {sorted(missing)}")
     return cls(**{k: _coerce(name, k, fields[k].type, v) for k, v in given.items()})
@@ -140,6 +148,7 @@ def _section(raw: dict, name: str, cls):
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 AI_FILTERS = ("stub", "claude", "claude_cached")
 AI_ON_FAILURE = ("reject", "pass_through")
+AI_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def _validate(cfg: "Config") -> None:
@@ -160,6 +169,11 @@ def _validate(cfg: "Config") -> None:
         (a.candles_in_context >= 1, "ai.candles_in_context must be >= 1"),
         (a.filter in AI_FILTERS, f"ai.filter must be one of {AI_FILTERS}"),
         (a.on_failure in AI_ON_FAILURE, f"ai.on_failure must be one of {AI_ON_FAILURE}"),
+        (a.effort in AI_EFFORTS, f"ai.effort must be one of {AI_EFFORTS}"),
+        (a.max_tokens >= 1, "ai.max_tokens must be >= 1"),
+        (a.timeout_sec >= 1, "ai.timeout_sec must be >= 1"),
+        (a.max_calls_per_run >= 1, "ai.max_calls_per_run must be >= 1"),
+        (a.price_in_per_mtok >= 0 and a.price_out_per_mtok >= 0, "ai.price_*_per_mtok must be >= 0"),
     ]
     for name in ("open", "close", "square_off", "no_new_entries_after"):
         checks.append((bool(_HHMM.match(getattr(s, name))), f'session.{name} must be a quoted "HH:MM" time'))
