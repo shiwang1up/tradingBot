@@ -1,7 +1,8 @@
 # tradebot
 
 NSE/BSE trading bot on the Groww Trade API. Spec: `docs/superpowers/specs/2026-09-14-nse-bse-trading-bot-design.md`.
-Plan 1 (this code) is the backtester. Plan 2 adds the Claude filter; Plan 3 adds paper and live trading.
+Plan 1 is the backtester, Plan 2 the Claude filter and compare report, Plan 3 paper trading on live
+candles. Live order placement is a separate, later plan.
 
 ## Setup
 
@@ -27,6 +28,27 @@ history, so a weekly run grows the local cache past that window. `--full` refetc
 repairs the whole window.
 
 Survivorship bias: `universe.yaml` is today's constituent list, so backtests overstate results.
+
+## Paper trading
+
+    .venv/bin/tradebot paper --strategy ema_rsi --ai stub
+
+Runs today's session on live 5-minute candles fetched over REST at each bar boundary, through the
+same strategy, risk, AI filter and simulated broker as the backtester. It places no real orders.
+Start it before 09:15 IST (it waits) or any time during the session: a fresh start mid-session warms
+up on the bars already gone (no entries on them) and trades from the next bar; a restart replays the
+missed bars with the simulated broker, dropping their signals as `stale` past
+`execution.bar_deadline_sec`, so exits are settled but nothing is entered late. One run
+per day, id `paper-YYYY-MM-DD`; `report --run paper-YYYY-MM-DD` prints the summary and the daily
+fill rate. Ctrl-C finishes the current bar and leaves the run resumable: start the command again the
+same day and it reloads open positions and pending entries from SQLite. A run left open by a crash
+can be started again the same day, even after 15:30, to replay the missed bars, square off and
+close the books; from the next day on it is refused and you start a new run id. The
+approval-flow Groww key must be approved on the API keys page before starting each day.
+
+`--ai stub` keeps Claude out of the loop; drop it (or pass `--ai claude_cached`) to pay for the
+filter on live signals. Intraday (MIS) strategies only. `data.bar_grace_sec` and `data.warmup_bars`
+in `config.yaml` tune the wait after each boundary and the warm-up depth.
 
 ## Tests
 

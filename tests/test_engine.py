@@ -401,3 +401,49 @@ def test_candidates_carry_the_shared_indicator_snapshot(repo, tmp_path):
             "volume_spike_pct", "engulfing"} <= keys
     late = [c for c in seen if c.indicators.get("adx") is not None]
     assert late, "once the windows fill the shared indicators are populated"
+
+
+def test_stale_bars_record_signals_but_place_nothing(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    src = HistoricalSource(_candles())
+    clock = SessionClock(cfg.session, 5)
+
+    def engine(run_id):
+        strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
+        broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
+        e = BacktestEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, {"A": 1, "B": 1}, run_id)
+        repo.create_run(run_id, "backtest", 0, "{}")
+        e._start_day()
+        return e
+
+    fresh, late = engine("fresh"), engine("late")
+    for ts in src.bar_timestamps():
+        if date_of(ts) != DAYS[1]:
+            continue
+        fresh.process_bar(ts, src.candles_at(ts), now_ts=ts + 300 + 5)     # 5 s after the close: fresh
+        late.process_bar(ts, src.candles_at(ts), now_ts=ts + 300 + 61)     # past the 60 s deadline
+    assert repo.rejection_counts("fresh").get("stale", 0) == 0
+    assert repo.rejection_counts("late")["stale"] > 0
+    assert repo.list_positions("late") == []
+    assert len(repo.list_positions("fresh")) >= 1
+
+
+def test_a_late_bar_still_simulates_exits(repo, tmp_path):
+    """Spec 8.6 drops only placement: a stale bar must still run the broker so stops and targets fire."""
+    from tradebot.types import ApprovedOrder, Signal
+    cfg = make_config(tmp_path)
+    strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
+    broker = BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage, None)
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [strat], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1}, "late-exit")
+    repo.create_run("late-exit", "backtest", 0, "{}")
+    eng._start_day()
+    t0 = ist_epoch(DAYS[1], "10:00")
+    sig = Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", t0)
+    repo.insert_order("late-exit", "cid1", None, "ENTRY", "BUY", 10, 100.0, "PENDING", t0)
+    broker.place_entry(ApprovedOrder(sig, 10, "cid1"))
+    eng.process_bar(t0 + 300, {"A": Candle("A", t0 + 300, 100.0, 100.5, 99.8, 100.2, 1)}, now_ts=t0 + 600 + 900)
+    assert set(broker.open_positions()) == {"A"}, "a late bar still fills the pending entry"
+    eng.process_bar(t0 + 600, {"A": Candle("A", t0 + 600, 100.1, 100.3, 98.5, 98.7, 1)}, now_ts=t0 + 900 + 900)
+    rows = repo.list_positions("late-exit")
+    assert broker.open_positions() == {} and rows and rows[0]["exit_reason"] == "STOP"

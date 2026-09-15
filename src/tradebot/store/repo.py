@@ -23,6 +23,10 @@ class Repo:
         self.conn.execute("UPDATE runs SET ended_at=? WHERE run_id=?", (ended_at, run_id))
         self.conn.commit()
 
+    def set_last_bar_ts(self, run_id: str, ts: int) -> None:
+        self.conn.execute("UPDATE runs SET last_bar_ts=? WHERE run_id=?", (ts, run_id))
+        self.conn.commit()
+
     def get_run(self, run_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
 
@@ -211,6 +215,20 @@ class Repo:
     def list_positions(self, run_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM positions WHERE run_id=? ORDER BY opened_at, symbol", (run_id,)
+        ).fetchall()
+
+    def open_positions(self, run_id: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM positions WHERE run_id=? AND closed_at IS NULL ORDER BY opened_at, symbol", (run_id,)
+        ).fetchall()
+
+    def pending_orders(self, run_id: str) -> list[sqlite3.Row]:
+        """ENTRY orders still PENDING, joined to the signal they came from, so a paper resume can
+        rebuild the ApprovedOrder the broker was holding."""
+        return self.conn.execute(
+            "SELECT o.client_id, o.qty, s.strategy, s.symbol, s.direction, s.entry, s.stop, s.target, s.product, s.bar_ts "
+            "FROM orders o JOIN signals s ON s.id = o.signal_id "
+            "WHERE o.run_id=? AND o.kind='ENTRY' AND o.status='PENDING' ORDER BY o.id", (run_id,)
         ).fetchall()
 
     # -- daily pnl ---------------------------------------------------------

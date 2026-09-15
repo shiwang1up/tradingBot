@@ -1,5 +1,5 @@
 """The only module that imports growwapi. Plan 1 needs auth + historical candles only.
-Order, feed, position, and margin methods are added in Plan 3."""
+Order, feed, position, and margin methods are added in the live plan."""
 from __future__ import annotations
 
 import logging

@@ -219,3 +219,20 @@ def test_square_off_uses_last_price_when_symbol_has_no_candle():
     assert b.square_off(1600, {}) == []                       # no candle, no fallback: stays open
     ev = b.square_off(1600, {}, last_prices={"M": 101.0})
     assert ev[0].position.exit_price == 101.0 and ev[0].position.exit_reason == "SQUARE_OFF"
+
+
+def test_restore_then_bar_fills_pending_and_exits_positions():
+    b = BacktestBroker(100_000, slippage_pct=0.0, mis_leverage=5.0, entry_buffer_pct=None)
+    pos = Position("A", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 900, "c1", "s", db_id=7)
+    sig = Signal("s", "B", "LONG", 50.0, 49.0, 52.0, "MIS", 900)
+    b.restore([pos], [ApprovedOrder(sig, 4, "c2")], cash=99_000.0)
+    assert b.cash == 99_000.0
+    assert b.open_positions() == {"A": pos} and b.pending_symbols() == {"B"}
+
+    events = b.on_bar(1200, {"A": Candle("A", 1200, 101.0, 103.0, 100.5, 102.5, 1),
+                             "B": Candle("B", 1200, 50.0, 51.0, 49.5, 50.5, 1)})
+    assert {type(e).__name__ for e in events} == {"Filled", "Closed"}
+    closed = next(e for e in events if isinstance(e, Closed)).position
+    assert closed.db_id == 7 and closed.exit_reason == "TARGET" and closed.pnl == pytest.approx(20.0)
+    assert set(b.open_positions()) == {"B"} and b.pending_symbols() == set()
+    assert b.cash == pytest.approx(99_020.0)

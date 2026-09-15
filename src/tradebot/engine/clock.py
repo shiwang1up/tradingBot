@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, time
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from tradebot.config import SessionConfig
@@ -97,3 +98,18 @@ class SessionClock:
         d = date_of(ts)
         cutoff = ist_epoch(d, self.session.no_new_entries_after)
         return self.open_ts(d) <= ts < cutoff
+
+    def last_bar_ts(self, d: date) -> int:
+        """Open time of the session's last bar (the one that ends at the close)."""
+        return self.close_ts(d) - self.interval_sec
+
+    def latest_complete_bar(self, now_ts: int, grace_sec: int = 0) -> Optional[int]:
+        """Open time of the most recent bar of now_ts's day whose close plus grace is at or before
+        now_ts, capped at the session's last bar. None before the first bar has completed. Paper
+        mode uses it to decide which bars are ready to fetch."""
+        d = date_of(now_ts)
+        o = self.open_ts(d)
+        closed_bars = (now_ts - grace_sec - o) // self.interval_sec
+        if closed_bars < 1:
+            return None
+        return min(o + (closed_bars - 1) * self.interval_sec, self.last_bar_ts(d))

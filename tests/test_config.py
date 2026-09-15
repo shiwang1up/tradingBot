@@ -4,6 +4,7 @@ import textwrap
 import pytest
 
 from tradebot.config import load_config
+from tests.helpers import make_config
 
 YAML = textwrap.dedent("""
 capital: 100000
@@ -157,3 +158,23 @@ def test_ai_section_defaults_and_validation(tmp_path):
         with pytest.raises(ValueError) as e:
             load_config(_write(tmp_path, broken), tmp_path / "x.env")
         assert frag in str(e.value)
+
+
+def test_data_section_defaults_and_validation(tmp_path):
+    cfg = make_config(tmp_path)
+    assert cfg.data.bar_grace_sec == 5
+    assert cfg.data.warmup_bars == 300
+    cfg2 = make_config(tmp_path, data={"official_fetch_concurrency": 5, "bar_grace_sec": 0, "warmup_bars": 50})
+    assert cfg2.data.bar_grace_sec == 0 and cfg2.data.warmup_bars == 50
+    with pytest.raises(ValueError, match="data.warmup_bars must be >= 1"):
+        make_config(tmp_path, data={"official_fetch_concurrency": 5, "warmup_bars": 0})
+    with pytest.raises(ValueError, match="data.bar_grace_sec must be >= 0"):
+        make_config(tmp_path, data={"official_fetch_concurrency": 5, "bar_grace_sec": -1})
+
+
+def test_bar_grace_must_fit_under_the_deadline_and_inside_a_bar(tmp_path):
+    with pytest.raises(ValueError, match="below execution.bar_deadline_sec"):
+        make_config(tmp_path, data={"official_fetch_concurrency": 5, "bar_grace_sec": 60})
+    with pytest.raises(ValueError, match="shorter than a bar"):
+        make_config(tmp_path, execution={"slippage_pct": 0.05, "entry_buffer_pct": 0.1, "bar_deadline_sec": 900,
+                                         "interval_minutes": 5}, data={"official_fetch_concurrency": 5, "bar_grace_sec": 300})

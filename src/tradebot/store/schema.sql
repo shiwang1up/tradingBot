@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS runs (
   mode        TEXT NOT NULL,
   started_at  INTEGER NOT NULL,
   ended_at    INTEGER,
-  config_json TEXT NOT NULL
+  config_json TEXT NOT NULL,
+  last_bar_ts INTEGER              -- paper: open time of the last bar processed (resume point); NULL for backtests
 );
 
 CREATE TABLE IF NOT EXISTS candles (
