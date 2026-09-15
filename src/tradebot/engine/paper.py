@@ -107,9 +107,16 @@ class PaperEngine(Engine):
             log.info("%s is not a trading day; nothing to do", today)
             return None
         existing = self.repo.get_run(self.run_id)
+        closed_for_today = now >= self.clock.close_ts(today)
         if existing is not None and existing["ended_at"] is not None:
+            if closed_for_today:  # a supervisor restarting after a clean finish is a no-op, not an error
+                log.info("run %s already ended and the session is closed; nothing to do", self.run_id)
+                return None
             raise ValueError(f"run {self.run_id} already ended today; pass a different --run-id to start another session")
-        if now >= self.clock.close_ts(today) and existing is None:
+        if existing is not None and date_of(existing["started_at"]) != today:
+            raise ValueError(f"run {self.run_id} was started on {date_of(existing['started_at'])} and is still open; "
+                             f"paper runs are one per day, pass a different --run-id")
+        if closed_for_today and existing is None:
             log.info("the %s session has already closed; nothing to do", today)
             return None
         resume_point = existing["last_bar_ts"] if existing is not None else None
@@ -150,9 +157,9 @@ class PaperEngine(Engine):
             suspended = self.stop_requested and last < end
             try:
                 if suspended:
-                    self._write_daily_row(today)
                     log.info("paper run %s suspended after bar %s; start again today to resume", self.run_id,
                              iso_ist(last) if last >= open_ts else "none")
+                    self._write_daily_row(today)
                 else:
                     self._end_day(today, max(last, open_ts))
             except Exception:  # noqa: BLE001 - never mask the loop's own exception or skip end_run

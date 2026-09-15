@@ -259,3 +259,15 @@ def test_resume_restores_the_cooldown_after_a_stop_out(repo, tmp_path):
     assert eng.resume(TODAY) is True
     assert eng._cooldown_until == {"A": stopped_at + 3 * 300}
     assert eng._state().cooldown_until == {"A": stopped_at + 3 * 300}
+
+
+def test_restart_after_a_clean_finish_is_a_quiet_no_op_and_a_stale_day_is_refused(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    market = _market()
+    _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="fin").run(_warm(market))
+    assert _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "15:31")), run_id="fin").run([]) is None
+    assert repo.get_run("fin")["ended_at"] is not None
+
+    repo.create_run("old", "paper", ist_epoch(date(2026, 9, 11), "10:00"), "{}")   # crashed on Friday, still open
+    with pytest.raises(ValueError, match="started on 2026-09-11"):
+        _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "10:00")), run_id="old").run([])

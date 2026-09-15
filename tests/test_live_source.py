@@ -95,3 +95,16 @@ def test_a_symbol_slower_than_the_budget_is_skipped_for_the_bar(repo, tmp_path, 
     assert set(got) == {"A"}
     assert "candle fetch for B did not finish" in caplog.text
     assert "1 of 2 symbols" in caplog.text and "1 failed" in caplog.text
+
+
+def test_bars_come_back_in_universe_order_whatever_the_pool_finishes_first(repo, tmp_path):
+    a, b, c = synth_candles("A", [D]), synth_candles("B", [D], phase=4.0, seed=99), synth_candles("C", [D], phase=2.0, seed=5)
+    by = {"A": a, "B": b, "C": c}
+
+    def fetcher(sym, exch, start, end, interval):
+        time.sleep({"A": 0.05, "B": 0.0, "C": 0.02}[sym])   # B finishes first, then C, then A
+        return [x for x in by[sym] if start <= x.ts <= end]
+
+    src, _ = _source(repo, tmp_path, fetcher, symbols=("A", "B", "C"))
+    got = src.fetch_bar(ist_epoch(D, "09:20"))
+    assert list(got) == ["A", "B", "C"]
