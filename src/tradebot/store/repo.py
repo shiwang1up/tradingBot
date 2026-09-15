@@ -108,12 +108,13 @@ class Repo:
         return row["n"]
 
     def ai_usage(self, run_id: str) -> dict:
-        """Token totals, call count (decisions carrying input tokens) and mean latency of real calls."""
+        """Token totals, call count (decisions carrying input tokens), failures, and mean latency over
+        real calls including failed ones (a timeout is the slowest event and must not be excluded)."""
         row = self.conn.execute(
             "SELECT COUNT(*) AS decisions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
             "SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
             "SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
-            "AVG(CASE WHEN input_tokens > 0 THEN latency_ms END) AS avg_latency_ms, "
+            "AVG(CASE WHEN input_tokens > 0 OR failure IS NOT NULL THEN latency_ms END) AS avg_latency_ms, "
             "SUM(CASE WHEN failure IS NOT NULL THEN 1 ELSE 0 END) AS failures "
             "FROM ai_decisions WHERE run_id=?", (run_id,)).fetchone()
         return {k: (row[k] or 0) for k in row.keys()}
@@ -125,6 +126,7 @@ class Repo:
             "WHERE d.run_id=? AND d.approved=0 ORDER BY s.bar_ts, s.symbol", (run_id,)).fetchall()
 
     def positions_by_client_id(self, run_id: str) -> dict:
+        """Backtest use only: adopted live positions share client_id '' and would collapse to one key."""
         return {r["client_id"]: r for r in self.list_positions(run_id)}
 
     # -- ai cache ----------------------------------------------------------

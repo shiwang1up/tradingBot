@@ -167,3 +167,52 @@ def test_positions_by_client_id(repo):
     repo.close_position(pid, 9, 101.0, "TARGET", 1.0)
     m = repo.positions_by_client_id("r1")
     assert m["cid-a"]["pnl"] == 1.0
+
+
+def _v1_db(path, extra_ddl=""):
+    raw = sqlite3.connect(str(path))
+    raw.executescript("""
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
+                           ended_at INTEGER, config_json TEXT NOT NULL);
+        CREATE TABLE ai_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
+                                   filter_kind TEXT NOT NULL, approved INTEGER NOT NULL, reason TEXT NOT NULL,
+                                   confidence REAL NOT NULL, latency_ms INTEGER NOT NULL, failure TEXT);
+        PRAGMA user_version = 1;
+    """ + extra_ddl)
+    raw.commit()
+    raw.close()
+
+
+def test_migration_is_atomic_and_a_failed_one_leaves_the_old_version(tmp_path, monkeypatch):
+    from tradebot.store import db as db_mod
+    path = tmp_path / "v1.db"
+    _v1_db(path)
+    monkeypatch.setitem(db_mod.MIGRATIONS, 1, db_mod.MIGRATIONS[1] + ["ALTER TABLE nope ADD COLUMN x INTEGER"])
+    with pytest.raises(sqlite3.OperationalError):
+        connect(path)
+    raw = sqlite3.connect(str(path))
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert "input_tokens" not in {r[1] for r in raw.execute("PRAGMA table_info(ai_decisions)")}
+    raw.close()
+    monkeypatch.undo()
+    conn = connect(path)  # retry after the fix succeeds cleanly
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_missing_migration_entry_refuses_to_open(tmp_path, monkeypatch):
+    from tradebot.store import db as db_mod
+    path = tmp_path / "v1.db"
+    _v1_db(path)
+    monkeypatch.delitem(db_mod.MIGRATIONS, 1)
+    with pytest.raises(SchemaVersionError, match="no migration defined"):
+        connect(path)
+
+
+def test_ai_usage_latency_includes_failed_calls(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    s1 = repo.insert_signal("r1", _signal("A", 100))
+    s2 = repo.insert_signal("r1", _signal("B", 200))
+    repo.insert_ai_decision("r1", s1, "claude", True, "ok", 0.5, 400, None, input_tokens=1000)
+    repo.insert_ai_decision("r1", s2, "claude", False, "ai_failure: timeout", 0.0, 60000, "timeout")
+    u = repo.ai_usage("r1")
+    assert u["calls"] == 1 and u["failures"] == 1 and u["avg_latency_ms"] == pytest.approx(30200)
