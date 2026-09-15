@@ -62,7 +62,11 @@ class LiveBarSource:
         out: dict[int, dict[str, Candle]] = {}
         failed = len(pending)
         stored: list[Candle] = []
-        for sym, candles in (f.result() for f in done):  # SQLite writes stay on this thread
+        results = dict(f.result() for f in done)
+        for sym in self.symbols:  # universe order, so every bar reaches the strategies the same way; SQLite stays here
+            if sym not in results:
+                continue  # over budget: already counted as failed
+            candles = results[sym]
             if candles is None:
                 failed += 1
                 continue

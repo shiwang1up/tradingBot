@@ -40,7 +40,7 @@ log = logging.getLogger("tradebot.engine")
 
 
 @dataclass
-class _DayCounters:
+class DayCounters:
     realised: float = 0.0
     entries_placed: int = 0
     fills: int = 0
@@ -71,17 +71,20 @@ class Engine:
         self._last_close: dict[str, float] = {}
         self._cooldown_until: dict[str, int] = {}
         self.disabled_strategies: set[str] = set()
-        self._day = _DayCounters()
+        self._day = DayCounters()
 
-    def _start_day(self) -> None:
-        # A strategy disabled yesterday missed bars; its incremental indicators would silently
-        # carry state across the hole. Reset so is_ready() gates signals until they are warm again.
+    def _reenable_strategies(self) -> None:
+        """A strategy disabled earlier missed bars; its incremental indicators would silently carry
+        state across the hole. Reset so is_ready() gates signals until they are warm again."""
         for strat in self.strategies:
             if strat.name in self.disabled_strategies:
                 for sym in self._history:
                     strat.reset(sym)
         self.disabled_strategies.clear()
-        self._day = _DayCounters(unrealised_at_open=self._unrealised_now())
+
+    def _start_day(self) -> None:
+        self._reenable_strategies()
+        self._day = DayCounters(unrealised_at_open=self._unrealised_now())
 
     def _end_day(self, d: date, ts: int) -> None:
         # A day whose bar stream ends before the square-off bar must still not carry MIS overnight.

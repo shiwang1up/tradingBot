@@ -6,7 +6,14 @@ processed one up to it in one window, process them in order, then sleep until th
 plus grace. A bar handed to process_bar later than the deadline drops its signals as `stale`, so a
 catch-up after a late wake or a restart only settles fills and exits. Stop (SIGINT/SIGTERM via
 request_stop) finishes the current bar, writes the day's row and leaves the run open so a restart the
-same day resumes it; the session end squares off, writes the row and ends the run."""
+same day resumes it; the session end squares off, writes the row and ends the run. A run left open
+by a crash can be started again after the close: it replays the missed bars (stale, so no entries),
+squares off and ends, so the books never stay open overnight.
+
+A symbol whose candle fetch failed is simply absent from that bar, exactly as a symbol that did not
+trade is in a backtest: a pending entry on it is recorded unfilled (no_candle) and its exits are not
+evaluated until the next bar that has a candle. LiveBarSource logs every such failure and a per-bar
+timing summary, so paper results carry the cost of fetch failures visibly rather than hiding them."""
 from __future__ import annotations
 
 import json
@@ -18,7 +25,7 @@ from typing import Callable, Optional
 from tradebot.config import resolved_config
 from tradebot.data.live import LiveBarSource
 from tradebot.engine.clock import date_of, iso_ist
-from tradebot.engine.loop import Engine, _DayCounters
+from tradebot.engine.loop import DayCounters, Engine
 from tradebot.types import ApprovedOrder, Candle, Position, Signal
 
 log = logging.getLogger("tradebot.paper")
@@ -77,9 +84,13 @@ class PaperEngine(Engine):
         self.broker.restore(positions, pending, self.cfg.capital + sum(r["pnl"] or 0.0 for r in closed))
         for p in positions:  # unrealised needs a price for every open symbol; a gap falls back to cost
             self._last_close.setdefault(p.symbol, p.avg_price)
+        for r in closed:  # the same wall-clock cooldown _record applies after a stop-out
+            if r["exit_reason"] == "STOP":
+                until = r["closed_at"] + self.cfg.risk.cooldown_bars * self.interval_sec
+                self._cooldown_until[r["symbol"]] = max(self._cooldown_until.get(r["symbol"], 0), until)
         rows = {r["date"]: r for r in self.repo.daily_pnl(self.run_id)}
         row = rows.get(today.isoformat())
-        self._day = _DayCounters(realised=sum(r["pnl"] or 0.0 for r in closed if date_of(r["closed_at"]) == today),
+        self._day = DayCounters(realised=sum(r["pnl"] or 0.0 for r in closed if date_of(r["closed_at"]) == today),
                                  entries_placed=row["entries_placed"] if row else 0,
                                  fills=row["fills"] if row else 0)
         log.info("resumed run %s: %d open position(s), %d pending entr%s, last bar %s", self.run_id,
@@ -95,15 +106,19 @@ class PaperEngine(Engine):
         if not self.clock.is_trading_day(today):
             log.info("%s is not a trading day; nothing to do", today)
             return None
-        if now >= self.clock.close_ts(today):
+        existing = self.repo.get_run(self.run_id)
+        if existing is not None and existing["ended_at"] is not None:
+            raise ValueError(f"run {self.run_id} already ended today; pass a different --run-id to start another session")
+        if now >= self.clock.close_ts(today) and existing is None:
             log.info("the %s session has already closed; nothing to do", today)
             return None
-        existing = self.repo.get_run(self.run_id)
-        if existing is not None and existing["last_bar_ts"] is not None:
+        resume_point = existing["last_bar_ts"] if existing is not None else None
+        if resume_point is not None:
             # A resumed run must replay every bar after the one it last processed *with the broker*,
             # so stored candles past that point (the start-up fetch stores them) are not warmed away.
-            warm_candles = [c for c in warm_candles if c.ts <= existing["last_bar_ts"]]
+            warm_candles = [c for c in warm_candles if c.ts <= resume_point]
         warmed = self.warm(warm_candles)
+        self._reenable_strategies()  # a strategy that raised during warm-up gets a clean start on both paths
         resumed = self.resume(today)
         if not resumed:
             self.repo.create_run(self.run_id, self.mode, now, json.dumps(resolved_config(self.cfg), default=str))
@@ -112,9 +127,8 @@ class PaperEngine(Engine):
         last = open_ts - self.interval_sec
         if warmed is not None and warmed >= open_ts:
             last = warmed  # today's stored bars were replayed by warm(); they are not fetched again
-        stored_last = self.repo.get_run(self.run_id)["last_bar_ts"]
-        if stored_last is not None:
-            last = max(last, stored_last)
+        if resume_point is not None:
+            last = max(last, resume_point)
         end = self.clock.last_bar_ts(today)
         log.info("paper run %s (%s) %s: next bar %s, strategies=%s, %d symbols", self.run_id,
                  "resumed" if resumed else "new", today, iso_ist(last + self.interval_sec),
@@ -133,15 +147,21 @@ class PaperEngine(Engine):
                     if self.stop_requested:
                         break
         finally:
-            if self.stop_requested and last < end:
-                self._write_daily_row(today)
-                log.info("paper run %s suspended after bar %s; start again today to resume", self.run_id,
-                         iso_ist(last) if last >= open_ts else "none")
-            else:
-                self._end_day(today, max(last, open_ts))
-                self.repo.end_run(self.run_id, int(self.now()))
-                log.info("paper run %s ended: realised %.2f, %d fills / %d entries", self.run_id,
-                         self._day.realised, self._day.fills, self._day.entries_placed)
+            suspended = self.stop_requested and last < end
+            try:
+                if suspended:
+                    self._write_daily_row(today)
+                    log.info("paper run %s suspended after bar %s; start again today to resume", self.run_id,
+                             iso_ist(last) if last >= open_ts else "none")
+                else:
+                    self._end_day(today, max(last, open_ts))
+            except Exception:  # noqa: BLE001 - never mask the loop's own exception or skip end_run
+                log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
+            finally:
+                if not suspended:
+                    self.repo.end_run(self.run_id, int(self.now()))
+                    log.info("paper run %s ended: realised %.2f, %d fills / %d entries", self.run_id,
+                             self._day.realised, self._day.fills, self._day.entries_placed)
         return self.run_id
 
     def _bar(self, ts: int, candles: dict) -> None:
@@ -149,8 +169,11 @@ class PaperEngine(Engine):
             self.process_bar(ts, candles, now_ts=int(self.now()))
         except Exception:  # noqa: BLE001 - spec: log and keep the loop alive; nothing sits at a real broker
             log.exception("bar %s failed; continuing with the next bar", iso_ist(ts))
-        self.repo.set_last_bar_ts(self.run_id, ts)
-        self._write_daily_row(date_of(ts))
+        try:
+            self.repo.set_last_bar_ts(self.run_id, ts)
+            self._write_daily_row(date_of(ts))
+        except Exception:  # noqa: BLE001 - a SQLite hiccup must not take the loop down; a restart replays this bar
+            log.exception("bookkeeping for bar %s failed; continuing", iso_ist(ts))
 
     def _sleep_until(self, wake_ts: float) -> None:
         """Sleep in short slices so a stop request is honoured within a second."""

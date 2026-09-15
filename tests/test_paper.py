@@ -92,7 +92,7 @@ def test_late_start_catches_up_in_one_fetch_and_drops_stale_signals(repo, tmp_pa
 
 
 def test_stop_and_resume_matches_a_continuous_run(repo, tmp_path):
-    cfg = make_config(tmp_path, risk={"cooldown_bars": 0})   # cooldowns are not persisted across a restart
+    cfg = make_config(tmp_path)   # default cooldown of 3 bars: resume must restore it from the closed rows
     market = _market()
     warm = _warm(market)
     _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="cont").run(warm)
@@ -165,7 +165,7 @@ def test_a_failing_bar_is_logged_and_the_loop_continues(repo, tmp_path, caplog, 
 def test_resume_replays_stored_bars_past_the_last_processed_one(repo, tmp_path):
     """The CLI's start-up fetch stores today's bars up to now before the engine resumes. Those past
     runs.last_bar_ts were never seen by the broker, so they must be replayed, not warmed away."""
-    cfg = make_config(tmp_path, risk={"cooldown_bars": 0})
+    cfg = make_config(tmp_path)
     market = _market()
     warm = _warm(market)
     _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="cont").run(warm)
@@ -192,3 +192,54 @@ def test_resume_replays_stored_bars_past_the_last_processed_one(repo, tmp_path):
     assert _trades(repo, "split") == _trades(repo, "cont")
     assert any(r["opened_at"] <= last < r["closed_at"] for r in repo.list_positions("cont")), \
         "the scenario must have a position open across the stop for the test to mean anything"
+
+
+def test_an_open_run_started_after_the_close_settles_and_ends(repo, tmp_path):
+    """A process that died mid-session leaves the run open; starting it after 15:30 must replay the
+    missed bars (stale, so no entries), square off and end it rather than leave positions open forever."""
+    cfg = make_config(tmp_path)
+    market = _market()
+    warm = _warm(market)
+    t = FakeTime(ist_epoch(TODAY, "09:00"))
+    first = _engine(repo, cfg, market, t, run_id="crashed")
+    stop_at = ist_epoch(TODAY, "11:30")
+
+    def sleep_then_stop(seconds):
+        t.sleep(seconds)
+        if t.t >= stop_at:
+            first.request_stop()
+
+    first.sleep = sleep_then_stop
+    first.run(warm)
+    assert repo.get_run("crashed")["ended_at"] is None
+    assert repo.open_positions("crashed"), "the scenario needs a position open at the stop"
+
+    evening = FakeTime(ist_epoch(TODAY, "15:35"))
+    stored_today = repo.load_candles(["A", "B"], 5, OPEN, 2_000_000_000)
+    assert _engine(repo, cfg, market, evening, run_id="crashed").run(warm + stored_today) == "crashed"
+    run = repo.get_run("crashed")
+    assert run["ended_at"] is not None and run["last_bar_ts"] == ist_epoch(TODAY, "15:25")
+    assert repo.open_positions("crashed") == []
+    assert repo.rejection_counts("crashed").get("stale", 0) > 0
+    assert all(r["opened_at"] <= stop_at + 300 for r in repo.list_positions("crashed")), "no entries from stale bars"
+
+
+def test_bookkeeping_failure_does_not_stop_the_loop(repo, tmp_path, caplog, monkeypatch):
+    cfg = make_config(tmp_path)
+    market = _market()
+    eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="db-hiccup")
+    real = repo.set_last_bar_ts
+    calls = []
+
+    def flaky(run_id, ts):
+        calls.append(ts)
+        if len(calls) == 1:
+            raise RuntimeError("database is locked")
+        return real(run_id, ts)
+
+    monkeypatch.setattr(repo, "set_last_bar_ts", flaky)
+    with caplog.at_level(logging.ERROR, logger="tradebot.paper"):
+        eng.run(_warm(market))
+    assert "bookkeeping for bar" in caplog.text
+    assert repo.get_run("db-hiccup")["ended_at"] is not None
+    assert repo.get_run("db-hiccup")["last_bar_ts"] == ist_epoch(TODAY, "15:25")
