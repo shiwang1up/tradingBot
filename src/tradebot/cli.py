@@ -1,6 +1,7 @@
-"""Command-line entry point: fetch-data, backtest, report. Paper/live/flatten arrive in Plan 3."""
+"""Command-line entry point: fetch-data, backtest, report, estimate-ai, paper. Live trading arrives in the live plan."""
 from __future__ import annotations
 
+import signal as os_signal
 import sqlite3
 import time
 from dataclasses import replace as dc_replace
@@ -17,10 +18,12 @@ from tradebot.ai.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT, render_candidates
 from tradebot.config import Config, load_config
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
+from tradebot.data.live import LiveBarSource
 from tradebot.data.universe import load_universe
 from tradebot.engine.clock import SessionClock, date_of, ist_epoch
 from tradebot.engine.logsetup import setup_logging
 from tradebot.engine.loop import BacktestEngine
+from tradebot.engine.paper import PaperEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.execution.groww_adapter import GrowwAdapter, is_non_retryable
 from tradebot.report.compare import Prices, build_compare, format_compare
@@ -233,6 +236,97 @@ def _estimate_candidate(cfg: Config, r, window) -> Candidate:
 def _prices(cfg: Config) -> Prices:
     return Prices(cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok,
                   cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok)
+
+
+def _warm_fetch(cfg: Config, adapter, repo: Repo, symbols: list, exchange: str, clock: SessionClock,
+                now_ts: int) -> list:
+    """Bring the candle cache up to the last completed bar before starting paper. One symbol's failure
+    does not stop the others; auth failures are fatal. Returns the symbols that failed."""
+    failed = []
+    interval = cfg.execution.interval_minutes
+    for sym in symbols:
+        try:
+            fetch_incremental(repo, adapter.fetch_candles, [sym], exchange, interval, 10, now_ts,
+                              keep=lambda cd: clock.in_session(cd.ts))
+        except Exception as e:  # noqa: BLE001 - isolate per symbol; auth errors are fatal
+            if _is_fatal_auth(e):
+                raise
+            failed.append(sym)
+            click.echo(f"warm-up fetch failed for {sym}: {type(e).__name__}: {e}", err=True)
+    return failed
+
+
+def _warm_candles(repo: Repo, symbols: list, interval: int, now_ts: int, n: int) -> list:
+    """The last `n` stored bars per symbol up to now, today's included: PaperEngine treats warmed
+    bars from today as processed on a new run and trims them to the resume point on a restart."""
+    out = []
+    for sym in symbols:
+        out.extend(repo.load_candles([sym], interval, now_ts - 30 * 86400, now_ts)[-n:])
+    return out
+
+
+@main.command()
+@click.option("--strategy", "strategy_name", default="ema_rsi", show_default=True)
+@click.option("--run-id", default=None, help="Defaults to paper-<today>; a run resumes if it exists and has not ended")
+@click.option("--ai", "ai_filter", default=None, type=click.Choice(["stub", "claude", "claude_cached"]),
+              help="Override ai.filter from config for this session")
+@click.pass_obj
+def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Optional[str]) -> None:
+    """Paper-trade today's session on live 5-minute REST bars. Places no real orders: fills and exits
+    are simulated exactly as in backtest. Ctrl-C finishes the current bar and leaves the run resumable."""
+    if strategy_name not in cfg.strategy:
+        raise click.ClickException(f"no config for strategy '{strategy_name}'")
+    params = strategy_params(cfg.strategy, strategy_name)
+    if params.get("product", "MIS") != "MIS":
+        raise click.ClickException("paper mode supports MIS (intraday) strategies only; set product: MIS")
+    adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret, cfg.secrets.groww_api_secret)
+    interval = cfg.execution.interval_minutes
+    clock = SessionClock(cfg.session, interval)
+    now = int(time.time())
+    today = date_of(now)
+    run_id = run_id or f"paper-{today.isoformat()}"
+    repo = Repo(connect(cfg.paths.db))
+    existing = repo.get_run(run_id)
+    if existing is not None and existing["mode"] != "paper":
+        raise click.ClickException(f"run '{run_id}' exists and is not a paper run; pick another --run-id")
+    resumable = existing is not None and existing["ended_at"] is None
+    if not clock.is_trading_day(today) or (now >= clock.close_ts(today) and not resumable):
+        click.echo(f"nothing to trade: {today} is not a trading day or the session has closed")
+        return
+    log_path = setup_logging(cfg.paths.logs, run_id=run_id)
+    path = Path(cfg.paths.instruments)
+    if not _instruments_fresh(path):
+        click.echo("downloading instrument master")
+        download_instruments(path)
+    symbols, lots, exchange = _symbols_and_lots(cfg, require_instruments=True)
+    adapter.client  # log in once, here, so a credential problem aborts before anything else
+    click.echo(f"logged in to Groww ({adapter.flow} flow); paper mode places no orders")
+    failed = _warm_fetch(cfg, adapter, repo, symbols, exchange, clock, now)
+    if failed:
+        click.echo(f"warm-up fetch failed for {len(failed)} symbol(s); they warm up live", err=True)
+    warm = _warm_candles(repo, symbols, interval, now, cfg.data.warmup_bars)
+    source = LiveBarSource(adapter.fetch_candles, repo, symbols, exchange, interval,
+                           cfg.data.official_fetch_concurrency, clock, budget_sec=cfg.execution.bar_deadline_sec)
+    strategy = build_strategy(strategy_name, params)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
+    ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
+    ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
+    engine = PaperEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id,
+                         now=time.time, sleep=time.sleep)
+
+    def _stop(signum, frame):
+        click.echo("stop requested; finishing the current bar (positions stay open on the books)", err=True)
+        engine.request_stop()
+
+    for sig in (os_signal.SIGINT, os_signal.SIGTERM):
+        os_signal.signal(sig, _stop)
+    rid = engine.run(warm)
+    if rid is None:
+        click.echo("nothing to trade: the session closed while warming up")
+        return
+    click.echo(format_summary(build_summary(repo, rid)))
+    if log_path:
+        click.echo(f"log: {log_path}")
 
 
 @main.command("estimate-ai")

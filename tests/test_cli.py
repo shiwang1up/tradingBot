@@ -1,9 +1,10 @@
 from datetime import date, timedelta
 from pathlib import Path
 
+import yaml
 from click.testing import CliRunner
 
-from tests.helpers import make_config, synth_candles
+from tests.helpers import FakeTime, make_config, synth_candles
 from tradebot import cli
 from tradebot.engine.clock import ist_epoch, to_ist
 from tradebot.store.db import connect
@@ -455,3 +456,66 @@ def test_estimate_ai_api_failure_is_a_clean_error(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
     res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run")
     assert res.exit_code == 1 and res.output.strip().endswith("Error: API error 400: bad schema")
+
+
+PRIOR = [date(2026, 9, 10), date(2026, 9, 11)]
+TODAY = date(2026, 9, 14)
+
+
+def _paper_setup(tmp_path, monkeypatch, fetch):
+    make_config(tmp_path)
+    (tmp_path / ".env").write_text("GROWW_API_KEY=k\nGROWW_TOTP_SECRET=s\n")
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A, B]\n")
+    hdr = "exchange,exchange_token,trading_symbol,segment,instrument_type,lot_size,tick_size,buy_allowed,sell_allowed\n"
+    (tmp_path / "instruments.csv").write_text(hdr + "".join(f"NSE,{i},{s},CASH,EQ,1,0.05,1,1\n" for i, s in enumerate("AB")))
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+
+    class Fake:
+        flow = "fake"
+        client = object()
+
+        def __init__(self, key, secret, api_secret=""):
+            pass
+
+        def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
+            return fetch(symbol, exchange, start_ts, end_ts, interval)
+
+    monkeypatch.setattr(cli, "GrowwAdapter", Fake)
+
+
+def test_paper_refuses_cnc_strategies(tmp_path, monkeypatch):
+    _paper_setup(tmp_path, monkeypatch, lambda *a: [])
+    p = tmp_path / "config.yaml"
+    raw = yaml.safe_load(p.read_text())
+    raw["strategy"]["ema_rsi"]["product"] = "CNC"
+    p.write_text(yaml.safe_dump(raw))
+    res = _invoke(tmp_path, "paper")
+    assert res.exit_code != 0
+    assert "MIS" in res.output
+
+
+def test_paper_outside_session_exits_cleanly_without_a_run(tmp_path, monkeypatch):
+    _paper_setup(tmp_path, monkeypatch, lambda *a: [])
+    saturday = FakeTime(ist_epoch(date(2026, 9, 12), "10:00"))
+    monkeypatch.setattr(cli.time, "time", saturday.now)
+    res = _invoke(tmp_path, "paper", "--run-id", "p1")
+    assert res.exit_code == 0, res.output
+    assert "nothing to trade" in res.output
+    assert Repo(connect(make_config(tmp_path).paths.db)).get_run("p1") is None
+
+
+def test_paper_full_day_end_to_end(tmp_path, monkeypatch):
+    market = {"A": synth_candles("A", PRIOR + [TODAY]), "B": synth_candles("B", PRIOR + [TODAY], phase=4.0, seed=99)}
+    _paper_setup(tmp_path, monkeypatch, lambda sym, ex, s, e, i: [c for c in market[sym] if s <= c.ts <= e])
+    t = FakeTime(ist_epoch(TODAY, "09:00"))
+    monkeypatch.setattr(cli.time, "time", t.now)
+    monkeypatch.setattr(cli.time, "sleep", t.sleep)
+    res = _invoke(tmp_path, "paper", "--run-id", "p2", "--ai", "stub")
+    assert res.exit_code == 0, res.output
+    assert "Run p2 (paper)" in res.output
+    repo = Repo(connect(make_config(tmp_path).paths.db))
+    run = repo.get_run("p2")
+    assert run["mode"] == "paper" and run["ended_at"] is not None
+    assert run["last_bar_ts"] == ist_epoch(TODAY, "15:25")
+    assert repo.latest_candle_ts("A", 5) == ist_epoch(TODAY, "15:25")     # the day's bars grew the cache
+    assert repo.list_positions("p2"), "the warm-up from the prior days must make trades possible today"
