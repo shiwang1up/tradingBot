@@ -1,13 +1,20 @@
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from tests.helpers import make_config, synth_candles
 from tradebot import cli
+from tradebot.engine.clock import ist_epoch, to_ist
 from tradebot.store.db import connect
 from tradebot.store.repo import Repo
 from tradebot.types import Candle, Signal
+
+
+def _bar_ts(end_ts):
+    """An in-session bar (10:00 IST the day before `end_ts`): fetch-data keeps only session bars, so a
+    bar stamped 'now' would vanish whenever the tests run outside market hours."""
+    return ist_epoch(to_ist(end_ts).date() - timedelta(days=1), "10:00")
 
 
 def _setup(tmp_path):
@@ -126,7 +133,7 @@ def test_fetch_data_isolates_symbol_failures(tmp_path, monkeypatch):
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
             if symbol == "B":
                 raise type("GrowwAPINotFoundException", (Exception,), {})("no such symbol")
-            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
+            return [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 10)]
 
     monkeypatch.setattr(cli, "GrowwAdapter", Flaky)
     res = _invoke(tmp_path, "fetch-data", "--days", "5", "--sleep", "0")
@@ -171,7 +178,7 @@ def test_env_is_read_next_to_config_or_from_override(tmp_path, monkeypatch):
             seen["key"] = k
 
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
-            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
+            return [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 10)]
 
     (cfg_dir / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
     (cfg_dir / "instruments.csv").write_text(
@@ -212,7 +219,7 @@ def test_fetch_data_uses_adapter_and_instruments(tmp_path, monkeypatch):
 
         def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
             calls.append((symbol, exchange, interval))
-            return [Candle(symbol, end_ts - (end_ts % 300), 1, 2, 0.5, 1.5, 10)]
+            return [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 10)]
 
     monkeypatch.setattr(cli, "GrowwAdapter", FakeAdapter)
     monkeypatch.setattr(cli, "download_instruments", lambda p: p)

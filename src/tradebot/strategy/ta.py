@@ -222,6 +222,7 @@ class Patterns:
         self.double_bottom = 0
         self._pivot_highs: list = []   # (index, price)
         self._pivot_lows: list = []
+        self._fired: dict = {}         # pivot pair -> already reported, so each pattern completes once
         self._i = -1
 
     def update(self, c: Candle) -> None:
@@ -251,6 +252,7 @@ class Patterns:
         self.double_bottom = self._double(self._pivot_lows, c, top=False)
 
     def _double(self, pivots: list, c: Candle, top: bool) -> int:
+        """1 on the bar the close first breaks the neck between the last two matching pivots."""
         if len(pivots) < 2:
             return 0
         (i1, p1), (i2, p2) = pivots[-2], pivots[-1]
@@ -259,18 +261,59 @@ class Patterns:
         between = [b for k, b in enumerate(self._bars) if i1 <= self._i - (len(self._bars) - 1 - k) <= i2]
         if not between:
             return 0
+        key = (top, i1, i2)
+        if key in self._fired:
+            return 0
         if top:
             neck = min(b.low for b in between)
-            return int(c.close < neck)
-        neck = max(b.high for b in between)
-        return int(c.close > neck)
+            broke = c.close < neck
+        else:
+            neck = max(b.high for b in between)
+            broke = c.close > neck
+        if broke:
+            self._fired = {key: True}  # only the newest pair can fire, so older keys are dead weight
+        return int(broke)
+
+
+def _trend(fast: Optional[float], slow: Optional[float]) -> int:
+    if fast is None or slow is None or fast == slow:
+        return 0
+    return 1 if fast > slow else -1
+
+
+INDICATOR_INT_PARAMS = ("ema_fast", "ema_slow", "rsi_period", "atr_period", "macd_fast", "macd_slow", "macd_signal",
+                        "adx_period", "bb_period", "volume_period", "levels_period")
+INDICATOR_FLOAT_PARAMS = ("bb_mult", "pattern_tolerance_pct")
+
+
+def validate_indicator_params(params: Optional[dict]) -> dict:
+    """Strict check of the `strategy.indicators` section: known keys only, whole positive periods,
+    non-negative floats. Raises ValueError at load time rather than inside the first bar."""
+    p = dict(params or {})
+    unknown = set(p) - set(INDICATOR_INT_PARAMS) - set(INDICATOR_FLOAT_PARAMS)
+    if unknown:
+        raise ValueError(f"strategy.indicators has unknown keys {sorted(unknown)}")
+    out: dict = {}
+    for k in INDICATOR_INT_PARAMS:
+        if k in p:
+            v = p[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != int(v) or v < 1:
+                raise ValueError(f"strategy.indicators.{k} must be a whole number >= 1, got {v!r}")
+            out[k] = int(v)
+    for k in INDICATOR_FLOAT_PARAMS:
+        if k in p:
+            v = p[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise ValueError(f"strategy.indicators.{k} must be a number >= 0, got {v!r}")
+            out[k] = float(v)
+    return out
 
 
 class IndicatorSet:
     """One bundle per symbol. `snapshot()` is a flat dict of floats/ints with stable keys."""
 
     def __init__(self, params: Optional[dict] = None):
-        p = params or {}
+        p = validate_indicator_params(params)
         self.ema_fast, self.ema_slow = EMA(int(p.get("ema_fast", 20))), EMA(int(p.get("ema_slow", 50)))
         self.rsi = RSI(int(p.get("rsi_period", 14)))
         self.atr = ATR(int(p.get("atr_period", 14)))
@@ -310,7 +353,7 @@ class IndicatorSet:
             return {}
         return {
             "ema20": f(self.ema_fast.value), "ema50": f(self.ema_slow.value),
-            "trend": 0 if not self.ema_slow.ready else (1 if self.ema_fast.value > self.ema_slow.value else -1),
+            "trend": _trend(self.ema_fast.value, self.ema_slow.value) if self.ema_slow.ready else 0,
             "macd_hist": f(self.macd.hist), "macd_turned": self.macd.hist_turned,
             "mom_1": f(self.mom[1].value), "mom_5": f(self.mom[5].value), "mom_60": f(self.mom[60].value),
             "adx": f(self.adx.value), "di_plus": f(self.adx.di_plus), "di_minus": f(self.adx.di_minus),

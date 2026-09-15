@@ -29,7 +29,7 @@ from tradebot.risk.engine import PortfolioState, evaluate
 from tradebot.risk.killswitch import KillState, read_kill_switch
 from tradebot.store.repo import Repo
 from tradebot.strategy.base import Strategy
-from tradebot.strategy.ta import IndicatorSet
+from tradebot.strategy.ta import IndicatorSet, validate_indicator_params
 from tradebot.types import ApprovedOrder, Candidate, Candle, Rejection, Signal
 
 log = logging.getLogger("tradebot.engine")
@@ -62,6 +62,7 @@ class BacktestEngine:
         self.interval_sec = cfg.execution.interval_minutes * 60
         self._history: dict[str, deque[Candle]] = {}
         self._indicators: dict[str, IndicatorSet] = {}  # shared technical context, one set per symbol
+        self._indicator_params = validate_indicator_params(cfg.strategy.get("indicators"))  # fail at start, not mid-run
         self._last_close: dict[str, float] = {}
         self._cooldown_until: dict[str, int] = {}
         self.disabled_strategies: set[str] = set()
@@ -134,7 +135,9 @@ class BacktestEngine:
         for sym, c in candles.items():
             self._last_close[sym] = c.close
             self._history.setdefault(sym, deque(maxlen=self.cfg.ai.candles_in_context)).append(c)
-            self._indicators.setdefault(sym, IndicatorSet(self.cfg.strategy.get("indicators"))).update(c)
+            if sym not in self._indicators:  # not setdefault: that would build a throwaway set every bar
+                self._indicators[sym] = IndicatorSet(self._indicator_params)
+            self._indicators[sym].update(c)
 
         self._record(self.broker.on_bar(ts, candles))
         if not self._day.squared_off and self.clock.square_off_due(ts):

@@ -27,7 +27,7 @@ from tradebot.report.compare import Prices, build_compare, format_compare
 from tradebot.report.summary import build_summary, format_summary
 from tradebot.store.db import SchemaVersionError, connect
 from tradebot.store.repo import Repo
-from tradebot.strategy.ema_rsi import build_strategy
+from tradebot.strategy.ema_rsi import build_strategy, strategy_params
 from tradebot.strategy.ta import IndicatorSet
 from tradebot.types import Candidate, Signal
 
@@ -186,7 +186,7 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     if repo.get_run(run_id) is not None:
         raise click.ClickException(f"run '{run_id}' already exists; pick another --run-id")
     log_path = setup_logging(cfg.paths.logs, run_id=run_id)
-    strategy = build_strategy(strategy_name, cfg.strategy[strategy_name])
+    strategy = build_strategy(strategy_name, strategy_params(cfg.strategy, strategy_name))
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
     clock = SessionClock(cfg.session, interval)

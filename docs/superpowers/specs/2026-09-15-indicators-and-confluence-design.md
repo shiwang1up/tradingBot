@@ -59,13 +59,15 @@ rsi_overbought: 70, rsi_oversold: 30, pct_b_high: 0.8, pct_b_low: 0.2
 atr_stop_mult: 1.5, reward_risk: 2.0, min_stop_pct: 0.1, product: MIS
 ```
 
-Votes per bar (each in {-1, 0, +1} times its weight): trend (+1 if EMA20 > EMA50), macd (sign of the
-histogram, only counted when it turned this bar or agrees with trend), momentum (+1 when the 60-bar
+Votes per bar (each in {-1, 0, +1} times its weight): trend (+1 if EMA20 > EMA50), macd (the turn direction on a
+bar the histogram turned, else the sign of the histogram when it agrees with trend, else 0), momentum (+1 when the 60-bar
 sign agrees with the 5-bar and 1-bar signs, -1 when all negative, else 0), breakout (+1 on a breakout
 with volume spike above the minimum, -1 on a breakdown with volume), pattern (+1 bullish engulfing or
 double bottom, -1 bearish engulfing or double top), exhaustion (applied against the trade direction
 when RSI and %B are both extreme on that side). A signal fires when the score crosses the threshold
-and did not on the previous bar (no repeats while the score stays above it). Stop and target as the
+and did not on the previous bar (no repeats while the score stays above it; the first ready bar never
+fires). An ADX-gated bar counts as score 0, so the first trending bar can fire when the score built up
+while ADX was low. Double top/bottom flags are 1 only on the bar the neck first breaks for that pivot pair. Stop and target as the
 EMA/RSI strategy. Warm-up: ready when the ADX and the 100-bar levels are ready.
 
 `build_strategy("confluence", params)`; CLI `--strategy confluence`. Backtest on the real window and

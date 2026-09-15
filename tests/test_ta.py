@@ -141,6 +141,8 @@ def test_double_top_and_bottom():
     assert flags[-1] == 0  # second peak confirmed but the neck (98 low) not broken yet
     p.update(_c(99, 99.2, 96.5, 96.6))  # close below the trough between the peaks
     assert p.double_top == 1 and p.double_bottom == 0
+    p.update(_c(96.6, 96.8, 96.0, 96.2))  # still below the neck: the pattern completed last bar, not again
+    assert p.double_top == 0
     q = Patterns(wing=2, tolerance_pct=0.5, min_gap=4)
     inv = [200 - x for x in path]
     for lv in inv:
@@ -169,3 +171,28 @@ def test_indicator_set_snapshot_keys_and_readiness():
         assert isinstance(snap[k], int)
     assert snap["trend"] in (-1, 1) and 0 <= snap["bar_position"] <= 1
     assert IndicatorSet().snapshot() == {}
+
+
+def test_trend_is_zero_when_emas_are_equal():
+    from tradebot.strategy.ta import _trend
+    assert _trend(1.0, 1.0) == 0 and _trend(None, 1.0) == 0 and _trend(2.0, 1.0) == 1 and _trend(1.0, 2.0) == -1
+    s = IndicatorSet({"ema_fast": 2, "ema_slow": 3})
+    for i in range(130):
+        s.update(_c(100, 100, 100, 100, ts=i * 300))
+    assert s.snapshot()["trend"] == 0  # a perfectly flat series votes neither way
+
+
+@pytest.mark.parametrize("bad", [
+    {"levels_periods": 100}, {"ema_fast": 20.7}, {"ema_fast": "20"}, {"ema_fast": 0}, {"ema_fast": True},
+    {"pattern_tolerance_pct": -0.1}, {"bb_mult": "2"},
+])
+def test_indicator_params_validated(bad):
+    from tradebot.strategy.ta import validate_indicator_params
+    with pytest.raises(ValueError):
+        validate_indicator_params(bad)
+
+
+def test_indicator_params_coerced():
+    from tradebot.strategy.ta import validate_indicator_params
+    assert validate_indicator_params(None) == {}
+    assert validate_indicator_params({"ema_fast": 20.0, "bb_mult": 2}) == {"ema_fast": 20, "bb_mult": 2.0}
