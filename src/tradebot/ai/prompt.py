@@ -39,7 +39,7 @@ RESPONSE_SCHEMA = {
                     "index": {"type": "integer"},
                     "symbol": {"type": "string"},
                     "approve": {"type": "boolean"},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "confidence": {"type": "number"},  # the API rejects minimum/maximum here; the prompt and _clamp bound it
                     "reason": {"type": "string"},
                 },
                 "required": ["index", "symbol", "approve", "confidence", "reason"],

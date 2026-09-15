@@ -67,7 +67,7 @@ def test_response_schema_shape():
     item = RESPONSE_SCHEMA["properties"]["decisions"]["items"]
     assert set(item["required"]) == {"index", "symbol", "approve", "confidence", "reason"}
     assert item["additionalProperties"] is False
-    assert item["properties"]["confidence"] == {"type": "number", "minimum": 0, "maximum": 1}
+    assert item["properties"]["confidence"] == {"type": "number"}  # no min/max: unsupported by structured outputs
 
 
 def test_system_prompt_states_the_things_the_model_needs():

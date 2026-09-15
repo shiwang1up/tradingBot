@@ -11,7 +11,7 @@ from typing import Optional
 import click
 import requests
 
-from tradebot.ai.claude_client import ClaudeClient
+from tradebot.ai.claude_client import ClaudeClient, ClaudeReviewError
 from tradebot.ai.filter import AIFilterAborted, build_filter
 from tradebot.ai.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT, render_candidates
 from tradebot.config import Config, load_config
@@ -32,7 +32,7 @@ from tradebot.types import Candidate, Signal
 
 # Operational failures that deserve a one-line message. sqlite3 programming errors (bad SQL) still traceback.
 _FRIENDLY = (ValueError, SchemaVersionError, sqlite3.OperationalError, sqlite3.DatabaseError,
-             requests.RequestException, NotImplementedError, AIFilterAborted)
+             requests.RequestException, NotImplementedError, AIFilterAborted, ClaudeReviewError)
 _FATAL_AUTH_CODES = {"401", "403"}
 
 

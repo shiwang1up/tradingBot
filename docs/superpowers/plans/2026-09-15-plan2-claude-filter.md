@@ -493,7 +493,7 @@ def test_response_schema_shape():
     item = RESPONSE_SCHEMA["properties"]["decisions"]["items"]
     assert set(item["required"]) == {"index", "symbol", "approve", "confidence", "reason"}
     assert item["additionalProperties"] is False
-    assert item["properties"]["confidence"] == {"type": "number", "minimum": 0, "maximum": 1}
+    assert item["properties"]["confidence"] == {"type": "number"}  # no min/max: unsupported by structured outputs
 
 
 def test_system_prompt_states_the_things_the_model_needs():
@@ -551,7 +551,7 @@ RESPONSE_SCHEMA = {
                     "index": {"type": "integer"},
                     "symbol": {"type": "string"},
                     "approve": {"type": "boolean"},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "confidence": {"type": "number"},  # the API rejects minimum/maximum here; the prompt and _clamp bound it
                     "reason": {"type": "string"},
                 },
                 "required": ["index", "symbol", "approve", "confidence", "reason"],
@@ -1756,13 +1756,33 @@ def test_estimate_ai_zero_approved_and_exclusive_report_flags(tmp_path):
     assert res.exit_code == 1 and "unknown run" in res.output
     both = _invoke(tmp_path, "report", "--run", "a", "--compare", "a", "b")
     assert both.exit_code == 1 and "mutually exclusive" in both.output
+
+
+def test_estimate_ai_api_failure_is_a_clean_error(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    assert ok.exit_code == 0, ok.output
+    from tradebot import cli as cli_mod
+    from tradebot.ai.claude_client import ClaudeReviewError
+
+    class Broken:
+        def __init__(self, *a, **k):
+            pass
+
+        def count_tokens(self, *a, **k):
+            raise ClaudeReviewError("API error 400: bad schema")
+
+    monkeypatch.setattr(cli_mod, "ClaudeClient", Broken)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run")
+    assert res.exit_code == 1 and res.output.strip().endswith("Error: API error 400: bad schema")
 ```
 
 - [ ] **Step 2: Run, expect failures**
 
 - [ ] **Step 3: Implement in `src/tradebot/cli.py`**
 
-Add imports (and change the existing `from tradebot.ai.filter import build_filter` to also import `AIFilterAborted`, then append `AIFilterAborted` to the `_FRIENDLY` tuple so a tripped circuit breaker prints a one-line error):
+Add imports (and change the existing `from tradebot.ai.filter import build_filter` to also import `AIFilterAborted`, then append `AIFilterAborted` and `ClaudeReviewError` (from `tradebot.ai.claude_client`) to the `_FRIENDLY` tuple so a tripped circuit breaker prints a one-line error):
 
 ```python
 from dataclasses import replace as dc_replace
