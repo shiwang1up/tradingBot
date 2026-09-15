@@ -51,7 +51,7 @@ class _DayCounters:
 
 class Engine:
     """Mode-independent per-bar cycle. BacktestEngine replays stored bars; PaperEngine (engine/paper.py)
-    feeds live bars on the wall clock. Everything below `run` is shared."""
+    feeds live bars on the wall clock. Everything here is shared; only the loop that calls process_bar differs."""
 
     def __init__(self, cfg: Config, repo: Repo, strategies: list[Strategy], broker: Broker, ai_filter: AIFilter,
                  clock: SessionClock, lot_sizes: dict[str, int], run_id: str, mode: str):
