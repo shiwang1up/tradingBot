@@ -7,7 +7,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Union
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class SchemaVersionError(RuntimeError):
@@ -24,6 +24,9 @@ MIGRATIONS = {
         "ALTER TABLE ai_decisions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE ai_decisions ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE ai_decisions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0",
+    ],
+    2: [
+        "ALTER TABLE runs ADD COLUMN last_bar_ts INTEGER",
     ],
 }
 

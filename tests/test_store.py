@@ -121,7 +121,7 @@ def test_file_backed_connect_uses_wal_persists_and_versions(tmp_path):
         connect(path)
 
 
-def test_v1_database_is_migrated_to_v2(tmp_path):
+def test_v1_database_is_migrated_to_current(tmp_path):
     path = tmp_path / "old.db"
     raw = sqlite3.connect(str(path))
     raw.executescript("""
@@ -137,7 +137,47 @@ def test_v1_database_is_migrated_to_v2(tmp_path):
     conn = connect(path)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_decisions)")}
     assert {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+
+
+def test_v2_database_is_migrated_to_v3(tmp_path):
+    path = tmp_path / "v2.db"
+    raw = sqlite3.connect(str(path))
+    raw.executescript("""
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
+                           ended_at INTEGER, config_json TEXT NOT NULL);
+        INSERT INTO runs VALUES ('r', 'backtest', 0, NULL, '{}');
+        PRAGMA user_version = 2;
+    """)
+    raw.commit()
+    raw.close()
+    conn = connect(path)
+    assert "last_bar_ts" in {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    assert conn.execute("SELECT last_bar_ts FROM runs WHERE run_id='r'").fetchone()[0] is None
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    conn.close()
+
+
+def test_last_bar_ts_open_positions_and_pending_orders(repo):
+    repo.create_run("p", "paper", 0, "{}")
+    assert repo.get_run("p")["last_bar_ts"] is None
+    repo.set_last_bar_ts("p", 1000)
+    assert repo.get_run("p")["last_bar_ts"] == 1000
+
+    sid = repo.insert_signal("p", Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 900))
+    repo.insert_order("p", "c1", sid, "ENTRY", "BUY", 10, 100.0, "PENDING", 900)
+    sid2 = repo.insert_signal("p", Signal("ema_rsi", "B", "SHORT", 50.0, 51.0, 48.0, "MIS", 900))
+    repo.insert_order("p", "c2", sid2, "ENTRY", "SELL", 5, 50.0, "PENDING", 900)
+    repo.update_order("p", "c2", "FILLED", 1200)
+    pend = repo.pending_orders("p")
+    assert [(r["client_id"], r["strategy"], r["symbol"], r["direction"], r["qty"], r["entry"], r["stop"],
+             r["target"], r["product"], r["bar_ts"]) for r in pend] == [
+        ("c1", "ema_rsi", "A", "LONG", 10, 100.0, 99.0, 102.0, "MIS", 900)]
+
+    open_id = repo.insert_position("p", Position("B", "MIS", "SHORT", 5, 50.0, 51.0, 48.0, 1200, "c2", "ema_rsi"))
+    done_id = repo.insert_position("p", Position("C", "MIS", "LONG", 1, 10.0, 9.0, 12.0, 600, "c3", "ema_rsi"))
+    repo.close_position(done_id, 900, 9.0, "STOP", -1.0)
+    assert [r["id"] for r in repo.open_positions("p")] == [open_id]
 
 
 def test_ai_cache_roundtrip(repo):
