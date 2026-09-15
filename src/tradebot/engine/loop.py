@@ -141,13 +141,12 @@ class Engine:
         signals = self._run_strategies(candles)
         if not signals:
             return
-        late_by = 0 if now_ts is None else now_ts - (ts + self.interval_sec)
-        if late_by > self.cfg.execution.bar_deadline_sec:
+        if now_ts is not None and now_ts - (ts + self.interval_sec) > self.cfg.execution.bar_deadline_sec:
             for _, sig in signals:
                 sid = self.repo.insert_signal(self.run_id, sig)
                 self.repo.insert_risk_decision(self.run_id, sid, False, "stale", 0)
-            log.warning("bar %s handed in %ds after its close; %d signal(s) dropped as stale",
-                        iso_ist(ts), late_by, len(signals))
+            log.warning("bar %s handed in %ds after its close; %d signal(s) dropped as stale: %s", iso_ist(ts),
+                        now_ts - (ts + self.interval_sec), len(signals), sorted({sig.symbol for _, sig in signals}))
             return
         if not self.clock.entries_allowed(ts):
             # Audit trail: every dropped signal gets a row (spec 6), even outside entry hours.
