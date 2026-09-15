@@ -1352,18 +1352,22 @@ git commit -m "feat(engine): persist AI token usage per decision"
 
 ```python
 # tests/test_compare.py
+import json
+
 import pytest
 
 from tradebot.report.compare import Prices, build_compare, format_compare
 from tradebot.types import Position, Signal, make_client_id
 
 P = Prices(5.0, 25.0, 0.5, 6.25)
+CFG = json.dumps({"strategy": {"ema_rsi": {"fast": 9}}, "session": {"open": "09:15"}, "capital": 100000.0,
+                  "risk": {"per_trade_pct": 1.0}, "execution": {"interval_minutes": 5}})
 
 
-def _seed_pair(repo):
+def _seed_pair(repo, cfg_b=CFG):
     """Run A (stub) took three trades; run B (claude) rejected two of them and approved one."""
-    repo.create_run("A", "backtest", 0, "{}")
-    repo.create_run("B", "backtest", 0, "{}")
+    repo.create_run("A", "backtest", 0, CFG)
+    repo.create_run("B", "backtest", 0, cfg_b)
     trades = [("X", 1000, 50.0), ("Y", 1300, -30.0), ("Z", 1600, 20.0)]  # symbol, bar_ts, pnl in A
     for sym, ts, pnl in trades:
         sig = Signal("ema_rsi", sym, "LONG", 100.0, 99.0, 102.0, "MIS", ts)
@@ -1379,10 +1383,15 @@ def _seed_pair(repo):
         if approve:
             pid = repo.insert_position("B", Position(sym, "MIS", "LONG", 10, 100.0, 99.0, 102.0, ts + 300, cid, "ema_rsi"))
             repo.close_position(pid, ts + 900, 102.0, "TARGET", pnl)
-    # a signal Claude rejected that A never filled (unfilled in A): must not count as avoided PnL
+    # a signal Claude rejected that A never filled: must not count as avoided PnL
     sig = Signal("ema_rsi", "W", "LONG", 100.0, 99.0, 102.0, "MIS", 1900)
     repo.insert_ai_decision("A", repo.insert_signal("A", sig), "stub", True, "stub", 1.0, 0, None)
     repo.insert_ai_decision("B", repo.insert_signal("B", sig), "claude", False, "late", 0.4, 0, None)
+    # a signal Claude rejected whose A position is still open: reported as open, not unfilled
+    sig = Signal("ema_rsi", "V", "CNC", 100.0, 95.0, 110.0, "CNC", 2200)
+    repo.insert_ai_decision("A", repo.insert_signal("A", sig), "stub", True, "stub", 1.0, 0, None)
+    repo.insert_position("A", Position("V", "CNC", "LONG", 1, 100.0, 95.0, 110.0, 2500, make_client_id("ema_rsi", "V", 2200), "ema_rsi"))
+    repo.insert_ai_decision("B", repo.insert_signal("B", sig), "claude", False, "slow", 0.3, 0, None)
     repo.upsert_daily_pnl("A", "2026-09-14", 40.0, 0.0, 3, 3)
     repo.upsert_daily_pnl("B", "2026-09-14", 20.0, 0.0, 1, 1)
 
@@ -1390,28 +1399,64 @@ def _seed_pair(repo):
 def test_build_compare_attributes_rejected_pnl(repo):
     _seed_pair(repo)
     c = build_compare(repo, "A", "B", P)
-    assert c.a.run_id == "A" and c.b.run_id == "B"
-    assert c.rejected == 3 and c.rejected_with_position_in_a == 2
-    assert c.rejected_pnl_in_a == pytest.approx(20.0)      # +50 and -30 avoided: net +20 given up
+    assert c.a.run_id == "A" and c.b.run_id == "B" and c.warnings == []
+    assert (c.rejected, c.rejected_closed_in_a, c.rejected_open_in_a) == (4, 2, 1)
+    assert c.rejected_pnl_in_a == pytest.approx(20.0)      # +50 and -30 removed: net +20 the filter cost
     assert c.rejected_losses_avoided == pytest.approx(30.0) and c.rejected_wins_forgone == pytest.approx(50.0)
     assert c.total_pnl_delta == pytest.approx(20.0 - 40.0)
     assert c.calls == 3 and c.input_tokens == 3000 and c.output_tokens == 180
     assert (c.cache_read_tokens, c.cache_write_tokens) == (1500, 300)
     assert c.est_cost_usd == pytest.approx((3000 * 5.0 + 180 * 25.0 + 1500 * 0.5 + 300 * 6.25) / 1e6)
-    assert [r["symbol"] for r in c.rows] == ["X", "Y", "W"]
-    assert c.rows[2]["pnl_in_a"] is None
+    assert [(r["symbol"], r["status"]) for r in c.rows] == [("X", "closed"), ("Y", "closed"), ("W", "unfilled"), ("V", "open")]
+    assert c.rows[2]["pnl_in_a"] is None and c.rows[3]["pnl_in_a"] is None
 
 
 def test_format_compare_reads_sensibly(repo):
     _seed_pair(repo)
     text = format_compare(build_compare(repo, "A", "B", P))
-    assert "Rejected by Claude" in text and "X" in text and "chop" in text
+    assert "Rejected by Claude      4 signals: 2 closed in A, 1 still open in A, 1 unfilled in A" in text
+    assert "chop" in text and "unfilled" in text and "open" in text
     assert "Estimated cost" in text and "$0.0" in text
-    assert "Verdict" in text
+    assert "Verdict: mixed: the rejected signals were net winners" not in text  # delta negative, net positive
+    assert "Verdict: filter did not help on this window" in text
+
+
+def test_verdict_positive_branches(repo):
+    _seed_pair(repo)
+    repo.upsert_daily_pnl("B", "2026-09-14", 90.0, 0.0, 1, 1)  # B ends far ahead
+    repo.conn.execute("UPDATE positions SET pnl = 90.0 WHERE run_id='B'")
+    repo.conn.commit()
+    text = format_compare(build_compare(repo, "A", "B", P))
+    assert "Verdict: mixed: B earned more overall, but the rejected signals were net winners in A" in text
+    repo.conn.execute("UPDATE positions SET pnl = -60.0 WHERE run_id='A' AND symbol='X'")
+    repo.conn.commit()
+    text = format_compare(build_compare(repo, "A", "B", P))
+    assert "Verdict: filter helped" in text
+
+
+def test_compare_with_no_rejections_and_no_usage(repo):
+    repo.create_run("A", "backtest", 0, CFG)
+    repo.create_run("B", "backtest", 0, CFG)
+    c = build_compare(repo, "A", "B", P)
+    assert c.rejected == 0 and c.calls == 0 and c.est_cost_usd == 0.0 and c.rows == []
+    text = format_compare(c)
+    assert "Rejected by Claude      0 signals" in text and "Bar (IST)" not in text
+
+
+def test_compare_warns_on_config_mismatch_and_refuses_non_backtest(repo):
+    other = json.dumps({"strategy": {"ema_rsi": {"fast": 21}}, "session": {"open": "09:15"}, "capital": 100000.0,
+                        "risk": {"per_trade_pct": 1.0}, "execution": {"interval_minutes": 5}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert c.warnings == ["runs differ in 'strategy': the comparison may not be like-for-like"]
+    assert format_compare(c).splitlines()[1].startswith("WARNING: runs differ in 'strategy'")
+    repo.create_run("L", "live", 0, CFG)
+    with pytest.raises(ValueError, match="backtest runs only"):
+        build_compare(repo, "A", "L", P)
 
 
 def test_compare_requires_both_runs(repo):
-    repo.create_run("A", "backtest", 0, "{}")
+    repo.create_run("A", "backtest", 0, CFG)
     with pytest.raises(ValueError):
         build_compare(repo, "A", "missing", P)
 ```
@@ -1423,15 +1468,24 @@ def test_compare_requires_both_runs(repo):
 ```python
 """Stub-versus-Claude comparison (spec 14): the same signals, one run with every signal taken and
 one with Claude filtering, joined by the deterministic client id so the report can say what
-the rejected signals earned in the unfiltered run."""
+the rejected signals earned in the unfiltered run.
+
+Attribution caveat: run A's state diverges from run B's once their trades differ (capital, open
+positions, cooldowns), so a signal A skipped for its own reasons shows here as "unfilled" even
+though the filter had nothing to do with it. The most directly attributable figure is the PnL of
+the rejected signals in A; the total PnL delta also includes everything B did with the freed capital.
+"""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from tradebot.engine.clock import iso_ist
 from tradebot.report.summary import Summary, build_summary
 from tradebot.store.repo import Repo
 from tradebot.types import make_client_id
+
+COMPARABLE_KEYS = ("strategy", "session", "capital", "risk", "execution")
 
 
 @dataclass(frozen=True)
@@ -1452,10 +1506,11 @@ class Compare:
     a: Summary
     b: Summary
     rejected: int
-    rejected_with_position_in_a: int
-    rejected_pnl_in_a: float        # net PnL of rejected signals in run A (what the filter gave up or avoided)
-    rejected_losses_avoided: float  # sum of losses among rejected signals (positive number)
-    rejected_wins_forgone: float    # sum of wins among rejected signals
+    rejected_closed_in_a: int       # rejected signals that A traded to completion (the accounted ones)
+    rejected_open_in_a: int         # rejected signals whose A position is still open
+    rejected_pnl_in_a: float        # net PnL of the closed ones: positive means the filter cost money
+    rejected_losses_avoided: float  # sum of losses among them (positive number)
+    rejected_wins_forgone: float    # sum of wins among them
     total_pnl_delta: float          # b.total_pnl - a.total_pnl
     calls: int
     failures: int
@@ -1465,37 +1520,60 @@ class Compare:
     cache_write_tokens: int
     avg_latency_ms: float
     est_cost_usd: float
+    warnings: list = field(default_factory=list)
     rows: list = field(default_factory=list)
+
+
+def _compat_warnings(repo: Repo, run_a: str, run_b: str, a: Summary, b: Summary) -> list:
+    out = []
+    if a.mode != "backtest" or b.mode != "backtest":
+        raise ValueError("compare works on backtest runs only (live positions do not carry client ids)")
+    try:
+        ca = json.loads(repo.get_run(run_a)["config_json"])
+        cb = json.loads(repo.get_run(run_b)["config_json"])
+    except (TypeError, ValueError):
+        return ["could not parse one run's stored config; comparability unknown"]
+    for key in COMPARABLE_KEYS:
+        if ca.get(key) != cb.get(key):
+            out.append(f"runs differ in '{key}': the comparison may not be like-for-like")
+    return out
 
 
 def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices) -> Compare:
     a, b = build_summary(repo, run_a), build_summary(repo, run_b)  # raises ValueError for unknown runs
+    warnings = _compat_warnings(repo, run_a, run_b, a, b)
     positions_a = repo.positions_by_client_id(run_a)
-    rows, with_pos, net, losses, wins = [], 0, 0.0, 0.0, 0.0
+    rows, closed, open_, net, losses, wins = [], 0, 0, 0.0, 0.0, 0.0
     for r in repo.ai_rejected_signals(run_b):
         cid = make_client_id(r["strategy"], r["symbol"], r["bar_ts"])
         pos = positions_a.get(cid)
-        pnl = None if pos is None or pos["pnl"] is None else float(pos["pnl"])
-        if pnl is not None:
-            with_pos += 1
+        if pos is None:
+            status, pnl = "unfilled", None
+        elif pos["closed_at"] is None:
+            status, pnl = "open", None
+            open_ += 1
+        else:
+            status, pnl = "closed", float(pos["pnl"] or 0.0)
+            closed += 1
             net += pnl
-            if pnl < 0:
+            if pnl <= 0:  # same convention as summary: a scratch counts on the loss side
                 losses += -pnl
             else:
                 wins += pnl
         rows.append({"symbol": r["symbol"], "bar": iso_ist(r["bar_ts"]), "direction": r["direction"],
-                     "reason": r["reason"], "confidence": r["confidence"], "pnl_in_a": pnl,
+                     "reason": r["reason"], "confidence": r["confidence"], "status": status, "pnl_in_a": pnl,
                      "exit_in_a": pos["exit_reason"] if pos is not None else None})
     u = repo.ai_usage(run_b)
     cost = prices.cost(int(u["input_tokens"]), int(u["output_tokens"]), int(u["cache_read_tokens"]),
                        int(u["cache_write_tokens"]))
     return Compare(
-        a=a, b=b, rejected=len(rows), rejected_with_position_in_a=with_pos, rejected_pnl_in_a=net,
-        rejected_losses_avoided=losses, rejected_wins_forgone=wins, total_pnl_delta=b.total_pnl - a.total_pnl,
+        a=a, b=b, rejected=len(rows), rejected_closed_in_a=closed, rejected_open_in_a=open_,
+        rejected_pnl_in_a=net, rejected_losses_avoided=losses, rejected_wins_forgone=wins,
+        total_pnl_delta=b.total_pnl - a.total_pnl,
         calls=int(u["calls"]), failures=int(u["failures"]), input_tokens=int(u["input_tokens"]),
         output_tokens=int(u["output_tokens"]), cache_read_tokens=int(u["cache_read_tokens"]),
         cache_write_tokens=int(u["cache_write_tokens"]),
-        avg_latency_ms=float(u["avg_latency_ms"]), est_cost_usd=cost, rows=rows,
+        avg_latency_ms=float(u["avg_latency_ms"]), est_cost_usd=cost, warnings=warnings, rows=rows,
     )
 
 
@@ -1515,30 +1593,39 @@ def _side_by_side(a: Summary, b: Summary) -> list:
 
 
 def format_compare(c: Compare) -> str:
-    lines = [f"Compare  A={c.a.run_id} (unfiltered)  vs  B={c.b.run_id} (Claude filter)", ""]
-    lines += _side_by_side(c.a, c.b)
+    lines = [f"Compare  A={c.a.run_id} (unfiltered)  vs  B={c.b.run_id} (Claude filter)"]
+    lines += [f"WARNING: {w}" for w in c.warnings]
+    lines += [""] + _side_by_side(c.a, c.b)
+    n = c.rejected
     lines += ["",
-              f"Rejected by Claude      {c.rejected} signals, {c.rejected_with_position_in_a} of which A actually traded",
+              f"Rejected by Claude      {n} signal{'' if n == 1 else 's'}: {c.rejected_closed_in_a} closed in A, "
+              f"{c.rejected_open_in_a} still open in A, {n - c.rejected_closed_in_a - c.rejected_open_in_a} unfilled in A",
               f"  losses avoided        {c.rejected_losses_avoided:,.2f}",
               f"  wins forgone          {c.rejected_wins_forgone:,.2f}",
-              f"  net PnL given up      {c.rejected_pnl_in_a:,.2f}   (negative means the filter removed net losers)",
-              f"Total PnL delta (B-A)   {c.total_pnl_delta:,.2f}",
+              f"  net PnL of rejected   {c.rejected_pnl_in_a:,.2f}   (positive = the filter cost money in A's terms)",
+              f"Total PnL delta (B-A)   {c.total_pnl_delta:,.2f}   (includes what B did with the freed capital)",
               f"Calls / failures        {c.calls} / {c.failures}   avg latency {c.avg_latency_ms:.0f} ms",
               f"Tokens in/out/cached    {c.input_tokens:,} / {c.output_tokens:,} / {c.cache_read_tokens:,} (cache writes {c.cache_write_tokens:,})",
-              f"Estimated cost          ${c.est_cost_usd:,.2f}"]
-    verdict = ("filter helped" if c.total_pnl_delta > c.est_cost_usd * 0 and c.total_pnl_delta > 0
-               else "filter did not help on this window")
-    lines += ["", f"Verdict: {verdict} (PnL delta {c.total_pnl_delta:,.2f}, cost ${c.est_cost_usd:,.2f})"]
+              f"Estimated cost          ${c.est_cost_usd:,.2f}   (USD; PnL is in INR, judge the two separately)"]
+    if c.total_pnl_delta > 0 and c.rejected_pnl_in_a <= 0:
+        verdict = "filter helped: B earned more and the signals it removed were net losers in A"
+    elif c.total_pnl_delta > 0:
+        verdict = "mixed: B earned more overall, but the rejected signals were net winners in A"
+    elif c.rejected_pnl_in_a < 0:
+        verdict = "mixed: the rejected signals were net losers in A, yet B did not earn more overall"
+    else:
+        verdict = "filter did not help on this window"
+    lines += ["", f"Verdict: {verdict}"]
     if c.rows:
         lines += ["", f"{'Bar (IST)':<25} {'Symbol':<12} {'Dir':<5} {'PnL in A':>10} {'Exit A':<11} Reason"]
         for r in c.rows:
-            pnl = "unfilled" if r["pnl_in_a"] is None else f"{r['pnl_in_a']:,.2f}"
+            pnl = r["status"] if r["pnl_in_a"] is None else f"{r['pnl_in_a']:,.2f}"
             lines.append(f"{r['bar']:<25} {r['symbol']:<12} {r['direction']:<5} {pnl:>10} {str(r['exit_in_a'] or '-'):<11} "
                          f"{r['reason']}")
     return "\n".join(lines)
 ```
 
-- [ ] **Step 4: Run tests** — Expected: 3 passed.
+- [ ] **Step 4: Run tests** — Expected: 6 passed.
 
 - [ ] **Step 5: Commit**
 
