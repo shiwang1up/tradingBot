@@ -22,6 +22,24 @@ strategy:
     reward_risk: 2.0
     min_stop_pct: 0.1         # skip signals whose stop is closer than this % of price
     product: MIS
+  confluence:                 # weighted votes from the technical layers; see the indicators spec
+    weights: {trend: 1.0, macd: 1.0, momentum: 1.0, breakout: 1.5, pattern: 1.0, exhaustion: -1.5}
+    threshold: 3.0            # LONG when the score reaches this, SHORT at minus this
+    adx_min: 20               # no trend, no trade
+    volume_spike_min: 150     # percent of the 20-bar average a break needs to count
+    rsi_overbought: 70
+    rsi_oversold: 30
+    pct_b_high: 0.8
+    pct_b_low: 0.2
+    atr_stop_mult: 1.5
+    reward_risk: 2.0
+    min_stop_pct: 0.1
+    product: MIS
+  indicators:                 # shared technical set (also feeds the AI filter's context)
+    ema_fast: 20
+    ema_slow: 50
+    levels_period: 100
+    pattern_tolerance_pct: 0.3
 
 ai:
   filter: stub                # stub | claude | claude_cached

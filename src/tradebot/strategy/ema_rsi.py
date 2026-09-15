@@ -105,4 +105,7 @@ class EmaRsiStrategy(Strategy):
 def build_strategy(name: str, params: dict) -> Strategy:
     if name == "ema_rsi":
         return EmaRsiStrategy(params)
+    if name == "confluence":
+        from tradebot.strategy.confluence import ConfluenceStrategy  # local import: no cycle with base/ta
+        return ConfluenceStrategy(params)
     raise ValueError(f"unknown strategy: {name}")
