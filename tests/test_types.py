@@ -43,4 +43,4 @@ def test_position_unrealised_signs():
 def test_decision_token_fields_default_to_zero():
     from tradebot.types import Decision
     d = Decision(_sig(), True, "ok", 1.0, "stub")
-    assert (d.input_tokens, d.output_tokens, d.cache_read_tokens) == (0, 0, 0)
+    assert (d.input_tokens, d.output_tokens, d.cache_read_tokens, d.cache_write_tokens) == (0, 0, 0, 0)

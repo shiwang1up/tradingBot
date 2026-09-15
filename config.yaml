@@ -25,15 +25,17 @@ strategy:
 
 ai:
   filter: stub                # stub | claude | claude_cached
-  model: claude-opus-5        # claude-sonnet-5 roughly halves cost
+  model: claude-opus-5        # claude-sonnet-5 costs about 60% less (2 / 10 per MTok)
   candles_in_context: 30
   on_failure: reject          # reject | pass_through
   effort: low                 # classification-style task; raise if reasons look shallow
   max_tokens: 2000
-  timeout_sec: 30
-  max_calls_per_run: 5000     # spend guard per backtest
-  price_in_per_mtok: 5.0      # Opus 5 list prices, used only for the report's cost line
+  timeout_sec: 60
+  max_calls_per_run: 10000    # spend guard per backtest; a 62-day replay is at most ~4650 calls
+  price_in_per_mtok: 5.0      # list prices, used only for the report's cost line
   price_out_per_mtok: 25.0
+  price_cache_read_per_mtok: 0.5
+  price_cache_write_per_mtok: 6.25
 
 execution:
   slippage_pct: 0.05           # percent: 0.05 = 5 bps

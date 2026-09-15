@@ -40,10 +40,13 @@ class AIConfig:
     on_failure: str
     effort: str = "low"              # low | medium | high | xhigh | max
     max_tokens: int = 2000
-    timeout_sec: int = 30
-    max_calls_per_run: int = 5000    # hard stop on spend per backtest; later bars use on_failure
-    price_in_per_mtok: float = 5.0   # USD per million input tokens, for the cost line in reports
+    timeout_sec: int = 60            # adaptive thinking can take a while; the SDK retries twice on top
+    max_calls_per_run: int = 10000   # hard stop on spend per backtest; later bars use on_failure
+    # USD per million tokens, used only for the cost line in reports (Opus 5 list prices).
+    price_in_per_mtok: float = 5.0
     price_out_per_mtok: float = 25.0
+    price_cache_read_per_mtok: float = 0.5     # prompt-cache hits bill ~0.1x input
+    price_cache_write_per_mtok: float = 6.25   # prompt-cache writes bill ~1.25x input
 
 
 @dataclass(frozen=True)
@@ -173,7 +176,10 @@ def _validate(cfg: "Config") -> None:
         (a.max_tokens >= 1, "ai.max_tokens must be >= 1"),
         (a.timeout_sec >= 1, "ai.timeout_sec must be >= 1"),
         (a.max_calls_per_run >= 1, "ai.max_calls_per_run must be >= 1"),
-        (a.price_in_per_mtok >= 0 and a.price_out_per_mtok >= 0, "ai.price_*_per_mtok must be >= 0"),
+        (a.price_in_per_mtok >= 0, "ai.price_in_per_mtok must be >= 0"),
+        (a.price_out_per_mtok >= 0, "ai.price_out_per_mtok must be >= 0"),
+        (a.price_cache_read_per_mtok >= 0, "ai.price_cache_read_per_mtok must be >= 0"),
+        (a.price_cache_write_per_mtok >= 0, "ai.price_cache_write_per_mtok must be >= 0"),
     ]
     for name in ("open", "close", "square_off", "no_new_entries_after"):
         checks.append((bool(_HHMM.match(getattr(s, name))), f'session.{name} must be a quoted "HH:MM" time'))

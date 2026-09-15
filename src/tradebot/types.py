@@ -122,3 +122,4 @@ class Decision:
     input_tokens: int = 0        # usage is attributed to the first decision of a batch
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
