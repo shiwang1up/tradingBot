@@ -89,3 +89,16 @@ def test_rejects_malformed_holiday_and_time():
         SessionClock(replace(SESSION, holidays=("2026-10-02 00:00:00",)), interval_minutes=5)
     with pytest.raises(ValueError, match="HH:MM"):
         ist_epoch(D, "09:15:00")
+
+
+def test_last_bar_and_latest_complete_bar():
+    clk = SessionClock(SESSION, interval_minutes=5)
+    assert clk.last_bar_ts(D) == ist_epoch(D, "15:25")
+    o = ist_epoch(D, "09:15")
+    assert clk.latest_complete_bar(o + 299, 0) is None            # first bar still open
+    assert clk.latest_complete_bar(o + 300, 0) == o                # closed exactly now
+    assert clk.latest_complete_bar(o + 304, grace_sec=5) is None   # closed, but inside the grace period
+    assert clk.latest_complete_bar(o + 305, grace_sec=5) == o
+    assert clk.latest_complete_bar(ist_epoch(D, "12:00"), 0) == ist_epoch(D, "11:55")
+    assert clk.latest_complete_bar(ist_epoch(D, "12:00") + 3, grace_sec=5) == ist_epoch(D, "11:50")
+    assert clk.latest_complete_bar(ist_epoch(D, "16:00"), 0) == ist_epoch(D, "15:25")  # capped at the last bar

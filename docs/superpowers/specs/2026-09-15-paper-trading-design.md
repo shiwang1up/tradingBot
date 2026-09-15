@@ -72,10 +72,10 @@ CLI passes `GrowwAdapter.fetch_candles`.
 
 ### `engine/clock.py`: wall-clock scheduling
 
-`SessionClock` already maps session times to epochs. Add `next_bar_close(now_ts) -> int` (the
-next bar boundary at or after `now_ts` within the session, or `None` after close) and keep sleeping
-out of the clock: `PaperEngine.run()` takes `now: Callable[[], int]` and `sleep: Callable[[float],
-None]` so tests drive time deterministically.
+`SessionClock` already maps session times to epochs. Add `last_bar_ts(d)` (open time of the bar that
+ends at the close) and `latest_complete_bar(now_ts, grace_sec)` (open time of the most recent bar whose
+close plus grace is at or before `now_ts`, capped at the last bar, `None` before the first bar closes).
+Sleeping stays out of the clock: `PaperEngine` takes `now` and `sleep` callables so tests drive time.
 
 ### Scheduling (`PaperEngine.run()`)
 
