@@ -362,3 +362,20 @@ def test_day_whose_bars_end_early_still_squares_off_intraday(repo, tmp_path):
     _run(repo, cfg, candles)
     for r in repo.list_positions("t1"):
         assert date_of(r["closed_at"]) == date_of(r["opened_at"])
+
+
+def test_engine_persists_ai_token_usage(repo, tmp_path):
+    from tradebot.types import Decision
+
+    class Priced:
+        kind = "priced"
+
+        def review(self, cands):
+            return [Decision(c.signal, True, "ok", 0.5, self.kind, latency_ms=300, input_tokens=1000 if i == 0 else 0,
+                             output_tokens=50 if i == 0 else 0, cache_read_tokens=700 if i == 0 else 0)
+                    for i, c in enumerate(cands)]
+
+    cfg = make_config(tmp_path)
+    _run(repo, cfg, _candles(), ai=Priced())
+    u = repo.ai_usage("t1")
+    assert u["calls"] >= 1 and u["input_tokens"] == 1000 * u["calls"] and u["cache_read_tokens"] == 700 * u["calls"]

@@ -222,7 +222,10 @@ class BacktestEngine:
             if dec.signal is not order.signal:
                 raise RuntimeError(f"{self.ai_filter.kind} returned decisions out of order")
             self.repo.insert_ai_decision(self.run_id, sid, dec.filter_kind, dec.approved, dec.reason,
-                                         dec.confidence, dec.latency_ms, dec.failure)
+                                         dec.confidence, dec.latency_ms, dec.failure,
+                                         input_tokens=dec.input_tokens, output_tokens=dec.output_tokens,
+                                         cache_read_tokens=dec.cache_read_tokens,
+                                         cache_write_tokens=dec.cache_write_tokens)
             if not dec.approved:
                 continue
             side = "BUY" if order.signal.direction == "LONG" else "SELL"
