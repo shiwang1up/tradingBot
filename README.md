@@ -39,7 +39,8 @@ catches up; signals on bars older than `execution.bar_deadline_sec` are dropped 
 per day, id `paper-YYYY-MM-DD`; `report --run paper-YYYY-MM-DD` prints the summary and the daily
 fill rate. Ctrl-C finishes the current bar and leaves the run resumable: start the command again the
 same day and it reloads open positions and pending entries from SQLite. A run left open by a crash
-can be started after 15:30 to replay the missed bars, square off and close the books. The
+can be started again the same day, even after 15:30, to replay the missed bars, square off and
+close the books; from the next day on it is refused and you start a new run id. The
 approval-flow Groww key must be approved on the API keys page before starting each day.
 
 `--ai stub` keeps Claude out of the loop; drop it (or pass `--ai claude_cached`) to pay for the

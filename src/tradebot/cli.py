@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import signal as os_signal
+import logging
+import os
 import sqlite3
 import time
 from dataclasses import replace as dc_replace
@@ -38,6 +40,7 @@ from tradebot.types import Candidate, Signal
 _FRIENDLY = (ValueError, SchemaVersionError, sqlite3.OperationalError, sqlite3.DatabaseError,
              requests.RequestException, NotImplementedError, AIFilterAborted, ClaudeReviewError)
 _FATAL_AUTH_CODES = {"401", "403"}
+log = logging.getLogger("tradebot.cli")
 
 
 def _is_fatal_auth(e: BaseException) -> bool:
@@ -108,6 +111,19 @@ def _symbols_and_lots(cfg: Config, require_instruments: bool) -> tuple:
     return list(resolved), {s: i.lot_size for s, i in resolved.items()}, uni.exchange
 
 
+def _resolve_and_login(cfg: Config, adapter, note: str = "") -> tuple:
+    """Instrument master (refreshed when stale), universe resolution, then one Groww login so a
+    credential problem aborts before any symbol loop. Returns (symbols, lots, exchange)."""
+    path = Path(cfg.paths.instruments)
+    if not _instruments_fresh(path):
+        click.echo("downloading instrument master")
+        download_instruments(path)
+    symbols, lots, exchange = _symbols_and_lots(cfg, require_instruments=True)
+    adapter.client
+    click.echo(f"logged in to Groww ({adapter.flow} flow){note}")
+    return symbols, lots, exchange
+
+
 @main.command("fetch-data")
 @click.option("--days", default=90, show_default=True, help="Lookback for symbols with no stored candles")
 @click.option("--full", is_flag=True, help="Ignore stored candles and refetch the whole window")
@@ -122,13 +138,7 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
     adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret,
                            cfg.secrets.groww_api_secret)  # fails fast on malformed credentials
     setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
-    path = Path(cfg.paths.instruments)
-    if not _instruments_fresh(path):
-        click.echo("downloading instrument master")
-        download_instruments(path)
-    symbols, _, exchange = _symbols_and_lots(cfg, require_instruments=True)
-    adapter.client  # log in once, here, so a credential problem aborts before the symbol loop
-    click.echo(f"logged in to Groww ({adapter.flow} flow)")
+    symbols, _, exchange = _resolve_and_login(cfg, adapter)
     repo = Repo(connect(cfg.paths.db))
     had_data = any(repo.latest_candle_ts(s, cfg.execution.interval_minutes) is not None for s in symbols)
     failures: list = []
@@ -239,20 +249,28 @@ def _prices(cfg: Config) -> Prices:
 
 
 def _warm_fetch(cfg: Config, adapter, repo: Repo, symbols: list, exchange: str, clock: SessionClock,
-                now_ts: int) -> list:
+                now_ts: int, pause: float = 0.5) -> list:
     """Bring the candle cache up to the last completed bar before starting paper. One symbol's failure
-    does not stop the others; auth failures are fatal. Returns the symbols that failed."""
+    does not stop the others; auth failures are fatal. `pause` spaces the requests like fetch-data's
+    --sleep so a cold cache does not trip Groww's rate limit. Returns the symbols that failed."""
     failed = []
     interval = cfg.execution.interval_minutes
+    click.echo(f"warming up: fetching recent candles for {len(symbols)} symbols")
+    inserted = 0
     for sym in symbols:
         try:
-            fetch_incremental(repo, adapter.fetch_candles, [sym], exchange, interval, 10, now_ts,
-                              keep=lambda cd: clock.in_session(cd.ts))
+            inserted += fetch_incremental(repo, adapter.fetch_candles, [sym], exchange, interval, 10, now_ts,
+                                          keep=lambda cd: clock.in_session(cd.ts))[sym]
         except Exception as e:  # noqa: BLE001 - isolate per symbol; auth errors are fatal
             if _is_fatal_auth(e):
                 raise
             failed.append(sym)
+            log.warning("warm-up fetch failed for %s: %s: %s", sym, type(e).__name__, e, extra={"symbol": sym})
             click.echo(f"warm-up fetch failed for {sym}: {type(e).__name__}: {e}", err=True)
+        finally:
+            if pause:
+                time.sleep(pause)
+    click.echo(f"warm-up: {inserted} new candles stored, {len(failed)} symbol(s) failed")
     return failed
 
 
@@ -289,24 +307,22 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
     existing = repo.get_run(run_id)
     if existing is not None and existing["mode"] != "paper":
         raise click.ClickException(f"run '{run_id}' exists and is not a paper run; pick another --run-id")
+    if existing is not None and existing["ended_at"] is not None and now < clock.close_ts(today):
+        raise click.ClickException(f"run '{run_id}' already ended today; pass a different --run-id to start another session")
     resumable = existing is not None and existing["ended_at"] is None
     if not clock.is_trading_day(today) or (now >= clock.close_ts(today) and not resumable):
         click.echo(f"nothing to trade: {today} is not a trading day or the session has closed")
         return
     log_path = setup_logging(cfg.paths.logs, run_id=run_id)
-    path = Path(cfg.paths.instruments)
-    if not _instruments_fresh(path):
-        click.echo("downloading instrument master")
-        download_instruments(path)
-    symbols, lots, exchange = _symbols_and_lots(cfg, require_instruments=True)
-    adapter.client  # log in once, here, so a credential problem aborts before anything else
-    click.echo(f"logged in to Groww ({adapter.flow} flow); paper mode places no orders")
+    symbols, lots, exchange = _resolve_and_login(cfg, adapter, note="; paper mode places no orders")
     failed = _warm_fetch(cfg, adapter, repo, symbols, exchange, clock, now)
     if failed:
         click.echo(f"warm-up fetch failed for {len(failed)} symbol(s); they warm up live", err=True)
     warm = _warm_candles(repo, symbols, interval, now, cfg.data.warmup_bars)
     source = LiveBarSource(adapter.fetch_candles, repo, symbols, exchange, interval,
-                           cfg.data.official_fetch_concurrency, clock, budget_sec=cfg.execution.bar_deadline_sec)
+                           cfg.data.official_fetch_concurrency, clock,
+                           # a fetch that outlives the deadline yields a stale bar anyway, so stop it earlier
+                           budget_sec=max(1.0, cfg.execution.bar_deadline_sec - cfg.data.bar_grace_sec))
     strategy = build_strategy(strategy_name, params)
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
@@ -315,12 +331,17 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
                          now=time.time, sleep=time.sleep)
 
     def _stop(signum, frame):
-        click.echo("stop requested; finishing the current bar (positions stay open on the books)", err=True)
+        # Only the flag and a raw write: a signal can land while stderr's buffered writer is locked.
+        os_signal.signal(signum, os_signal.SIG_DFL)  # a second Ctrl-C (or kill) aborts at once
+        os.write(2, b"stop requested; finishing the current bar, positions stay on the books (again to abort)\n")
         engine.request_stop()
 
-    for sig in (os_signal.SIGINT, os_signal.SIGTERM):
-        os_signal.signal(sig, _stop)
-    rid = engine.run(warm)
+    previous = {sig: os_signal.signal(sig, _stop) for sig in (os_signal.SIGINT, os_signal.SIGTERM)}
+    try:
+        rid = engine.run(warm)
+    finally:
+        for sig, handler in previous.items():
+            os_signal.signal(sig, handler)
     if rid is None:
         click.echo("nothing to trade: the session closed while warming up")
         return

@@ -510,12 +510,32 @@ def test_paper_full_day_end_to_end(tmp_path, monkeypatch):
     t = FakeTime(ist_epoch(TODAY, "09:00"))
     monkeypatch.setattr(cli.time, "time", t.now)
     monkeypatch.setattr(cli.time, "sleep", t.sleep)
+    import signal as os_signal
+    before = os_signal.getsignal(os_signal.SIGINT)
     res = _invoke(tmp_path, "paper", "--run-id", "p2", "--ai", "stub")
     assert res.exit_code == 0, res.output
     assert "Run p2 (paper)" in res.output
+    assert os_signal.getsignal(os_signal.SIGINT) is before, "the stop handler must not outlive the command"
     repo = Repo(connect(make_config(tmp_path).paths.db))
     run = repo.get_run("p2")
     assert run["mode"] == "paper" and run["ended_at"] is not None
     assert run["last_bar_ts"] == ist_epoch(TODAY, "15:25")
     assert repo.latest_candle_ts("A", 5) == ist_epoch(TODAY, "15:25")     # the day's bars grew the cache
     assert repo.list_positions("p2"), "the warm-up from the prior days must make trades possible today"
+
+
+def test_paper_refuses_foreign_and_already_ended_runs_before_logging_in(tmp_path, monkeypatch):
+    calls = []
+    _paper_setup(tmp_path, monkeypatch, lambda *a: calls.append(a) or [])
+    cfg = make_config(tmp_path)
+    repo = Repo(connect(cfg.paths.db))
+    repo.create_run("bt", "backtest", 0, "{}")
+    repo.create_run("done", "paper", ist_epoch(TODAY, "09:00"), "{}")
+    repo.end_run("done", ist_epoch(TODAY, "15:30"))
+    repo.conn.close()
+    monkeypatch.setattr(cli.time, "time", FakeTime(ist_epoch(TODAY, "10:00")).now)
+    res = _invoke(tmp_path, "paper", "--run-id", "bt")
+    assert res.exit_code != 0 and "not a paper run" in res.output
+    res = _invoke(tmp_path, "paper", "--run-id", "done")
+    assert res.exit_code != 0 and "already ended today" in res.output
+    assert calls == [], "a refusal must not cost a login or a warm-up fetch"
