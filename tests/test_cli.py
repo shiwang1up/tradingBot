@@ -295,3 +295,64 @@ def test_403_on_market_data_explains_the_subscription(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "GrowwAdapter", Forbidden)
     res = _invoke(tmp_path, "fetch-data", "--sleep", "0")
     assert res.exit_code == 1 and "Trade API subscription" in res.output and "failed:" not in res.output
+
+
+def test_backtest_ai_override_and_compare_report(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    assert ok.exit_code == 0, ok.output
+
+    from tradebot.ai import filter as filter_mod
+    from tradebot.ai.claude_client import ReviewResponse
+
+    class FakeClaude:
+        def __init__(self, *a, **k):
+            pass
+
+        def review(self, system, user, schema):
+            import json
+            cands = json.loads(user)["candidates"]
+            return ReviewResponse({"decisions": [{"index": c["index"], "symbol": c["symbol"], "approve": c["index"] % 2 == 0,
+                                                  "confidence": 0.5, "reason": "test"} for c in cands]}, 10, 500, 20, 0, 0, None)
+
+    monkeypatch.setattr(filter_mod, "ClaudeClient", FakeClaude)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "claude-run",
+                  "--ai", "claude_cached")
+    assert res.exit_code == 0, res.output
+    assert "AI rejects" in res.output
+    cmp_ = _invoke(tmp_path, "report", "--compare", "stub-run", "claude-run")
+    assert cmp_.exit_code == 0, cmp_.output
+    assert "Rejected by Claude" in cmp_.output and "Estimated cost" in cmp_.output
+    # second claude_cached run makes zero calls: cost line shows 0 tokens
+    res2 = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "claude-run-2",
+                   "--ai", "claude_cached")
+    assert res2.exit_code == 0, res2.output
+    cmp2 = _invoke(tmp_path, "report", "--compare", "stub-run", "claude-run-2")
+    assert "Tokens in/out/cached    0 / 0 / 0 (cache writes 0)" in cmp2.output
+
+
+def test_backtest_claude_without_key_is_clean_error(tmp_path):
+    _setup(tmp_path)
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--ai", "claude")
+    assert res.exit_code == 1 and "ANTHROPIC_API_KEY" in res.output
+
+
+def test_estimate_ai_reports_calls_and_cost(tmp_path, monkeypatch):
+    _setup(tmp_path)
+    ok = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "stub-run")
+    assert ok.exit_code == 0, ok.output
+    from tradebot import cli as cli_mod
+
+    class Counter:
+        def __init__(self, *a, **k):
+            pass
+
+        def count_tokens(self, system, user):
+            return 1500
+
+    monkeypatch.setattr(cli_mod, "ClaudeClient", Counter)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
+    res = _invoke(tmp_path, "estimate-ai", "--run", "stub-run")
+    assert res.exit_code == 0, res.output
+    assert "bars with candidates" in res.output and "estimated cost" in res.output

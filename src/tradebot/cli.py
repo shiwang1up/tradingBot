@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import replace as dc_replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -10,7 +11,9 @@ from typing import Optional
 import click
 import requests
 
+from tradebot.ai.claude_client import ClaudeClient
 from tradebot.ai.filter import AIFilterAborted, build_filter
+from tradebot.ai.prompt import SYSTEM_PROMPT, render_candidates
 from tradebot.config import Config, load_config
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
@@ -20,10 +23,12 @@ from tradebot.engine.logsetup import setup_logging
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.execution.groww_adapter import GrowwAdapter, is_non_retryable
+from tradebot.report.compare import Prices, build_compare, format_compare
 from tradebot.report.summary import build_summary, format_summary
 from tradebot.store.db import SchemaVersionError, connect
 from tradebot.store.repo import Repo
 from tradebot.strategy.ema_rsi import build_strategy
+from tradebot.types import Candidate, Candle, Signal
 
 # Operational failures that deserve a one-line message. sqlite3 programming errors (bad SQL) still traceback.
 _FRIENDLY = (ValueError, SchemaVersionError, sqlite3.OperationalError, sqlite3.DatabaseError,
@@ -159,8 +164,11 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
 @click.option("--end", required=True, type=click.DateTime(["%Y-%m-%d"]))
 @click.option("--strategy", "strategy_name", default="ema_rsi", show_default=True)
 @click.option("--run-id", default=None, help="Defaults to bt-<timestamp>")
+@click.option("--ai", "ai_filter", default=None, type=click.Choice(["stub", "claude", "claude_cached"]),
+              help="Override ai.filter from config for this run")
 @click.pass_obj
-def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, run_id: Optional[str]) -> None:
+def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, run_id: Optional[str],
+             ai_filter: Optional[str]) -> None:
     """Replay stored candles through the strategy, risk engine, AI filter, and simulated broker."""
     if start > end:
         raise click.ClickException("--start must not be after --end")
@@ -179,9 +187,11 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     log_path = setup_logging(cfg.paths.logs, run_id=run_id)
     strategy = build_strategy(strategy_name, cfg.strategy[strategy_name])
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
-    engine = BacktestEngine(cfg, repo, source, [strategy], broker,
-                            build_filter(cfg.ai, cfg.secrets.anthropic_api_key),
-                            SessionClock(cfg.session, interval), lots, run_id)
+    ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
+    clock = SessionClock(cfg.session, interval)
+    ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
+    # The engine stores the resolved config with the run, so record the effective filter there too.
+    engine = BacktestEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id)
     rid = engine.run()
     click.echo(format_summary(build_summary(repo, rid)))
     if log_path:
@@ -189,11 +199,61 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
 
 
 @main.command()
-@click.option("--run", "run_id", required=True)
+@click.option("--run", "run_id", default=None)
+@click.option("--compare", "compare", nargs=2, default=None, metavar="RUN_A RUN_B",
+              help="Side-by-side of an unfiltered run A and a Claude-filtered run B")
 @click.pass_obj
-def report(cfg: Config, run_id: str) -> None:
-    """Print the summary for a stored run."""
+def report(cfg: Config, run_id: Optional[str], compare) -> None:
+    """Print the summary for a stored run, or compare two runs."""
     if not Path(cfg.paths.db).exists():
         raise click.ClickException(f"no database at {cfg.paths.db}")
+    if not run_id and not compare:
+        raise click.ClickException("give --run RUN or --compare RUN_A RUN_B")
     repo = Repo(connect(cfg.paths.db))
+    if compare:
+        click.echo(format_compare(build_compare(repo, compare[0], compare[1], _prices(cfg))))
+        return
     click.echo(format_summary(build_summary(repo, run_id)))
+
+
+def _prices(cfg: Config) -> Prices:
+    return Prices(cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok,
+                  cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok)
+
+
+@main.command("estimate-ai")
+@click.option("--run", "run_id", required=True, help="A completed stub run whose risk-approved signals define the workload")
+@click.pass_obj
+def estimate_ai(cfg: Config, run_id: str) -> None:
+    """Estimate calls, tokens and cost of replaying a run through the Claude filter.
+
+    Counts tokens once on the largest bar's prompt via the API, then scales by the number of
+    bars that had at least one risk-approved candidate."""
+    repo = Repo(connect(cfg.paths.db))
+    if repo.get_run(run_id) is None:
+        raise click.ClickException(f"unknown run: {run_id}")
+    rows = repo.conn.execute(
+        "SELECT s.bar_ts, COUNT(*) AS n FROM risk_decisions r JOIN signals s ON s.id = r.signal_id "
+        "WHERE r.run_id=? AND r.approved=1 GROUP BY s.bar_ts", (run_id,)).fetchall()
+    if not rows:
+        raise click.ClickException("that run has no risk-approved signals")
+    bars = len(rows)
+    candidates = sum(r["n"] for r in rows)
+    biggest = max(r["n"] for r in rows)
+    client = ClaudeClient(cfg.secrets.anthropic_api_key, cfg.ai.model, cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec)
+    sample = [Candidate(Signal("ema_rsi", f"SYM{i}", "LONG", 1280.0, 1275.5, 1289.0, "MIS", 1789357500), 200,
+                        {"ema_fast": 1280.1, "ema_slow": 1279.9, "rsi": 61.2, "atr": 3.1},
+                        tuple(Candle(f"SYM{i}", 1789357500 - 300 * k, 1279.0, 1281.0, 1278.0, 1280.0, 12345)
+                              for k in range(cfg.ai.candles_in_context, 0, -1)))
+              for i in range(biggest)]
+    session = {"square_off": cfg.session.square_off, "entry_cutoff": cfg.session.no_new_entries_after,
+               "close": cfg.session.close, "bars_left": 40}
+    per_biggest = client.count_tokens(SYSTEM_PROMPT, render_candidates(sample, session))
+    per_candidate = per_biggest / biggest
+    input_tokens = int(candidates * per_candidate)
+    output_tokens = candidates * 60
+    cost = _prices(cfg).cost(input_tokens, output_tokens, 0, 0)
+    click.echo(f"bars with candidates: {bars}   candidates: {candidates}   largest bar: {biggest}")
+    click.echo(f"tokens per candidate: {per_candidate:.0f}   input total: {input_tokens:,}   output total ~{output_tokens:,}")
+    click.echo(f"estimated cost ({cfg.ai.model}): ${cost:,.2f} as an upper bound; the shared system prompt caches, "
+               f"and a cached replay costs $0")
