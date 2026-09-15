@@ -6,7 +6,7 @@
 
 **Architecture:** `ClaudeFilter` implements the existing `AIFilter` protocol: one structured-output request per bar covering every risk-approved candidate, deterministic prompt text so `(symbol, bar_ts, sha256(prompt))` is a stable cache key, and a failure policy from config. `CachedClaudeFilter` consults the `ai_cache` table first. `report --compare` joins the stub run's positions to the Claude run's rejections by the deterministic client id, so it can say what the rejected signals would have earned. Everything else (engine, risk, broker, store) is untouched except for token accounting columns.
 
-**Tech Stack:** Python 3.9, `anthropic` 0.125 (the 0.x line is required on 3.9; `output_config` JSON-schema structured outputs are supported), sqlite3, click, pytest. Model default `claude-opus-5` with `effort: low`; switch `ai.model` to `claude-sonnet-5` to roughly halve cost.
+**Tech Stack:** Python 3.9, `anthropic` 0.125 (the 0.x line is required on 3.9; `output_config` JSON-schema structured outputs are supported), sqlite3, click, pytest. Model default `claude-opus-5` with `effort: low`; switch `ai.model` to `claude-sonnet-5` to cut cost by about 60%.
 
 **Conventions:** as Plan 1. Every task ends with a commit. `.venv/bin/pytest -q` must stay green (currently 234 tests). Never call the network from tests; `ClaudeClient` is replaced by a fake in every test.
 
@@ -57,12 +57,18 @@ Append to `tests/test_config.py`:
 
 def test_ai_section_defaults_and_validation(tmp_path):
     cfg = load_config(_write(tmp_path), tmp_path / "x.env")
-    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 2000, 30, 5000)
+    assert (cfg.ai.effort, cfg.ai.max_tokens, cfg.ai.timeout_sec, cfg.ai.max_calls_per_run) == ("low", 2000, 60, 10000)
     assert (cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok) == (5.0, 25.0)
+    assert (cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok) == (0.5, 6.25)
+    over = load_config(_write(tmp_path, YAML.replace("on_failure: reject", 'on_failure: reject\n  effort: max\n  max_tokens: "2500"')),
+                       tmp_path / "x.env")
+    assert (over.ai.effort, over.ai.max_tokens) == ("max", 2500)  # YAML overrides a default and is coerced
     for broken, frag in [
         (YAML.replace("on_failure: reject", "on_failure: reject\n  effort: turbo"), "ai.effort"),
         (YAML.replace("on_failure: reject", "on_failure: reject\n  max_calls_per_run: 0"), "ai.max_calls_per_run"),
         (YAML.replace("on_failure: reject", "on_failure: reject\n  max_tokens: 0"), "ai.max_tokens"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  timeout_sec: 0"), "ai.timeout_sec"),
+        (YAML.replace("on_failure: reject", "on_failure: reject\n  price_out_per_mtok: -1"), "ai.price_out_per_mtok"),
     ]:
         with pytest.raises(ValueError) as e:
             load_config(_write(tmp_path, broken), tmp_path / "x.env")
@@ -77,7 +83,7 @@ Append to `tests/test_types.py`:
 def test_decision_token_fields_default_to_zero():
     from tradebot.types import Decision
     d = Decision(_sig(), True, "ok", 1.0, "stub")
-    assert (d.input_tokens, d.output_tokens, d.cache_read_tokens) == (0, 0, 0)
+    assert (d.input_tokens, d.output_tokens, d.cache_read_tokens, d.cache_write_tokens) == (0, 0, 0, 0)
 ```
 
 - [ ] **Step 2: Run them, expect failures**
@@ -98,10 +104,13 @@ class AIConfig:
     on_failure: str
     effort: str = "low"              # low | medium | high | xhigh | max
     max_tokens: int = 2000
-    timeout_sec: int = 30
-    max_calls_per_run: int = 5000    # hard stop on spend per backtest; later bars use on_failure
-    price_in_per_mtok: float = 5.0   # USD per million input tokens, for the cost line in reports
+    timeout_sec: int = 60            # adaptive thinking can take a while; the SDK retries twice on top
+    max_calls_per_run: int = 10000   # hard stop on spend per backtest; later bars use on_failure
+    # USD per million tokens, used only for the cost line in reports (Opus 5 list prices).
+    price_in_per_mtok: float = 5.0
     price_out_per_mtok: float = 25.0
+    price_cache_read_per_mtok: float = 0.5     # prompt-cache hits bill ~0.1x input
+    price_cache_write_per_mtok: float = 6.25   # prompt-cache writes bill ~1.25x input
 ```
 
 In `_section`, make fields with defaults optional. Replace:
@@ -125,7 +134,10 @@ In `_validate`, add to `checks` after the `ai.on_failure` line:
         (a.max_tokens >= 1, "ai.max_tokens must be >= 1"),
         (a.timeout_sec >= 1, "ai.timeout_sec must be >= 1"),
         (a.max_calls_per_run >= 1, "ai.max_calls_per_run must be >= 1"),
-        (a.price_in_per_mtok >= 0 and a.price_out_per_mtok >= 0, "ai.price_*_per_mtok must be >= 0"),
+        (a.price_in_per_mtok >= 0, "ai.price_in_per_mtok must be >= 0"),
+        (a.price_out_per_mtok >= 0, "ai.price_out_per_mtok must be >= 0"),
+        (a.price_cache_read_per_mtok >= 0, "ai.price_cache_read_per_mtok must be >= 0"),
+        (a.price_cache_write_per_mtok >= 0, "ai.price_cache_write_per_mtok must be >= 0"),
 ```
 
 and next to `AI_ON_FAILURE` add:
@@ -149,6 +161,7 @@ class Decision:
     input_tokens: int = 0        # usage is attributed to the first decision of a batch
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 ```
 
 In `config.yaml`, replace the `ai:` section with:
@@ -156,15 +169,17 @@ In `config.yaml`, replace the `ai:` section with:
 ```yaml
 ai:
   filter: stub                # stub | claude | claude_cached
-  model: claude-opus-5        # claude-sonnet-5 roughly halves cost
+  model: claude-opus-5        # claude-sonnet-5 costs about 60% less (2 / 10 per MTok)
   candles_in_context: 30
   on_failure: reject          # reject | pass_through
   effort: low                 # classification-style task; raise if reasons look shallow
   max_tokens: 2000
-  timeout_sec: 30
-  max_calls_per_run: 5000     # spend guard per backtest
-  price_in_per_mtok: 5.0      # Opus 5 list prices, used only for the report's cost line
+  timeout_sec: 60
+  max_calls_per_run: 10000    # spend guard per backtest; a 62-day replay is at most ~4650 calls
+  price_in_per_mtok: 5.0      # list prices, used only for the report's cost line
   price_out_per_mtok: 25.0
+  price_cache_read_per_mtok: 0.5
+  price_cache_write_per_mtok: 6.25
 ```
 
 Also update `BASE_CONFIG["ai"]` in `tests/helpers.py` to `{"filter": "stub", "model": "claude-opus-5", "candles_in_context": 30, "on_failure": "reject"}` (defaults cover the rest).
@@ -211,7 +226,7 @@ def test_v1_database_is_migrated_to_v2(tmp_path):
     raw.close()
     conn = connect(path)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_decisions)")}
-    assert {"input_tokens", "output_tokens", "cache_read_tokens"} <= cols
+    assert {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"} <= cols
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
 
 
@@ -255,9 +270,10 @@ Expected: 4 failed.
 
 ```sql
   failure     TEXT,
-  input_tokens      INTEGER NOT NULL DEFAULT 0,
-  output_tokens     INTEGER NOT NULL DEFAULT 0,
-  cache_read_tokens INTEGER NOT NULL DEFAULT 0
+  input_tokens       INTEGER NOT NULL DEFAULT 0,
+  output_tokens      INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0
 ```
 
 (replace the existing `failure     TEXT` line, keeping the closing `);`).
@@ -271,6 +287,7 @@ MIGRATIONS = {
         "ALTER TABLE ai_decisions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE ai_decisions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE ai_decisions ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE ai_decisions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0",
     ],
 }
 ```
@@ -303,12 +320,13 @@ Update the existing `test_file_backed_connect_uses_wal_persists_and_versions` te
 ```python
     def insert_ai_decision(self, run_id: str, signal_id: int, filter_kind: str, approved: bool, reason: str,
                            confidence: float, latency_ms: int, failure: str | None,
-                           input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0) -> None:
+                           input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0,
+                           cache_write_tokens: int = 0) -> None:
         self.conn.execute(
             "INSERT INTO ai_decisions(run_id, signal_id, filter_kind, approved, reason, confidence, latency_ms, failure, "
-            "input_tokens, output_tokens, cache_read_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, signal_id, filter_kind, int(approved), reason, confidence, latency_ms, failure,
-             input_tokens, output_tokens, cache_read_tokens),
+             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens),
         )
         self.conn.commit()
 ```
@@ -320,7 +338,7 @@ and add these methods after `ai_rejection_count`:
         """Token totals, call count (decisions carrying input tokens) and mean latency of real calls."""
         row = self.conn.execute(
             "SELECT COUNT(*) AS decisions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
-            "SUM(cache_read_tokens) AS cache_read_tokens, "
+            "SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
             "SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) AS calls, "
             "AVG(CASE WHEN input_tokens > 0 THEN latency_ms END) AS avg_latency_ms, "
             "SUM(CASE WHEN failure IS NOT NULL THEN 1 ELSE 0 END) AS failures "
@@ -563,7 +581,7 @@ class _Usage:
     input_tokens = 1200
     output_tokens = 80
     cache_read_input_tokens = 900
-    cache_creation_input_tokens = 0
+    cache_creation_input_tokens = 300
 
 
 class _Resp:
@@ -596,7 +614,7 @@ def test_review_sends_structured_output_request_and_parses():
     r = c.review("SYS", "USER", {"type": "object"})
     assert isinstance(r, ReviewResponse)
     assert r.data["decisions"][0]["symbol"] == "A"
-    assert (r.input_tokens, r.output_tokens, r.cache_read_tokens, r.request_id) == (1200, 80, 900, "req_123")
+    assert (r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.request_id) == (1200, 80, 900, 300, "req_123")
     assert r.latency_ms >= 0
     kw = c._client.messages.calls[0]
     assert kw["model"] == "claude-opus-5" and kw["max_tokens"] == 2000
@@ -670,9 +688,10 @@ class ClaudeReviewError(RuntimeError):
 class ReviewResponse:
     data: dict
     latency_ms: int
-    input_tokens: int
+    input_tokens: int          # uncached input tokens
     output_tokens: int
     cache_read_tokens: int
+    cache_write_tokens: int
     request_id: Optional[str]
 
 
@@ -719,6 +738,7 @@ class ClaudeClient:
             input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
             cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
             request_id=getattr(resp, "_request_id", None),
         )
 
@@ -778,7 +798,7 @@ class FakeClaude:
         self.calls.append(user)
         if self.error:
             raise self.error
-        return ReviewResponse({"decisions": self.decisions}, 700, 1500, 90, 1000, "req_x")
+        return ReviewResponse({"decisions": self.decisions}, 700, 1500, 90, 1000, 250, "req_x")
 
 
 def _ai(**over):
@@ -797,7 +817,7 @@ def test_claude_filter_maps_decisions_by_index_and_symbol():
     check_filter_contract(f, [_rich_cand("A"), _rich_cand("B")])
     assert [d.approved for d in out] == [True, False]
     assert out[0].reason == "clean break" and out[0].confidence == 0.71 and out[0].filter_kind == "claude"
-    assert (out[0].input_tokens, out[0].output_tokens, out[0].cache_read_tokens) == (1500, 90, 1000)
+    assert (out[0].input_tokens, out[0].output_tokens, out[0].cache_read_tokens, out[0].cache_write_tokens) == (1500, 90, 1000, 250)
     assert (out[1].input_tokens, out[1].output_tokens) == (0, 0)  # usage attributed once per batch
     assert out[0].latency_ms == 700 and out[0].failure is None
 
@@ -1004,6 +1024,7 @@ class ClaudeFilter:
             self.kind, latency_ms=resp.latency_ms if resp is not None else 0, failure=None,
             input_tokens=usage.input_tokens if usage else 0, output_tokens=usage.output_tokens if usage else 0,
             cache_read_tokens=usage.cache_read_tokens if usage else 0,
+            cache_write_tokens=usage.cache_write_tokens if usage else 0,
         )
 
     def _failed(self, candidates: list[Candidate], why: str, resp: Optional[ReviewResponse] = None,
@@ -1017,6 +1038,7 @@ class ClaudeFilter:
                 latency_ms=resp.latency_ms if resp is not None else 0, failure=why[:REASON_MAX],
                 input_tokens=usage.input_tokens if usage else 0, output_tokens=usage.output_tokens if usage else 0,
                 cache_read_tokens=usage.cache_read_tokens if usage else 0,
+                cache_write_tokens=usage.cache_write_tokens if usage else 0,
             ))
         return out
 
@@ -1097,7 +1119,8 @@ In `src/tradebot/engine/loop.py`, in `_place`, change the `insert_ai_decision` c
             self.repo.insert_ai_decision(self.run_id, sid, dec.filter_kind, dec.approved, dec.reason,
                                          dec.confidence, dec.latency_ms, dec.failure,
                                          input_tokens=dec.input_tokens, output_tokens=dec.output_tokens,
-                                         cache_read_tokens=dec.cache_read_tokens)
+                                         cache_read_tokens=dec.cache_read_tokens,
+                                         cache_write_tokens=dec.cache_write_tokens)
 ```
 
 - [ ] **Step 4: Run the suite** — Expected: all pass.
@@ -1123,8 +1146,10 @@ git commit -m "feat(engine): persist AI token usage per decision"
 # tests/test_compare.py
 import pytest
 
-from tradebot.report.compare import build_compare, format_compare
+from tradebot.report.compare import Prices, build_compare, format_compare
 from tradebot.types import Position, Signal, make_client_id
+
+P = Prices(5.0, 25.0, 0.5, 6.25)
 
 
 def _seed_pair(repo):
@@ -1142,7 +1167,7 @@ def _seed_pair(repo):
         sb = repo.insert_signal("B", sig)
         approve = sym == "Z"
         repo.insert_ai_decision("B", sb, "claude", approve, "fine" if approve else "chop", 0.6, 800, None,
-                                input_tokens=1000, output_tokens=60, cache_read_tokens=500)
+                                input_tokens=1000, output_tokens=60, cache_read_tokens=500, cache_write_tokens=100)
         if approve:
             pid = repo.insert_position("B", Position(sym, "MIS", "LONG", 10, 100.0, 99.0, 102.0, ts + 300, cid, "ema_rsi"))
             repo.close_position(pid, ts + 900, 102.0, "TARGET", pnl)
@@ -1156,21 +1181,22 @@ def _seed_pair(repo):
 
 def test_build_compare_attributes_rejected_pnl(repo):
     _seed_pair(repo)
-    c = build_compare(repo, "A", "B", price_in=5.0, price_out=25.0)
+    c = build_compare(repo, "A", "B", P)
     assert c.a.run_id == "A" and c.b.run_id == "B"
     assert c.rejected == 3 and c.rejected_with_position_in_a == 2
     assert c.rejected_pnl_in_a == pytest.approx(20.0)      # +50 and -30 avoided: net +20 given up
     assert c.rejected_losses_avoided == pytest.approx(30.0) and c.rejected_wins_forgone == pytest.approx(50.0)
     assert c.total_pnl_delta == pytest.approx(20.0 - 40.0)
     assert c.calls == 3 and c.input_tokens == 3000 and c.output_tokens == 180
-    assert c.est_cost_usd == pytest.approx((3000 * 5.0 + 180 * 25.0) / 1e6)
+    assert (c.cache_read_tokens, c.cache_write_tokens) == (1500, 300)
+    assert c.est_cost_usd == pytest.approx((3000 * 5.0 + 180 * 25.0 + 1500 * 0.5 + 300 * 6.25) / 1e6)
     assert [r["symbol"] for r in c.rows] == ["X", "Y", "W"]
     assert c.rows[2]["pnl_in_a"] is None
 
 
 def test_format_compare_reads_sensibly(repo):
     _seed_pair(repo)
-    text = format_compare(build_compare(repo, "A", "B", 5.0, 25.0))
+    text = format_compare(build_compare(repo, "A", "B", P))
     assert "Rejected by Claude" in text and "X" in text and "chop" in text
     assert "Estimated cost" in text and "$0.0" in text
     assert "Verdict" in text
@@ -1179,7 +1205,7 @@ def test_format_compare_reads_sensibly(repo):
 def test_compare_requires_both_runs(repo):
     repo.create_run("A", "backtest", 0, "{}")
     with pytest.raises(ValueError):
-        build_compare(repo, "A", "missing", 5.0, 25.0)
+        build_compare(repo, "A", "missing", P)
 ```
 
 - [ ] **Step 2: Run, expect ModuleNotFoundError**
@@ -1200,6 +1226,19 @@ from tradebot.store.repo import Repo
 from tradebot.types import make_client_id
 
 
+@dataclass(frozen=True)
+class Prices:
+    """USD per million tokens by kind, from ai.price_* config."""
+    input: float
+    output: float
+    cache_read: float
+    cache_write: float
+
+    def cost(self, input_tokens: int, output_tokens: int, cache_read: int, cache_write: int) -> float:
+        return (input_tokens * self.input + output_tokens * self.output
+                + cache_read * self.cache_read + cache_write * self.cache_write) / 1e6
+
+
 @dataclass
 class Compare:
     a: Summary
@@ -1215,12 +1254,13 @@ class Compare:
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
+    cache_write_tokens: int
     avg_latency_ms: float
     est_cost_usd: float
     rows: list = field(default_factory=list)
 
 
-def build_compare(repo: Repo, run_a: str, run_b: str, price_in: float, price_out: float) -> Compare:
+def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices) -> Compare:
     a, b = build_summary(repo, run_a), build_summary(repo, run_b)  # raises ValueError for unknown runs
     positions_a = repo.positions_by_client_id(run_a)
     rows, with_pos, net, losses, wins = [], 0, 0.0, 0.0, 0.0
@@ -1239,12 +1279,14 @@ def build_compare(repo: Repo, run_a: str, run_b: str, price_in: float, price_out
                      "reason": r["reason"], "confidence": r["confidence"], "pnl_in_a": pnl,
                      "exit_in_a": pos["exit_reason"] if pos is not None else None})
     u = repo.ai_usage(run_b)
-    cost = (u["input_tokens"] * price_in + u["output_tokens"] * price_out) / 1e6
+    cost = prices.cost(int(u["input_tokens"]), int(u["output_tokens"]), int(u["cache_read_tokens"]),
+                       int(u["cache_write_tokens"]))
     return Compare(
         a=a, b=b, rejected=len(rows), rejected_with_position_in_a=with_pos, rejected_pnl_in_a=net,
         rejected_losses_avoided=losses, rejected_wins_forgone=wins, total_pnl_delta=b.total_pnl - a.total_pnl,
         calls=int(u["calls"]), failures=int(u["failures"]), input_tokens=int(u["input_tokens"]),
         output_tokens=int(u["output_tokens"]), cache_read_tokens=int(u["cache_read_tokens"]),
+        cache_write_tokens=int(u["cache_write_tokens"]),
         avg_latency_ms=float(u["avg_latency_ms"]), est_cost_usd=cost, rows=rows,
     )
 
@@ -1274,7 +1316,7 @@ def format_compare(c: Compare) -> str:
               f"  net PnL given up      {c.rejected_pnl_in_a:,.2f}   (negative means the filter removed net losers)",
               f"Total PnL delta (B-A)   {c.total_pnl_delta:,.2f}",
               f"Calls / failures        {c.calls} / {c.failures}   avg latency {c.avg_latency_ms:.0f} ms",
-              f"Tokens in/out/cached    {c.input_tokens:,} / {c.output_tokens:,} / {c.cache_read_tokens:,}",
+              f"Tokens in/out/cached    {c.input_tokens:,} / {c.output_tokens:,} / {c.cache_read_tokens:,} (cache writes {c.cache_write_tokens:,})",
               f"Estimated cost          ${c.est_cost_usd:,.2f}"]
     verdict = ("filter helped" if c.total_pnl_delta > c.est_cost_usd * 0 and c.total_pnl_delta > 0
                else "filter did not help on this window")
@@ -1328,7 +1370,7 @@ def test_backtest_ai_override_and_compare_report(tmp_path, monkeypatch):
             import json
             cands = json.loads(user)["candidates"]
             return ReviewResponse({"decisions": [{"index": c["index"], "symbol": c["symbol"], "approve": c["index"] % 2 == 0,
-                                                  "confidence": 0.5, "reason": "test"} for c in cands]}, 10, 500, 20, 0, None)
+                                                  "confidence": 0.5, "reason": "test"} for c in cands]}, 10, 500, 20, 0, 0, None)
 
     monkeypatch.setattr(filter_mod, "ClaudeClient", FakeClaude)
     (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n")
@@ -1344,7 +1386,7 @@ def test_backtest_ai_override_and_compare_report(tmp_path, monkeypatch):
                    "--ai", "claude_cached")
     assert res2.exit_code == 0, res2.output
     cmp2 = _invoke(tmp_path, "report", "--compare", "stub-run", "claude-run-2")
-    assert "Tokens in/out/cached    0 / 0 / 0" in cmp2.output
+    assert "Tokens in/out/cached    0 / 0 / 0 (cache writes 0)" in cmp2.output
 
 
 def test_backtest_claude_without_key_is_clean_error(tmp_path):
@@ -1384,7 +1426,7 @@ from dataclasses import replace as dc_replace
 
 from tradebot.ai.claude_client import ClaudeClient
 from tradebot.ai.prompt import SYSTEM_PROMPT, render_candidates
-from tradebot.report.compare import build_compare, format_compare
+from tradebot.report.compare import Prices, build_compare, format_compare
 from tradebot.types import Candidate, Candle, Signal
 ```
 
@@ -1420,8 +1462,7 @@ def report(cfg: Config, run_id: Optional[str], compare) -> None:
         raise click.ClickException("give --run RUN or --compare RUN_A RUN_B")
     repo = Repo(connect(cfg.paths.db))
     if compare:
-        click.echo(format_compare(build_compare(repo, compare[0], compare[1],
-                                                cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok)))
+        click.echo(format_compare(build_compare(repo, compare[0], compare[1], _prices(cfg))))
         return
     click.echo(format_summary(build_summary(repo, run_id)))
 ```
@@ -1429,6 +1470,11 @@ def report(cfg: Config, run_id: Optional[str], compare) -> None:
 Add the estimate command:
 
 ```python
+def _prices(cfg: Config) -> Prices:
+    return Prices(cfg.ai.price_in_per_mtok, cfg.ai.price_out_per_mtok,
+                  cfg.ai.price_cache_read_per_mtok, cfg.ai.price_cache_write_per_mtok)
+
+
 @main.command("estimate-ai")
 @click.option("--run", "run_id", required=True, help="A completed stub run whose risk-approved signals define the workload")
 @click.pass_obj
@@ -1458,10 +1504,11 @@ def estimate_ai(cfg: Config, run_id: str) -> None:
     per_candidate = per_biggest / biggest
     input_tokens = int(candidates * per_candidate)
     output_tokens = candidates * 60
-    cost = (input_tokens * cfg.ai.price_in_per_mtok + output_tokens * cfg.ai.price_out_per_mtok) / 1e6
+    cost = _prices(cfg).cost(input_tokens, output_tokens, 0, 0)
     click.echo(f"bars with candidates: {bars}   candidates: {candidates}   largest bar: {biggest}")
     click.echo(f"tokens per candidate: {per_candidate:.0f}   input total: {input_tokens:,}   output total ~{output_tokens:,}")
-    click.echo(f"estimated cost ({cfg.ai.model}): ${cost:,.2f} before prompt-cache savings; a cached replay costs $0")
+    click.echo(f"estimated cost ({cfg.ai.model}): ${cost:,.2f} as an upper bound; the shared system prompt caches, "
+               f"and a cached replay costs $0")
 ```
 
 - [ ] **Step 4: Run the suite** — Expected: all pass.
