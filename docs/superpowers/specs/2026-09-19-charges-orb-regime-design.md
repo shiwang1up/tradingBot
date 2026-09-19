@@ -1,6 +1,6 @@
 # Real Charges, Opening-Range Breakout and NIFTY Regime Filter — Design Spec
 
-Date: 2026-09-19. Status: approved in conversation, awaiting written review. Extends the 2026-09-14
+Date: 2026-09-19. Status: approved. Extends the 2026-09-14
 trading bot spec and the 2026-09-15 indicator, paper and pullback specs.
 
 ## Why
@@ -64,7 +64,7 @@ A config with no `charges:` section loads with these defaults. `enabled: false` 
 
 ### Broker, engine, store
 
-- `Position` gains `charges: float | None`. `SimBroker._close` computes it from the fill values,
+- `Position` gains `charges: float | None`. `BacktestBroker._close` computes it from the fill values,
   sets it, and moves cash by `pnl - charges`. `pnl` keeps its meaning.
 - `Engine._record` adds `pnl - charges` to `_day.realised`, so the daily loss cap and `daily_pnl`
   are net. Unrealised PnL stays gross (charges are only known at close).
@@ -99,8 +99,9 @@ below `min_range_pct` or above `max_range_pct`, or when the range has fewer bars
 `range_minutes / interval` (late listing, missing data). `is_ready` is true once the range is
 complete. `snapshot` returns range high, low, width percent and relative volume for the AI filter.
 
-Entries stop at `session.no_new_entries_after`, which the variant sets to 13:00; the strategy needs
-no clock of its own. The interval is passed in the params so the strategy can count range bars.
+Entries stop at `session.no_new_entries_after`, which the variant sets to 13:00. The strategy counts
+range bars itself, so its params carry `session_open` and `interval_minutes`; config load fails unless
+they equal `session.open` and `execution.interval_minutes`. `product` must be MIS.
 
 ### `config-orb.yaml`
 
@@ -112,6 +113,8 @@ A copy of `config-15m.yaml` with `strategy.orb`, `execution.interval_minutes: 15
       reward_risk: 2.0          # null = stop or square-off only
       min_range_pct: 0.4
       max_range_pct: 1.5
+      session_open: "09:15"     # must equal session.open
+      interval_minutes: 15      # must equal execution.interval_minutes
       product: MIS
 
 ### Priority ordering
@@ -184,8 +187,8 @@ cap, `enabled: false`. `test_backtest_broker.py`: cash and `charges` on close. `
 cap on net; priority ordering; index candle never reaches a strategy; regime rejections and reasons;
 missing index bar keeps state. `test_orb.py`: range building, breakout both ways, one signal per day,
 width filters, short range, day reset, `reward_risk: null`, priority value. `test_regime.py`: states
-and warm-up. `test_summary.py`: gross/charges/net and the estimated path for NULL charges.
-`test_db.py`: migration from the previous schema version. All code stays Python 3.9 compatible.
+and warm-up. `test_report.py` and `test_compare.py`: gross/charges/net and the estimated path for NULL charges.
+`test_store.py`: migration from the previous schema version. `test_cli.py`: index fetch, the start-up check. All code stays Python 3.9 compatible.
 
 ## Deliverables
 
