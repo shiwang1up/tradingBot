@@ -249,3 +249,27 @@ def test_shipped_configs_carry_the_charges_block(tmp_path):
 def test_resolved_config_records_charges(tmp_path):
     from tradebot.config import resolved_config
     assert resolved_config(make_config(tmp_path, charges={"enabled": True}))["charges"]["enabled"] is True
+
+
+ORB = {"range_minutes": 30, "reward_risk": 2.0, "min_range_pct": 0.4, "max_range_pct": 1.5, "product": "MIS",
+       "session_open": "09:15", "interval_minutes": 15}
+
+
+def test_config_orb_loads_and_builds_the_strategy(tmp_path):
+    from tradebot.strategy.ema_rsi import build_strategy, strategy_params
+    root = Path(__file__).resolve().parents[1]
+    cfg = load_config(root / "config-orb.yaml", tmp_path / "nonexistent.env")
+    assert cfg.execution.interval_minutes == 15 and cfg.strategy["orb"] == ORB
+    assert (cfg.risk.max_entries_per_day, cfg.risk.max_open_positions) == (2, 2)
+    assert cfg.session.no_new_entries_after == "13:00" and cfg.charges.enabled is True
+    assert cfg.paths.db == load_config(root / "config.yaml", tmp_path / "nonexistent.env").paths.db
+    SessionClock(cfg.session, cfg.execution.interval_minutes)     # the 13:00 cutoff fits the session
+    assert build_strategy("orb", strategy_params(cfg.strategy, "orb")).name == "orb"
+
+
+def test_orb_keys_must_match_the_session_and_the_interval(tmp_path):
+    with pytest.raises(ValueError, match="orb.interval_minutes"):
+        make_config(tmp_path, strategy={"orb": ORB})                       # BASE_CONFIG runs 5-minute bars
+    with pytest.raises(ValueError, match="orb.session_open"):
+        make_config(tmp_path, strategy={"orb": dict(ORB, interval_minutes=5, session_open="09:30")})
+    make_config(tmp_path, strategy={"orb": dict(ORB, interval_minutes=5, range_minutes=30)})

@@ -225,6 +225,11 @@ def _validate(cfg: "Config") -> None:
     for name in ("open", "close", "square_off", "no_new_entries_after"):
         checks.append((bool(_HHMM.match(getattr(s, name))), f'session.{name} must be a quoted "HH:MM" time'))
     checks.append((all(isinstance(h, str) for h in s.holidays), "session.holidays must be a list of ISO date strings"))
+    orb = cfg.strategy.get("orb")
+    if isinstance(orb, dict):  # the strategy counts range bars itself, so its copy of these must not drift
+        checks.append((orb.get("interval_minutes") == e.interval_minutes,
+                       "strategy.orb.interval_minutes must equal execution.interval_minutes"))
+        checks.append((orb.get("session_open") == s.open, "strategy.orb.session_open must equal session.open"))
     for ok, msg in checks:
         if not ok:
             raise ValueError(f"config.yaml {msg}")
