@@ -47,7 +47,8 @@ def connect(path: Union[str, Path]) -> sqlite3.Connection:
     if found > SCHEMA_VERSION:
         conn.close()
         raise SchemaVersionError(
-            f"{path} has schema version {found}, code expects {SCHEMA_VERSION}; upgrade the code or delete the file"
+            f"{path} has schema version {found}, code expects {SCHEMA_VERSION}; "
+            "upgrade the code, or restore an older backup of the file"
         )
     if 0 < found < SCHEMA_VERSION:  # a fresh database (0) is created at the current version by schema.sql
         missing = [v for v in range(found, SCHEMA_VERSION) if v not in MIGRATIONS]

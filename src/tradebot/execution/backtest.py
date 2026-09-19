@@ -88,6 +88,10 @@ class BacktestBroker:
         return open_price < sig.entry_price * (1 - self.buffer)
 
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]:
+        """Fill every pending entry at this bar's open, then close every open position whose stop or
+        target this bar hits. A close is contained per position: one whose exit price is bad (see
+        `_close`) is logged at error level and left open for the caller to retry, while every other
+        fill and close on this bar still happens and is still returned."""
         events: list[BrokerEvent] = []
         for sym, order in list(self._pending.items()):
             del self._pending[sym]
@@ -113,7 +117,11 @@ class BacktestBroker:
                 continue
             reason, level = hit
             price = self._exit_price(pos.direction, level) if reason == "STOP" else level
-            self._close(pos, ts, price, reason)
+            try:
+                self._close(pos, ts, price, reason)
+            except ValueError as e:
+                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e)
+                continue
             events.append(Closed(pos))
         return events
 
@@ -121,7 +129,9 @@ class BacktestBroker:
                    reason: str = "SQUARE_OFF", last_prices: dict[str, float] | None = None) -> list[Closed]:
         """Close every position in `products` at this bar's close. A symbol with no candle this
         bar closes at its last known price (`last_prices`) so a data hole cannot carry an
-        intraday position overnight; with no price at all it stays open and the caller retries."""
+        intraday position overnight; with no price at all it stays open and the caller retries.
+        A close that fails (bad exit price) is contained the same way: logged at error level and
+        left open, while every other position in `products` is still closed."""
         out: list[Closed] = []
         for sym, pos in list(self._positions.items()):
             if pos.product not in products:
@@ -130,7 +140,11 @@ class BacktestBroker:
             ref = c.close if c is not None else (last_prices or {}).get(sym)
             if ref is None:
                 continue
-            self._close(pos, ts, self._exit_price(pos.direction, ref), reason)
+            try:
+                self._close(pos, ts, self._exit_price(pos.direction, ref), reason)
+            except ValueError as e:
+                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e)
+                continue
             out.append(Closed(pos))
         return out
 

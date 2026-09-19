@@ -20,6 +20,9 @@ def round_trip_charges(buy_value: float, sell_value: float, cfg: Optional[Charge
     individual components (brokerage, STT, exchange transaction charge, SEBI fee, stamp duty, GST)
     are not rounded on their own. Every order pays at least `brokerage_min`, including one worth
     zero rupees.
+
+    `position_charges` below always validates its arguments regardless of `cfg`; this function
+    validates only when the schedule is enabled.
     """
     if cfg is None or not cfg.enabled:
         return 0.0

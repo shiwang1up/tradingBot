@@ -170,8 +170,9 @@ def test_v2_database_is_migrated_to_v3(tmp_path):
     conn.close()
 
 
-def test_v3_database_is_migrated_to_v4(tmp_path):
-    path = tmp_path / "v3.db"
+def _make_v3_database(path) -> None:
+    """A schema-v3 file: positions has no `charges` column yet. Shared by the migration test and
+    the column-order test below."""
     raw = sqlite3.connect(str(path))
     raw.executescript("""
         CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
@@ -190,12 +191,37 @@ def test_v3_database_is_migrated_to_v4(tmp_path):
     """)
     raw.commit()
     raw.close()
+
+
+def test_v3_database_is_migrated_to_v4(tmp_path):
+    path = tmp_path / "v3.db"
+    _make_v3_database(path)
     conn = connect(path)
     assert "charges" in {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
     row = conn.execute("SELECT pnl, charges FROM positions WHERE run_id='r'").fetchone()
     assert row["pnl"] == 20.0 and row["charges"] is None      # old rows keep NULL: the report estimates them
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     conn.close()
+
+
+def test_fresh_and_migrated_databases_have_identical_positions_columns(tmp_path):
+    """ALTER TABLE ADD COLUMN appends, so a fresh database's positions columns must be declared in
+    the same order schema.sql's charges-last ordering gives a migrated (v3 -> v4) database."""
+    def cols(conn):
+        return [(r["name"], r["type"], r["notnull"], r["dflt_value"])
+               for r in conn.execute("PRAGMA table_info(positions)")]
+
+    fresh = connect(":memory:")
+    fresh_cols = cols(fresh)
+    fresh.close()
+
+    path = tmp_path / "v3_for_columns.db"
+    _make_v3_database(path)
+    migrated = connect(path)
+    migrated_cols = cols(migrated)
+    migrated.close()
+
+    assert fresh_cols == migrated_cols
 
 
 def test_close_position_stores_charges(repo):
