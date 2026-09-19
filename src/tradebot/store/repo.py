@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from typing import Optional
 
 from tradebot.types import Candle, Position, Signal
 
@@ -205,10 +206,11 @@ class Repo:
         self.conn.commit()
         return cur.lastrowid
 
-    def close_position(self, position_id: int, closed_ts: int, exit_price: float, exit_reason: str, pnl: float) -> None:
+    def close_position(self, position_id: int, closed_ts: int, exit_price: float, exit_reason: str, pnl: float,
+                       charges: Optional[float] = None) -> None:
         self.conn.execute(
-            "UPDATE positions SET closed_at=?, exit_price=?, exit_reason=?, pnl=? WHERE id=?",
-            (closed_ts, exit_price, exit_reason, pnl, position_id),
+            "UPDATE positions SET closed_at=?, exit_price=?, exit_reason=?, pnl=?, charges=? WHERE id=?",
+            (closed_ts, exit_price, exit_reason, pnl, charges, position_id),
         )
         self.conn.commit()
 

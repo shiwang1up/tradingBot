@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS positions (
   exit_price    REAL,
   exit_reason   TEXT,
   pnl           REAL,
+  charges       REAL,            -- brokerage + statutory at close; NULL on rows written before schema v4
   fill_status   TEXT NOT NULL DEFAULT 'full',
   adopted       INTEGER NOT NULL DEFAULT 0
 );

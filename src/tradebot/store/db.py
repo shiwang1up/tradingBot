@@ -7,7 +7,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Union
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class SchemaVersionError(RuntimeError):
@@ -27,6 +27,9 @@ MIGRATIONS = {
     ],
     2: [
         "ALTER TABLE runs ADD COLUMN last_bar_ts INTEGER",
+    ],
+    3: [
+        "ALTER TABLE positions ADD COLUMN charges REAL",
     ],
 }
 

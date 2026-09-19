@@ -130,6 +130,12 @@ def test_v1_database_is_migrated_to_current(tmp_path):
         CREATE TABLE ai_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
                                    filter_kind TEXT NOT NULL, approved INTEGER NOT NULL, reason TEXT NOT NULL,
                                    confidence REAL NOT NULL, latency_ms INTEGER NOT NULL, failure TEXT);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
         PRAGMA user_version = 1;
     """)
     raw.commit()
@@ -137,7 +143,7 @@ def test_v1_database_is_migrated_to_current(tmp_path):
     conn = connect(path)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_decisions)")}
     assert {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
 
 
 def test_v2_database_is_migrated_to_v3(tmp_path):
@@ -146,6 +152,12 @@ def test_v2_database_is_migrated_to_v3(tmp_path):
     raw.executescript("""
         CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
                            ended_at INTEGER, config_json TEXT NOT NULL);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
         INSERT INTO runs VALUES ('r', 'backtest', 0, NULL, '{}');
         PRAGMA user_version = 2;
     """)
@@ -154,8 +166,46 @@ def test_v2_database_is_migrated_to_v3(tmp_path):
     conn = connect(path)
     assert "last_bar_ts" in {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
     assert conn.execute("SELECT last_bar_ts FROM runs WHERE run_id='r'").fetchone()[0] is None
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     conn.close()
+
+
+def test_v3_database_is_migrated_to_v4(tmp_path):
+    path = tmp_path / "v3.db"
+    raw = sqlite3.connect(str(path))
+    raw.executescript("""
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
+                           ended_at INTEGER, config_json TEXT NOT NULL, last_bar_ts INTEGER);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO runs VALUES ('r', 'backtest', 0, NULL, '{}', NULL);
+        INSERT INTO positions(run_id, symbol, product, direction, strategy, client_id, qty, avg_price, stop,
+                              opened_at, closed_at, exit_price, exit_reason, pnl)
+               VALUES ('r', 'A', 'MIS', 'LONG', 'ema_rsi', 'c1', 10, 100.0, 99.0, 1, 2, 102.0, 'TARGET', 20.0);
+        PRAGMA user_version = 3;
+    """)
+    raw.commit()
+    raw.close()
+    conn = connect(path)
+    assert "charges" in {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
+    row = conn.execute("SELECT pnl, charges FROM positions WHERE run_id='r'").fetchone()
+    assert row["pnl"] == 20.0 and row["charges"] is None      # old rows keep NULL: the report estimates them
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    conn.close()
+
+
+def test_close_position_stores_charges(repo):
+    repo.create_run("r", "backtest", 0, "{}")
+    pid = repo.insert_position("r", Position("A", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 1, "c1", "ema_rsi"))
+    repo.close_position(pid, 9, 102.0, "TARGET", 20.0, charges=3.21)
+    assert repo.list_positions("r")[0]["charges"] == 3.21
+    pid2 = repo.insert_position("r", Position("B", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 1, "c2", "ema_rsi"))
+    repo.close_position(pid2, 9, 102.0, "TARGET", 20.0)     # older callers: charges stays NULL
+    assert repo.list_positions("r")[1]["charges"] is None
 
 
 def test_last_bar_ts_open_positions_and_pending_orders(repo):
@@ -217,6 +267,12 @@ def _v1_db(path, extra_ddl=""):
         CREATE TABLE ai_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
                                    filter_kind TEXT NOT NULL, approved INTEGER NOT NULL, reason TEXT NOT NULL,
                                    confidence REAL NOT NULL, latency_ms INTEGER NOT NULL, failure TEXT);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
         PRAGMA user_version = 1;
     """ + extra_ddl)
     raw.commit()
