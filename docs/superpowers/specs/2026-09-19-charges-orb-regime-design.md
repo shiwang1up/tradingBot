@@ -129,10 +129,16 @@ different symbols on contended bars than before, which is the intended fix.
 ### Experiment
 
 Six tuning runs on 2026-06-17..2026-08-15: `range_minutes` {30, 60} × `reward_risk` {1.5, 2.0, null},
-AI filter `stub`. The best by net expectancy in R is run once on 2026-08-16..2026-09-15. The
+AI filter `stub`. The best by R on risk is run once on 2026-08-16..2026-09-15. The
 backtest CLI already takes `--start/--end`; run ids are `orb-t-<range>-<rr>` and `orb-holdout`.
 
-Success: net expectancy > 0 on both windows with at least 30 holdout trades. Otherwise the result is
+The decision metric is **R on risk**: net PnL divided by rupees at risk (`|fill - stop| x quantity`), all
+trades pooled. The unweighted per-trade mean R is not used: a position sized from leftover margin can risk
+a few rupees, the per-order brokerage floor then costs it several R, and a few such trades dominate the
+mean (on `real-1`: -3.96 unweighted against -0.61 on risk). R on risk has the sign of net PnL, so a
+verdict can never contradict the money. The report prints both.
+
+Success: R on risk > 0 on both windows with at least 30 holdout trades. Otherwise the result is
 recorded as no edge. Fewer than 30 holdout trades is recorded as inconclusive, not as a pass.
 
 ## Phase 3: NIFTY regime filter
@@ -171,7 +177,7 @@ in the report with no report change.
 
 The chosen ORB config and the 5-minute confluence config, each with `regime.enabled` false and true,
 on both windows, net of charges: eight runs. The filter is kept for a strategy only if it improves
-net expectancy on both windows.
+R on risk on both windows.
 
 ## Errors
 

@@ -1372,10 +1372,12 @@ def with_orb(cfg, range_minutes, rr):
 
 def row(s) -> str:
     return (f"{s.run_id:<22} {s.trades:>6} {s.win_rate * 100:>6.1f}% {s.gross_pnl:>12,.0f} {s.charges:>10,.0f} "
-            f"{s.total_pnl:>12,.0f} {s.avg_r:>8.3f}")
+            f"{s.total_pnl:>12,.0f} {s.r_on_risk:>10.3f}")
 
 
-HEADER = f"{'run':<22} {'trades':>6} {'win':>7} {'gross':>12} {'charges':>10} {'net':>12} {'avg R':>8}"
+# "R on risk" is net PnL over rupees at risk, all trades pooled. It is the decision metric: unlike the
+# unweighted per-trade Avg R, scrap-sized trades cannot dominate it, and its sign is the sign of net PnL.
+HEADER = f"{'run':<22} {'trades':>6} {'win':>7} {'gross':>12} {'charges':>10} {'net':>12} {'R on risk':>10}"
 
 
 def main() -> None:
@@ -1397,7 +1399,7 @@ def main() -> None:
     s = run(with_orb(cfg, a.range_minutes, rr), "orb", "orb-holdout", HOLDOUT)
     print(row(s))
     verdict = ("inconclusive: fewer than 30 holdout trades" if s.trades < 30
-               else "holds up out of sample" if s.avg_r > 0 else "no edge out of sample")
+               else "holds up out of sample" if s.r_on_risk > 0 else "no edge out of sample")
     print(f"holdout verdict: {verdict}")
 
 
@@ -1414,7 +1416,7 @@ Sanity checks before trusting it — run `.venv/bin/tradebot --config config-orb
 
 - [ ] **Step 3: Choose, then run the holdout once**
 
-Pick the row with the highest `avg R`. If every row is negative, still run the holdout on the least bad one: the result to record is then "no edge", confirmed out of sample.
+Pick the row with the highest `R on risk` (net PnL divided by rupees at risk, all trades pooled; `Summary.r_on_risk`). If every row is negative, still run the holdout on the least bad one: the result to record is then "no edge", confirmed out of sample.
 
 Run: `.venv/bin/python scripts/orb_experiment.py holdout --range <30|60> --rr <1.5|2.0|none>`
 Expected: one row `orb-holdout` and a verdict line. Do not re-run with other parameters; a second look makes it a tuning run.
@@ -2050,7 +2052,7 @@ and the sentence: `The regime phase runs ORB (the chosen parameters) and 5-minut
 Run: `.venv/bin/python scripts/orb_experiment.py regime --range <chosen> --rr <chosen>`
 Expected: eight rows `rg-orb-off-tune` … `rg-confluence-on-hold`; the confluence runs take a few minutes each. Check that `rg-orb-off-tune` equals the chosen `orb-t-…` row and `rg-orb-off-hold` equals `orb-holdout` (determinism), and that an `-on-` run's report shows `regime` under `Risk rejects`.
 
-Decision rule from the spec: keep the filter for a strategy only if `avg R` is higher with it on **both** windows.
+Decision rule from the spec: keep the filter for a strategy only if `R on risk` is higher with it on **both** windows.
 
 - [ ] **Step 4: Commit**
 
@@ -2080,7 +2082,7 @@ for r in real-1 real-1-sonnet real-conf-2 pb-15m-1; do .venv/bin/tradebot report
 
 Create the notes file in the style of `docs/superpowers/notes/2026-09-15-pullback-15m-results.md` (read it first) with these sections, every number copied from command output, none from memory:
 
-1. **Charges** — the schedule used, and a table of the four old runs: trades, gross, charges (estimated), net, avg R net.
+1. **Charges** — the schedule used, and a table of the four old runs: trades, gross, charges (estimated), net, R on risk (net). Say in one sentence why the unweighted per-trade Avg R is not used: on `real-1` it reads -3.96 against an R on risk of -0.61, because 490 of 884 trades risk under 25 rupees and the per-order brokerage floor costs those more than 1R each.
 2. **ORB tuning** — the six-row table from Task 10 step 2, the parameters chosen and why.
 3. **ORB holdout** — the single row and the verdict line, plus the median stop distance as a percent of price and the cost per trade in R for `orb-holdout`, from:
 
