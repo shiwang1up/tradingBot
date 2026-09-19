@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tradebot.config import load_config
+from tradebot.config import ChargesConfig, load_config
 from tests.helpers import make_config
 from tradebot.engine.clock import SessionClock, ist_epoch
 
@@ -195,3 +195,34 @@ def test_config_15m_loads_and_fits_the_session(tmp_path):
     d = date(2026, 9, 14)
     assert clock.square_off_bar_ts(d) == ist_epoch(d, "14:45")
     assert clock.last_bar_ts(d) == ist_epoch(d, "15:15")
+
+
+def test_charges_section_missing_means_groww_defaults(tmp_path):
+    cfg = make_config(tmp_path, charges=None)
+    assert cfg.charges == ChargesConfig()
+    assert cfg.charges.enabled is True
+    assert (cfg.charges.brokerage_pct, cfg.charges.brokerage_min, cfg.charges.brokerage_max) == (0.1, 5.0, 20.0)
+    assert (cfg.charges.stt_sell_pct, cfg.charges.exchange_txn_pct) == (0.025, 0.00297)
+    assert (cfg.charges.sebi_pct, cfg.charges.stamp_buy_pct, cfg.charges.gst_pct) == (0.0001, 0.003, 18.0)
+
+
+def test_charges_are_validated(tmp_path):
+    with pytest.raises(ValueError, match="charges.stt_sell_pct"):
+        make_config(tmp_path, charges={"stt_sell_pct": -1})
+    with pytest.raises(ValueError, match="brokerage_min"):
+        make_config(tmp_path, charges={"brokerage_min": 30.0})
+    with pytest.raises(ValueError, match="unknown keys"):
+        make_config(tmp_path, charges={"brokrage_pct": 1})
+
+
+def test_shipped_configs_carry_the_charges_block(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    for name in ("config.yaml", "config-15m.yaml"):
+        cfg = load_config(root / name, tmp_path / "nonexistent.env")
+        assert "charges" in cfg.raw, name
+        assert cfg.charges == ChargesConfig(), name
+
+
+def test_resolved_config_records_charges(tmp_path):
+    from tradebot.config import resolved_config
+    assert resolved_config(make_config(tmp_path, charges={"enabled": True}))["charges"]["enabled"] is True

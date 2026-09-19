@@ -62,6 +62,17 @@ execution:
   bar_deadline_sec: 60
   interval_minutes: 5
 
+charges:                        # Groww intraday equity; check against groww.in/pricing before trusting results
+  enabled: true
+  brokerage_pct: 0.1            # per order, percent of order value ...
+  brokerage_max: 20.0           # ... capped at this many rupees
+  brokerage_min: 5.0            # ... and floored at this
+  stt_sell_pct: 0.025           # sell side only
+  exchange_txn_pct: 0.00297     # NSE, both sides
+  sebi_pct: 0.0001              # both sides
+  stamp_buy_pct: 0.003          # buy side only
+  gst_pct: 18.0                 # on brokerage + exchange txn + SEBI
+
 session:
   open: "09:15"
   close: "15:30"

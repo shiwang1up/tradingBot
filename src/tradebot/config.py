@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -85,6 +86,21 @@ class PathsConfig:
 
 
 @dataclass(frozen=True)
+class ChargesConfig:
+    """Groww intraday equity schedule. ``*_pct`` fields are human percents of order value.
+    Every field has a default, so the section may be left out of config.yaml."""
+    enabled: bool = True
+    brokerage_pct: float = 0.1         # per order ...
+    brokerage_max: float = 20.0        # ... capped at this many rupees
+    brokerage_min: float = 5.0         # ... and floored at this
+    stt_sell_pct: float = 0.025        # sell side only
+    exchange_txn_pct: float = 0.00297  # NSE, both sides
+    sebi_pct: float = 0.0001           # both sides
+    stamp_buy_pct: float = 0.003       # buy side only
+    gst_pct: float = 18.0              # on brokerage + exchange txn + SEBI
+
+
+@dataclass(frozen=True)
 class Secrets:
     groww_api_key: str
     groww_totp_secret: str  # TOTP flow: base32 secret from the API keys page (no daily approval)
@@ -104,6 +120,7 @@ class Config:
     paths: PathsConfig
     secrets: Secrets
     raw: dict
+    charges: ChargesConfig = ChargesConfig()
 
 
 _COERCE = {"float": float, "int": int, "bool": bool, "str": str, "tuple": tuple}
@@ -151,6 +168,13 @@ def _section(raw: dict, name: str, cls):
     return cls(**{k: _coerce(name, k, fields[k].type, v) for k, v in given.items()})
 
 
+def _optional_section(raw: dict, name: str, cls):
+    """For a section whose every field has a default: absent or empty in YAML means all defaults."""
+    if raw.get(name) is None:
+        return cls()
+    return _section(raw, name, cls)
+
+
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 AI_FILTERS = ("stub", "claude", "claude_cached")
 AI_ON_FAILURE = ("reject", "pass_through")
@@ -189,6 +213,12 @@ def _validate(cfg: "Config") -> None:
         (a.price_cache_read_per_mtok >= 0, "ai.price_cache_read_per_mtok must be >= 0"),
         (a.price_cache_write_per_mtok >= 0, "ai.price_cache_write_per_mtok must be >= 0"),
     ]
+    ch = cfg.charges
+    for f in dataclasses.fields(ch):
+        if f.name != "enabled":
+            v = getattr(ch, f.name)
+            checks.append((math.isfinite(v) and v >= 0, f"charges.{f.name} must be a finite number >= 0"))
+    checks.append((ch.brokerage_min <= ch.brokerage_max, "charges.brokerage_min must not exceed charges.brokerage_max"))
     for name in ("open", "close", "square_off", "no_new_entries_after"):
         checks.append((bool(_HHMM.match(getattr(s, name))), f'session.{name} must be a quoted "HH:MM" time'))
     checks.append((all(isinstance(h, str) for h in s.holidays), "session.holidays must be a list of ISO date strings"))
@@ -234,6 +264,7 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         ),
         raw=raw,
+        charges=_optional_section(raw, "charges", ChargesConfig),
     )
     _validate(cfg)
     return cfg

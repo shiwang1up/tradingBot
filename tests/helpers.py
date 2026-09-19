@@ -25,6 +25,7 @@ BASE_CONFIG = {
     "data": {"official_fetch_concurrency": 5},
     "paths": {"db": "data/tradebot.db", "logs": "data/logs", "instruments": "data/instruments.csv",
               "kill_switch": "KILL", "universe": "universe.yaml"},
+    "charges": {"enabled": False},
 }
 
 
@@ -37,7 +38,7 @@ def make_config(tmp_path, **overrides) -> Config:
         "universe": str(tmp_path / "universe.yaml"),
     }
     for key, val in overrides.items():          # e.g. risk={"max_open_positions": 1}
-        raw[key] = {**raw[key], **val} if isinstance(val, dict) else val
+        raw[key] = {**(raw.get(key) or {}), **val} if isinstance(val, dict) else val
     p = tmp_path / "config.yaml"
     p.write_text(yaml.safe_dump(raw))
     return load_config(p, tmp_path / "nonexistent.env")
