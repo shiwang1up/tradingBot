@@ -15,7 +15,7 @@ from typing import Optional
 
 from tradebot.config import ChargesConfig
 from tradebot.engine.clock import iso_ist
-from tradebot.report.summary import Summary, build_summary, row_charges
+from tradebot.report.summary import Summary, build_summary, gross_kind, row_charges
 from tradebot.store.repo import Repo
 from tradebot.types import make_client_id
 
@@ -111,17 +111,25 @@ def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices, schedule: 
     )
 
 
+def _dd_suffix(kind: Optional[str]) -> str:
+    if kind == "full":
+        return " (gross)"
+    if kind == "partial":
+        return " (partly gross)"
+    return ""
+
+
 def _side_by_side(a: Summary, b: Summary) -> list:
     charges_a = f"{a.charges:,.2f}" + (" (est.)" if a.charges_estimated else "")
     charges_b = f"{b.charges:,.2f}" + (" (est.)" if b.charges_estimated else "")
-    dd_equity_a = f"{a.max_drawdown_equity:,.2f}" + (" (gross)" if a.charges_estimated else "")
-    dd_equity_b = f"{b.max_drawdown_equity:,.2f}" + (" (gross)" if b.charges_estimated else "")
+    dd_equity_a = f"{a.max_drawdown_equity:,.2f}" + _dd_suffix(gross_kind(a))
+    dd_equity_b = f"{b.max_drawdown_equity:,.2f}" + _dd_suffix(gross_kind(b))
     metrics = [
         ("Trades", f"{a.trades}", f"{b.trades}"),
         ("Win rate", f"{a.win_rate * 100:.1f}%", f"{b.win_rate * 100:.1f}%"),
         ("Total PnL", f"{a.total_pnl:,.2f}", f"{b.total_pnl:,.2f}"),
         ("Charges", charges_a, charges_b),
-        ("Avg R", f"{a.avg_r:.2f}", f"{b.avg_r:.2f}"),
+        ("Avg R (per trade)", f"{a.avg_r:.2f}", f"{b.avg_r:.2f}"),
         ("R on risk", f"{a.r_on_risk:.2f}", f"{b.r_on_risk:.2f}"),
         ("Max DD (closed)", f"{a.max_drawdown:,.2f}", f"{b.max_drawdown:,.2f}"),
         ("Max DD (equity)", dd_equity_a, dd_equity_b),
@@ -129,6 +137,9 @@ def _side_by_side(a: Summary, b: Summary) -> list:
     ]
     out = [f"{'Metric':<16} {'A: ' + a.run_id:>18} {'B: ' + b.run_id:>18}"]
     out += [f"{m:<16} {va:>18} {vb:>18}" for m, va, vb in metrics]
+    if a.charges_estimated or b.charges_estimated:
+        out.append("(est.) charges were not recorded for that run; its Total PnL, R figures and "
+                    "closed drawdown use estimated charges")
     return out
 
 

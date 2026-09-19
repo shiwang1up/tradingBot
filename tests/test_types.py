@@ -1,4 +1,8 @@
 # tests/test_types.py
+import math
+
+import pytest
+
 from tradebot.types import Position, Signal, make_client_id, round_tick
 
 
@@ -50,3 +54,13 @@ def test_signal_priority_defaults_to_zero_and_is_the_last_field():
     s = Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 1000)
     assert s.priority == 0.0
     assert Signal("orb", "A", "LONG", 100.0, 99.0, None, "MIS", 1000, priority=2.5).priority == 2.5
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None])
+def test_signal_rejects_a_non_finite_priority(bad):
+    with pytest.raises(ValueError, match="priority"):
+        _sig(priority=bad)
+
+
+def test_signal_accepts_an_int_priority():
+    assert _sig(priority=2).priority == 2

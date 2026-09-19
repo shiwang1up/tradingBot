@@ -53,7 +53,7 @@ def test_report_estimates_charges_for_a_row_that_predates_them(tmp_path):
     repo.conn.close()
     res = _invoke(tmp_path, "report", "--run", "old-run")
     assert res.exit_code == 0, res.output
-    assert "estimated" in res.output
+    assert "est." in res.output
     charges_line = next(ln for ln in res.output.splitlines() if ln.startswith("Charges"))
     assert charges_line.split()[1] != "0.00"
 

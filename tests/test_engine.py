@@ -66,10 +66,23 @@ def test_same_bar_signals_are_ranked_by_priority(repo, tmp_path):
 
 
 def test_equal_priority_falls_back_to_symbol_order(repo, tmp_path):
+    """`_run_fixed` goes through HistoricalSource.from_repo, which hands candles over in SQL
+    ts, symbol order regardless of dict order - so it can never show B before A and this test
+    must drive process_bar directly, the way the zero-candle test above does, to actually
+    exercise the tie-break rather than just agreeing with it by construction."""
     cfg = make_config(tmp_path, risk={"max_open_positions": 1})
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
     ts = ist_epoch(MON, "10:00")
-    _run_fixed(repo, cfg, _two_symbols(), {("B", ts): ("LONG", 0.0), ("A", ts): ("LONG", 0.0)}, ["A", "B"])
-    assert _decisions(repo) == [("A", "LONG", 1, "ok"), ("B", "LONG", 0, "max_open_positions")]
+    strat = FixedStrategy({("A", ts): ("LONG", 0.0), ("B", ts): ("LONG", 0.0)})
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [strat], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1, "B": 1}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    eng._start_day()
+    candle_a = Candle("A", ts, 100.0, 100.5, 99.8, 100.2, 1000)
+    candle_b = Candle("B", ts, 50.0, 50.5, 49.5, 50.0, 1000)
+    eng.process_bar(ts, {"B": candle_b, "A": candle_a})
+    assert _decisions(repo, "t1") == [("A", "LONG", 1, "ok"), ("B", "LONG", 0, "max_open_positions")]
 
 
 def test_engine_invariants(repo, tmp_path):
@@ -195,6 +208,24 @@ def test_strategy_exception_disables_strategy_for_day(repo, tmp_path):
     day2_open = ist_epoch(date(2026, 9, 15), "09:15")
     assert not [r for r in rows if day1_after_10 <= r["bar_ts"] < day2_open], "disabled for the rest of day 1"
     assert [r for r in rows if r["bar_ts"] >= day2_open], "runs again on day 2"
+
+
+def test_nonfinite_priority_disables_strategy_for_day(repo, tmp_path):
+    """A NaN priority raises inside Signal's own __post_init__, called from FixedStrategy.on_candle -
+    exactly where a real strategy would build its Signal - so it must be caught by the same
+    except Exception in _run_strategies as any other strategy bug, not escape and kill the run."""
+    cfg = make_config(tmp_path)
+    ts = ist_epoch(MON, "10:00")
+    strat = FixedStrategy({("A", ts): ("LONG", float("nan"))})
+    candles = synth_candles("A", [MON])
+    repo.insert_candles(candles, interval=5)
+    src = HistoricalSource.from_repo(repo, ["A"], 5, 0, 2_000_000_000)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct)
+    eng = BacktestEngine(cfg, repo, src, [strat], broker, StubFilter(), SessionClock(cfg.session, 5),
+                         {"A": 1}, "t1")
+    eng.run()  # must not raise
+    assert "fixed" in eng.disabled_strategies
 
 
 def test_golden_trades(repo, tmp_path):

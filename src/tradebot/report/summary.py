@@ -12,7 +12,7 @@ Conventions:
 - R is computed on the FILLED entry price, i.e. the rupees actually at risk, not the signal's
   planned entry. "R on risk" pools net PnL and rupees at risk over every trade before dividing, so
   a scrap-sized position with a razor-thin stop cannot dominate it the way it can dominate an
-  unweighted mean of per-trade R; its sign is the sign of net PnL.
+  unweighted mean of per-trade R; its sign is the sign of net PnL over those trades.
 """
 from __future__ import annotations
 
@@ -136,16 +136,31 @@ def _counts(d: dict) -> str:
     return ", ".join(f"{k} {v}" for k, v in sorted(d.items())) or "none"
 
 
+def gross_kind(s: Summary) -> Optional[str]:
+    """None when every trade's charges were recorded; "full" when every trade was estimated (the
+    daily rows are plain gross); "partial" when only some were (the daily rows mix real and gross
+    figures, so calling the whole run gross would be false)."""
+    if not s.charges_estimated:
+        return None
+    return "full" if s.charges_estimated_trades == s.trades else "partial"
+
+
 def format_summary(s: Summary) -> str:
     win_rate = f"{s.win_rate * 100:.1f}%" if s.trades else "n/a"
     charges_notes = []
     if s.charges_estimated:
-        charges_notes.append(f"estimated after the fact for {s.charges_estimated_trades} of {s.trades} trades "
-                              f"(charges not recorded); their daily rows are gross")
+        charges_notes.append(f"est. for {s.charges_estimated_trades} of {s.trades} trades "
+                              f"(not recorded at the time)")
     if s.charges_unknown:
         charges_notes.append(f"{s.charges_unknown} trade(s) could not be charged (bad stored prices)")
     charges_note = ("   " + "; ".join(charges_notes)) if charges_notes else ""
-    equity_dd_note = "; gross here: the daily rows have no recorded charges" if s.charges_estimated else ""
+    kind = gross_kind(s)
+    if kind == "full":
+        equity_dd_note = "; gross here: the daily rows have no recorded charges"
+    elif kind == "partial":
+        equity_dd_note = "; partly gross: some daily rows have no recorded charges"
+    else:
+        equity_dd_note = ""
     lines = [
         f"Run {s.run_id} ({s.mode})",
         "Survivorship note: universe.yaml is today's constituent list; past-period results are overstated.",
@@ -156,7 +171,7 @@ def format_summary(s: Summary) -> str:
         f"Charges               {s.charges:,.2f}{charges_note}",
         f"Total PnL             {s.total_pnl:,.2f}   net",
         f"Avg R (per trade)     {s.avg_r:.2f}   (over {s.r_trades} of {s.trades} trades with non-zero risk)",
-        f"R on risk             {s.r_on_risk:.2f}   net PnL / rupees at risk, all trades pooled",
+        f"R on risk             {s.r_on_risk:.2f}   net PnL / rupees at risk, pooled over the same {s.r_trades} trades",
         f"Max drawdown (closed) {s.max_drawdown:,.2f}   realised, closed trades only",
         f"Max drawdown (equity) {s.max_drawdown_equity:,.2f}   daily realised + unrealised{equity_dd_note}",
         f"Exit reasons          {_counts(s.exit_reasons)}",

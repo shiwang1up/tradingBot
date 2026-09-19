@@ -62,6 +62,11 @@ class Signal:
     bar_ts: int
     priority: float = 0.0  # ranks same-bar signals when slots are short; higher first, then symbol
 
+    def __post_init__(self) -> None:
+        if not (isinstance(self.priority, (int, float)) and not isinstance(self.priority, bool)
+                and math.isfinite(self.priority)):
+            raise ValueError(f"priority: expected a finite number, got {self.priority!r}")
+
 
 @dataclass(frozen=True)
 class ApprovedOrder:

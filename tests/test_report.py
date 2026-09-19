@@ -117,7 +117,7 @@ def test_old_rows_are_estimated_with_the_given_schedule(repo):
     assert bare.charges == 0.0 and bare.total_pnl == pytest.approx(200.0)           # no schedule given: as before
     s = build_summary(repo, "o1", ChargesConfig())
     assert s.charges == pytest.approx(27.42) and s.total_pnl == pytest.approx(172.58)
-    assert s.charges_estimated is True and "estimated" in format_summary(s)
+    assert s.charges_estimated is True and "est." in format_summary(s)
 
 
 def test_estimated_note_counts_only_the_estimated_trades(repo):
@@ -132,7 +132,7 @@ def test_estimated_note_counts_only_the_estimated_trades(repo):
     s = build_summary(repo, "mix1", ChargesConfig())
     assert s.charges_estimated is True and s.charges_estimated_trades == 1 and s.trades == 2
     text = format_summary(s)
-    assert "estimated after the fact for 1 of 2 trades (charges not recorded); their daily rows are gross" in text
+    assert "est. for 1 of 2 trades (not recorded at the time)" in text
 
 
 def test_gross_equity_drawdown_is_marked_when_charges_are_estimated(repo):
@@ -146,6 +146,22 @@ def test_gross_equity_drawdown_is_marked_when_charges_are_estimated(repo):
     assert "Max drawdown (equity)" in text
     line = next(ln for ln in text.splitlines() if ln.startswith("Max drawdown (equity)"))
     assert "gross here: the daily rows have no recorded charges" in line
+
+
+def test_equity_drawdown_says_partly_gross_for_a_mixed_run(repo):
+    """Only one of two trades predates charges: calling the whole run's daily rows gross would be
+    false, so the caveat must say "partly gross" instead."""
+    from tradebot.config import ChargesConfig
+    repo.create_run("mixdd1", "backtest", 0, "{}")
+    p1 = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("mixdd1", p1), 9, 102.0, "TARGET", 20.0, charges=5.0)
+    p2 = Position("B", "MIS", "LONG", 10, 100.0, 99.0, None, 2, "c2", "ema_rsi")
+    repo.close_position(repo.insert_position("mixdd1", p2), 10, 102.0, "TARGET", 20.0, charges=None)
+    repo.upsert_daily_pnl("mixdd1", "2026-09-14", realised=40.0, unrealised=0.0, fills=2, entries_placed=2)
+    s = build_summary(repo, "mixdd1", ChargesConfig())
+    text = format_summary(s)
+    line = next(ln for ln in text.splitlines() if ln.startswith("Max drawdown (equity)"))
+    assert "partly gross: some daily rows have no recorded charges" in line
 
 
 def test_adopted_line_says_gross_pnl(repo):
