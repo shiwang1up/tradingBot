@@ -50,6 +50,25 @@ def _trades(repo, rid, day=None):
             for r in rows if day is None or date_of(r["opened_at"]) == day]
 
 
+def test_warm_drops_an_unusable_candle_and_keeps_the_last_good_close(repo, tmp_path):
+    """warm() feeds candles through the same _usable gate as process_bar (spec: unusable candles are
+    dropped before anything sees them); an all-zero candle later in the same symbol's warm-up must
+    not become its last close."""
+    from tradebot.types import Candle
+    cfg = make_config(tmp_path)
+    clock = SessionClock(cfg.session, 5)
+    src = LiveBarSource(_fetcher({"A": []}), repo, ["A"], "NSE", 5, 2, clock)
+    strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    eng = PaperEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, {"A": 1}, "warm-zero")
+    t0 = ist_epoch(TODAY, "09:15")
+    good = Candle("A", t0, 100.0, 100.5, 99.8, 100.2, 1)
+    zero = Candle("A", t0 + 300, 0.0, 0.0, 0.0, 0.0, 1)
+    eng.warm([good, zero])
+    assert eng._last_close["A"] == 100.2
+
+
 def test_full_day_matches_the_backtester_bar_for_bar(repo, tmp_path):
     cfg = make_config(tmp_path, risk={"cooldown_bars": 0})
     market = _market()

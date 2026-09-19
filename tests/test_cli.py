@@ -10,7 +10,7 @@ from tradebot import cli
 from tradebot.engine.clock import ist_epoch, to_ist
 from tradebot.store.db import connect
 from tradebot.store.repo import Repo
-from tradebot.types import Candle, Signal
+from tradebot.types import Candle, Position, Signal
 
 
 def _bar_ts(end_ts):
@@ -39,6 +39,23 @@ def test_backtest_then_report(tmp_path):
     rep = r.invoke(cli.main, ["--config", str(tmp_path / "config.yaml"), "report", "--run", "cli1"])
     assert rep.exit_code == 0, rep.output
     assert "Run cli1" in rep.output
+
+
+def test_report_estimates_charges_for_a_row_that_predates_them(tmp_path):
+    """The CLI must pass the config's charges schedule into build_summary: a closed position with
+    NULL charges (a run recorded before charges existed) should come back estimated, not free."""
+    cfg = make_config(tmp_path, charges={"enabled": True})
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")
+    repo = Repo(connect(cfg.paths.db))
+    repo.create_run("old-run", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("old-run", p), 9, 102.0, "TARGET", 20.0, charges=None)
+    repo.conn.close()
+    res = _invoke(tmp_path, "report", "--run", "old-run")
+    assert res.exit_code == 0, res.output
+    assert "estimated" in res.output
+    charges_line = next(ln for ln in res.output.splitlines() if ln.startswith("Charges"))
+    assert charges_line.split()[1] != "0.00"
 
 
 def test_backtest_without_data_fails_clearly(tmp_path):

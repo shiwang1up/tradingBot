@@ -117,3 +117,25 @@ def test_compare_is_net_when_a_schedule_is_given(repo):
     assert net.a.charges > 0 and net.a.total_pnl == pytest.approx(gross.a.total_pnl - net.a.charges)
     assert net.rejected_pnl_in_a < gross.rejected_pnl_in_a     # the two rejected trades now carry their costs
     assert "Charges" in format_compare(net)
+
+
+def test_side_by_side_marks_estimated_charges_and_gross_drawdown(repo):
+    """Every stored row in _seed_pair has NULL charges, so a schedule makes both sides estimated:
+    the Charges cells and the Max DD (equity) cells must say so; without a schedule neither does."""
+    from tradebot.config import ChargesConfig
+    _seed_pair(repo)
+    net = build_compare(repo, "A", "B", P, ChargesConfig())
+    text = format_compare(net)
+    assert "(est.)" in text and "(gross)" in text
+    gross = build_compare(repo, "A", "B", P)
+    text2 = format_compare(gross)
+    assert "(est.)" not in text2 and "(gross)" not in text2
+
+
+def test_compare_warns_on_charges_mismatch(repo):
+    """'charges' is one of COMPARABLE_KEYS: two runs whose stored config differ only there must
+    warn, the same as any other comparability mismatch."""
+    other = json.dumps({**json.loads(CFG), "charges": {"enabled": True}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert any("'charges'" in w for w in c.warnings)

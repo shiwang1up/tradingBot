@@ -87,7 +87,7 @@ def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices, schedule: 
             status, pnl = "open", None
             open_ += 1
         else:
-            status, pnl = "closed", float(pos["pnl"] or 0.0) - row_charges(pos, schedule)[0]
+            status, pnl = "closed", float(pos["pnl"] or 0.0) - row_charges(pos, schedule)[0]  # (charges, estimated, unknown)
             closed += 1
             net += pnl
             if pnl <= 0:  # same convention as summary: a scratch counts on the loss side
@@ -112,14 +112,19 @@ def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices, schedule: 
 
 
 def _side_by_side(a: Summary, b: Summary) -> list:
+    charges_a = f"{a.charges:,.2f}" + (" (est.)" if a.charges_estimated else "")
+    charges_b = f"{b.charges:,.2f}" + (" (est.)" if b.charges_estimated else "")
+    dd_equity_a = f"{a.max_drawdown_equity:,.2f}" + (" (gross)" if a.charges_estimated else "")
+    dd_equity_b = f"{b.max_drawdown_equity:,.2f}" + (" (gross)" if b.charges_estimated else "")
     metrics = [
         ("Trades", f"{a.trades}", f"{b.trades}"),
         ("Win rate", f"{a.win_rate * 100:.1f}%", f"{b.win_rate * 100:.1f}%"),
         ("Total PnL", f"{a.total_pnl:,.2f}", f"{b.total_pnl:,.2f}"),
-        ("Charges", f"{a.charges:,.2f}", f"{b.charges:,.2f}"),
+        ("Charges", charges_a, charges_b),
         ("Avg R", f"{a.avg_r:.2f}", f"{b.avg_r:.2f}"),
+        ("R on risk", f"{a.r_on_risk:.2f}", f"{b.r_on_risk:.2f}"),
         ("Max DD (closed)", f"{a.max_drawdown:,.2f}", f"{b.max_drawdown:,.2f}"),
-        ("Max DD (equity)", f"{a.max_drawdown_equity:,.2f}", f"{b.max_drawdown_equity:,.2f}"),
+        ("Max DD (equity)", dd_equity_a, dd_equity_b),
         ("AI rejects", f"{a.ai_rejections}", f"{b.ai_rejections}"),
     ]
     out = [f"{'Metric':<16} {'A: ' + a.run_id:>18} {'B: ' + b.run_id:>18}"]

@@ -120,16 +120,95 @@ def test_old_rows_are_estimated_with_the_given_schedule(repo):
     assert s.charges_estimated is True and "estimated" in format_summary(s)
 
 
-def test_row_charges_tolerates_a_bad_stored_row(repo):
+def test_estimated_note_counts_only_the_estimated_trades(repo):
+    """A run mixing stored and NULL charges must say how many of its trades were actually
+    estimated, not imply the whole run predates charges."""
+    from tradebot.config import ChargesConfig
+    repo.create_run("mix1", "backtest", 0, "{}")
+    p1 = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("mix1", p1), 9, 102.0, "TARGET", 20.0, charges=5.0)
+    p2 = Position("B", "MIS", "LONG", 10, 100.0, 99.0, None, 2, "c2", "ema_rsi")
+    repo.close_position(repo.insert_position("mix1", p2), 10, 102.0, "TARGET", 20.0, charges=None)
+    s = build_summary(repo, "mix1", ChargesConfig())
+    assert s.charges_estimated is True and s.charges_estimated_trades == 1 and s.trades == 2
+    text = format_summary(s)
+    assert "estimated after the fact for 1 of 2 trades (charges not recorded); their daily rows are gross" in text
+
+
+def test_gross_equity_drawdown_is_marked_when_charges_are_estimated(repo):
+    from tradebot.config import ChargesConfig
+    repo.create_run("gdd1", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("gdd1", p), 9, 102.0, "TARGET", 20.0, charges=None)
+    repo.upsert_daily_pnl("gdd1", "2026-09-14", realised=20.0, unrealised=0.0, fills=1, entries_placed=1)
+    s = build_summary(repo, "gdd1", ChargesConfig())
+    text = format_summary(s)
+    assert "Max drawdown (equity)" in text
+    line = next(ln for ln in text.splitlines() if ln.startswith("Max drawdown (equity)"))
+    assert "gross here: the daily rows have no recorded charges" in line
+
+
+def test_adopted_line_says_gross_pnl(repo):
+    _seed(repo)
+    text = format_summary(build_summary(repo, "r1"))
+    line = next(ln for ln in text.splitlines() if ln.startswith("Adopted"))
+    assert "gross PnL" in line
+
+
+def test_row_charges_tolerates_a_bad_stored_row(repo, caplog):
     """A closed row with a nonsensical exit price (e.g. a zero from a bad candle, spec elsewhere)
     must not crash the report when a schedule is given to estimate its charges: position_charges
-    raises ValueError on a non-positive price, and row_charges must contain that per row."""
+    raises ValueError on a non-positive price, and row_charges must contain that per row, log a
+    warning naming the position, and mark it unknown so the report can count it."""
+    import logging
+
     from tradebot.config import ChargesConfig
     from tradebot.report.summary import row_charges
     repo.create_run("bad1", "backtest", 0, "{}")
     p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
-    repo.close_position(repo.insert_position("bad1", p), 9, 0.0, "TARGET", -1000.0, charges=None)
+    pid = repo.insert_position("bad1", p)
+    repo.close_position(pid, 9, 0.0, "TARGET", -1000.0, charges=None)
     row = repo.list_positions("bad1")[0]
-    assert row_charges(row, ChargesConfig()) == (0.0, False)
+    with caplog.at_level(logging.WARNING, logger="tradebot.report"):
+        assert row_charges(row, ChargesConfig()) == (0.0, False, True)
+    assert str(pid) in caplog.text and "ValueError" in caplog.text
     s = build_summary(repo, "bad1", ChargesConfig())
     assert s.charges == 0.0 and s.total_pnl == pytest.approx(-1000.0)
+    assert s.charges_unknown == 1
+    assert "1 trade(s) could not be charged (bad stored prices)" in format_summary(s)
+
+
+def test_row_charges_exit_price_none_is_not_unknown(repo):
+    """A position closed without a price (e.g. SQUARE_OFF with nothing to mark against) predates a
+    price rather than having a bad one, so it must not count as unknown."""
+    from tradebot.config import ChargesConfig
+    from tradebot.report.summary import row_charges
+    repo.create_run("noexit", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("noexit", p), 9, None, "SQUARE_OFF", None, charges=None)
+    row = repo.list_positions("noexit")[0]
+    assert row_charges(row, ChargesConfig()) == (0.0, False, False)
+
+
+def test_r_on_risk_pools_all_trades_instead_of_averaging_per_trade(repo):
+    """Avg R is an unweighted mean over trades, so a scrap-sized position with a razor-thin stop can
+    dominate it once the per-order brokerage floor eats most of its tiny risk. R on risk pools net
+    PnL and rupees at risk across every trade instead, so its sign follows net PnL, not outliers.
+
+    Trade 1: qty 10, entry 100, stop 99 -> risk 1*10 = 10.0; gross pnl 20, charges 5 -> net 15.0;
+             R = 15.0 / 10.0 = 1.5
+    Trade 2: qty 1, entry 100, stop 99.9 -> risk 0.1*1 = 0.1; gross pnl -0.1, charges 5 -> net -5.1;
+             R = -5.1 / 0.1 = -51.0
+    avg_r (unweighted mean of per-trade R) = (1.5 + -51.0) / 2 = -24.75
+    r_on_risk = total net / total risk = (15.0 + -5.1) / (10.0 + 0.1) = 9.9 / 10.1 ~= 0.980
+    """
+    repo.create_run("ronrisk", "backtest", 0, "{}")
+    p1 = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("ronrisk", p1), 9, 102.0, "TARGET", 20.0, charges=5.0)
+    p2 = Position("B", "MIS", "LONG", 1, 100.0, 99.9, None, 2, "c2", "ema_rsi")
+    repo.close_position(repo.insert_position("ronrisk", p2), 10, 99.9, "STOP", -0.1, charges=5.0)
+    s = build_summary(repo, "ronrisk")
+    assert s.avg_r == pytest.approx((1.5 + -51.0) / 2)
+    assert s.r_on_risk == pytest.approx(9.9 / 10.1)
+    text = format_summary(s)
+    assert "R on risk" in text
