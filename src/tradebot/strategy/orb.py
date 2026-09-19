@@ -10,6 +10,7 @@ dominate), wider than max_range_pct (the size becomes tiny) or built from fewer 
 range-bar volume, so the engine gives scarce slots to the breakouts with the most participation."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
@@ -28,6 +29,7 @@ class _Day:
     low: Optional[float] = None
     bars: int = 0
     volume: float = 0.0
+    last_range_ts: Optional[int] = None  # ts of the last bar counted into the range, to reject duplicates
     complete: bool = False   # the first bar after the range has been seen
     done: bool = False       # nothing more fires today
     rel_volume: float = 0.0  # of the latest post-range bar
@@ -56,13 +58,18 @@ class OrbStrategy(Strategy):
             raise ValueError("orb.range_minutes and orb.interval_minutes must be >= 1")
         if self.range_minutes % self.interval:
             raise ValueError("orb.range_minutes must be a multiple of orb.interval_minutes")
+        if not (math.isfinite(self.min_range_pct) and math.isfinite(self.max_range_pct)):
+            raise ValueError("orb.min_range_pct and orb.max_range_pct must be finite numbers")
         if not 0 < self.min_range_pct < self.max_range_pct:
             raise ValueError("orb.min_range_pct must be > 0 and below orb.max_range_pct")
-        if self.rr is not None and self.rr <= 0:
-            raise ValueError("orb.reward_risk must be > 0 or null")
+        if not (self.rr is None or (math.isfinite(self.rr) and self.rr > 0)):
+            raise ValueError("orb.reward_risk must be a finite number > 0 or null")
         if self.product != "MIS":
             raise ValueError("orb is an intraday strategy: orb.product must be MIS")
-        ist_epoch(date(2000, 1, 3), self.session_open)  # raises ValueError unless it is HH:MM
+        try:
+            ist_epoch(date(2000, 1, 3), self.session_open)  # raises ValueError unless it is HH:MM
+        except ValueError as e:
+            raise ValueError(f"orb.session_open: {e}") from e
         self.need = self.range_minutes // self.interval
         self._state: dict[str, _Day] = {}
 
@@ -91,6 +98,9 @@ class OrbStrategy(Strategy):
         if candle.ts < st.open_ts:
             return None
         if candle.ts < st.range_end:
+            if st.last_range_ts is not None and candle.ts <= st.last_range_ts:
+                return None  # a repeated or out-of-order bar; do not count it twice into the range
+            st.last_range_ts = candle.ts
             st.high = candle.high if st.high is None else max(st.high, candle.high)
             st.low = candle.low if st.low is None else min(st.low, candle.low)
             st.bars += 1
@@ -110,6 +120,8 @@ class OrbStrategy(Strategy):
         if close > st.high:
             stop = round_tick_down(st.low)
             target = None if self.rr is None else round_tick_down(close + (close - stop) * self.rr)
+            # last line of defence: can't be false with a positive-width range and ordinary prices; the
+            # risk engine rejects a bad stop too.
             ok = stop < close and (target is None or close < target)
             direction = "LONG"
         elif close < st.low:

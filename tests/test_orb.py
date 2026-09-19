@@ -38,6 +38,33 @@ def test_long_breakout_fires_on_the_first_close_above_the_range():
     assert sig.bar_ts == ist_epoch(D1, "10:00")
 
 
+def test_rounding_direction_on_stop_and_target_is_away_from_and_toward_entry():
+    # Range bars: high 152.97, low 152.03 (width 0.94 on a 152.50 midpoint = 0.616%, inside
+    # [0.4, 1.5]); reward_risk 2.0.
+    #
+    # LONG closing at 153.47: stop = round_tick_down(152.03) = 152.00 (away from the range, i.e. the
+    # entry's loss side is widened, never narrowed by rounding); risk = 153.47 - 152.00 = 1.47; target
+    # = round_tick_down(153.47 + 2 x 1.47 = 156.41) = 156.40 (toward the entry: conservative).
+    #
+    # SHORT closing at 151.53: stop = round_tick_up(152.97) = 153.00; risk = 153.00 - 151.53 = 1.47;
+    # target = round_tick_up(151.53 - 2 x 1.47 = 148.59) = 148.60.
+    rng = [(152.50, 152.97, 152.30, 152.60, 1000), (152.60, 152.80, 152.03, 152.50, 1000)]
+    long_close = (153.00, 153.60, 152.90, 153.47, 2000)
+    short_close = (152.00, 152.10, 151.40, 151.53, 2000)
+
+    _, out = run(bars(rng + [long_close]))
+    sig = out[2]
+    assert sig.direction == "LONG"
+    assert sig.stop_price == pytest.approx(152.00)
+    assert sig.target_price == pytest.approx(156.40)
+
+    _, out = run(bars(rng + [short_close]))
+    sig = out[2]
+    assert sig.direction == "SHORT"
+    assert sig.stop_price == pytest.approx(153.00)
+    assert sig.target_price == pytest.approx(148.60)
+
+
 def test_short_breakout_mirrors():
     _, out = run(bars(RANGE + [DOWN]))
     sig = out[2]
@@ -73,6 +100,47 @@ def test_a_short_range_is_skipped():
     # The 09:15 bar is missing: one range bar where two are needed.
     _, out = run(bars([RANGE[1], UP], start="09:30"))
     assert out == [None, None]
+
+
+def test_a_close_exactly_on_the_range_boundary_does_not_fire():
+    # Closing exactly at range_high (or range_low) is inside, not a breakout: > and < are strict. The
+    # non-breakout bar must not mark the symbol done, so a later real breakout still fires.
+    at_high = (100.7, 100.9, 100.6, 100.8, 1000)   # closes exactly on range_high (100.8)
+    _, out = run(bars(RANGE + [at_high, UP]))
+    assert out[:3] == [None, None, None]
+    assert out[3] is not None and out[3].direction == "LONG"
+
+    at_low = (99.9, 100.0, 99.7, 99.8, 1000)       # closes exactly on range_low (99.8)
+    _, out = run(bars(RANGE + [at_low, DOWN]))
+    assert out[:3] == [None, None, None]
+    assert out[3] is not None and out[3].direction == "SHORT"
+
+
+def test_range_width_exactly_at_a_bound_is_tradable():
+    # high 101.0, low 100.0: width 1.0 on a 100.5 midpoint. Compute the width the same way the
+    # strategy does, so the bound equals it exactly (bit for bit) rather than by decimal rounding.
+    rng = [(100.0, 100.6, 100.0, 100.4, 1000), (100.4, 101.0, 100.2, 100.8, 1000)]
+    high, low = 101.0, 100.0
+    width_pct = (high - low) / ((high + low) / 2.0) * 100.0
+    breakout = (101.0, 103.0, 100.9, 102.5, 9000)
+
+    _, out = run(bars(rng + [breakout]), dict(PARAMS, min_range_pct=width_pct, max_range_pct=5.0))
+    assert out[2] is not None                          # width == min_range_pct: inclusive
+
+    _, out = run(bars(rng + [breakout]), dict(PARAMS, min_range_pct=0.01, max_range_pct=width_pct))
+    assert out[2] is not None                          # width == max_range_pct: inclusive
+
+
+def test_duplicate_range_bar_is_not_double_counted():
+    # The 09:15 bar arrives twice (identical ts) and 09:30 never arrives: one distinct range bar,
+    # one short of the two needed, so the range never completes and nothing fires.
+    t0 = ist_epoch(D1, "09:15")
+    o, h, l, c, v = RANGE[0]
+    dup = [Candle("X", t0, o, h, l, c, v), Candle("X", t0, o, h, l, c, v)]
+    after_range = Candle("X", t0 + 1800, *UP)  # 09:45: the first bar after a 30-minute range
+    s = OrbStrategy(PARAMS)
+    out = [s.on_candle(c) for c in dup + [after_range]]
+    assert out == [None, None, None]
 
 
 def test_bars_before_the_open_are_ignored():
@@ -117,7 +185,11 @@ def test_sixty_minute_range_needs_four_bars():
 def test_params_are_validated():
     for bad, match in [(dict(range_minutes=20), "multiple"), (dict(range_minutes=0), "range_minutes"),
                        (dict(min_range_pct=2.0), "min_range_pct"), (dict(reward_risk=0), "reward_risk"),
-                       (dict(product="CNC"), "MIS"), (dict(session_open="9:15"), "HH:MM")]:
+                       (dict(reward_risk=float("nan")), "reward_risk"),
+                       (dict(reward_risk=float("inf")), "reward_risk"),
+                       (dict(max_range_pct=float("inf")), "max_range_pct"),
+                       (dict(product="CNC"), "MIS"),
+                       (dict(session_open="9:15"), r"orb\.session_open: expected a time in HH:MM")]:
         with pytest.raises(ValueError, match=match):
             OrbStrategy(dict(PARAMS, **bad))
 
