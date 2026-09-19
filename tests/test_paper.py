@@ -147,6 +147,7 @@ def test_resume_restores_cash_and_realised_net_of_charges(repo, tmp_path):
     assert _trades(repo, "split") == _trades(repo, "cont") and _trades(repo, "cont")
     a, b = repo.daily_pnl("cont")[0], repo.daily_pnl("split")[0]
     assert a["realised"] == pytest.approx(b["realised"], abs=0.01)
+    assert a["fills"] == b["fills"] and a["entries_placed"] == b["entries_placed"]
     net = sum(r["pnl"] - r["charges"] for r in repo.list_positions("split"))
     assert b["realised"] == pytest.approx(net, abs=0.01)
     assert second.broker.cash == pytest.approx(cfg.capital + net, abs=0.01)

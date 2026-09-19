@@ -120,7 +120,8 @@ class BacktestBroker:
             try:
                 self._close(pos, ts, price, reason)
             except ValueError as e:
-                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e)
+                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e,
+                         extra={"symbol": sym, "client_id": pos.client_id})
                 continue
             events.append(Closed(pos))
         return events
@@ -143,7 +144,8 @@ class BacktestBroker:
             try:
                 self._close(pos, ts, self._exit_price(pos.direction, ref), reason)
             except ValueError as e:
-                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e)
+                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e,
+                         extra={"symbol": sym, "client_id": pos.client_id})
                 continue
             out.append(Closed(pos))
         return out

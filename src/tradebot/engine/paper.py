@@ -71,8 +71,9 @@ class PaperEngine(Engine):
             by_ts.setdefault(c.ts, {})[c.symbol] = c
         last = None
         for ts in sorted(by_ts):
-            self._observe(by_ts[ts])
-            self._run_strategies(by_ts[ts])  # signals discarded: warm-up never places
+            usable = self._usable(by_ts[ts])
+            self._observe(usable)
+            self._run_strategies(usable)  # signals discarded: warm-up never places
             last = ts
         return last
 

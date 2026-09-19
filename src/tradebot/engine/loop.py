@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -111,6 +112,23 @@ class Engine:
         return self._unrealised_now() - self._day.unrealised_at_open
 
     # -- per bar ----------------------------------------------------------------
+    def _usable(self, candles: dict[str, Candle]) -> dict[str, Candle]:
+        """Drop a candle whose open, high, low or close is not finite and > 0 before anything (last
+        close, history, indicators, the broker) sees it. A stored row can be bad even though the
+        Groww parser now skips such rows on the way in: it may predate that check, or come from
+        HistoricalSource/load_candles/Repo.insert_candles, none of which validate. The dropped
+        symbol is then simply absent from the bar, which already has tested semantics: exits are
+        deferred, square-off falls back to the last good price, a pending entry is recorded
+        unfilled (no_candle)."""
+        out: dict[str, Candle] = {}
+        for sym, c in candles.items():
+            if all(math.isfinite(v) and v > 0 for v in (c.open, c.high, c.low, c.close)):
+                out[sym] = c
+            else:
+                log.warning("dropping unusable candle for %s at %s: non-finite or non-positive OHLC",
+                           sym, iso_ist(c.ts), extra={"symbol": sym})
+        return out
+
     def _observe(self, candles: dict[str, Candle]) -> None:
         """Update last closes, the AI context history and the shared indicators. Also used by the
         paper warm-up, which must not touch the broker."""
@@ -123,6 +141,7 @@ class Engine:
 
     def process_bar(self, ts: int, candles: dict[str, Candle], now_ts: Optional[int] = None) -> None:
         """`now_ts` is the wall clock when the bar is handed in (paper); None means the bar is on time."""
+        candles = self._usable(candles)
         self._observe(candles)
 
         self._record(self.broker.on_bar(ts, candles))
@@ -133,8 +152,10 @@ class Engine:
             if not any(p.product == "MIS" for p in self.broker.open_positions().values()):
                 self._day.squared_off = True
 
-        # Both flatten triggers share one per-day latch. Safe: once the cap is breached every entry
-        # is rejected for the day, so nothing can be opened after a cap flatten for a kill flatten to close.
+        # Both flatten triggers share one per-day latch, set only once nothing in the flattened
+        # products remains open (mirrors the square-off latch): a close that failed this bar is
+        # retried on the next one. Sharing is safe: once the cap is breached every entry is rejected
+        # for the day, so nothing can be opened after a cap flatten for a kill flatten to close.
         if (self.cfg.risk.flatten_on_daily_cap and not self._day.flattened
                 and self._state().daily_loss_breached(self.cfg.risk)):
             log.warning("daily loss cap breached at %s (%s); flattening", ts, iso_ist(ts))
@@ -239,9 +260,11 @@ class Engine:
                      extra={"symbol": order.signal.symbol, "client_id": order.client_id})
 
     def _flatten(self, ts: int, candles: dict[str, Candle]) -> None:
-        self._record(self.broker.square_off(ts, candles, products=("MIS", "CNC"), reason="FLATTEN",
+        products = ("MIS", "CNC")
+        self._record(self.broker.square_off(ts, candles, products=products, reason="FLATTEN",
                                             last_prices=self._last_close))
-        self._day.flattened = True
+        if not any(p.product in products for p in self.broker.open_positions().values()):
+            self._day.flattened = True
 
     # -- persistence of broker events ------------------------------------------
     def _record(self, events: list[BrokerEvent]) -> None:

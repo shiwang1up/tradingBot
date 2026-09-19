@@ -70,9 +70,10 @@ def test_daily_realised_and_cash_are_net_of_charges(repo, tmp_path):
     ({"enabled": False}, False),
 ])
 def test_every_closed_position_has_recorded_charges(repo, tmp_path, charges_cfg, expect_positive):
-    """Amendment 1: close_position's charges is now a required keyword, so a caller cannot forget to
-    pass it. Every row a backtest run closes must have a non-NULL charges: a real number > 0 when
-    the schedule is enabled, and exactly 0.0 (not NULL) when it is disabled (the default config)."""
+    """close_position's charges is now a required keyword, so a caller cannot forget to pass it.
+    Every row a backtest run closes must have a non-NULL charges: a real number > 0 when the
+    schedule is enabled, and exactly 0.0 (not NULL) when it is disabled (this test's base config;
+    the shipped configs enable charges)."""
     cfg = make_config(tmp_path, charges=charges_cfg)
     _run(repo, cfg, _candles())
     rows = repo.list_positions("t1")
@@ -456,6 +457,67 @@ def test_stale_bars_record_signals_but_place_nothing(repo, tmp_path):
     assert repo.rejection_counts("late")["stale"] > 0
     assert repo.list_positions("late") == []
     assert len(repo.list_positions("fresh")) >= 1
+
+
+def test_zero_candle_does_not_move_last_close_or_breach_daily_cap(repo, tmp_path):
+    """A candle with non-positive OHLC (a bad stored row, or a bad upstream fetch) must be dropped
+    before it reaches _last_close, the indicators or the broker. Without that, an open position's
+    unrealised PnL would be marked against a 0.0 close - minus the full notional - which can trip
+    even a generous daily loss cap."""
+    from tradebot.types import Position
+    cfg = make_config(tmp_path, risk={"daily_loss_cap_pct": 0.001, "flatten_on_daily_cap": True})
+    broker = BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage)
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    eng._start_day()
+    d = DAYS[1]
+    t0 = ist_epoch(d, "10:00")
+    good = Candle("A", t0, 100.0, 100.5, 99.8, 100.2, 1)
+    eng.process_bar(t0, {"A": good})
+    assert eng._last_close["A"] == 100.2
+    broker._positions["A"] = Position("A", "MIS", "LONG", 100, 100.0, 90.0, 120.0, t0, "cidcidcidcidcid5", "ema_rsi")
+    t1 = t0 + 300
+    zero = Candle("A", t1, 0.0, 0.0, 0.0, 0.0, 1)
+    eng.process_bar(t1, {"A": zero})
+    assert eng._last_close["A"] == 100.2, "the zero candle must not move the last close"
+    assert not eng._state().daily_loss_breached(cfg.risk), "no genuine breach: the zero candle didn't fool the cap"
+    assert eng._day.flattened is False
+    assert set(broker.open_positions()) == {"A"}
+    assert "daily_loss_cap" not in repo.rejection_counts("t1")
+
+
+def test_symbol_bad_until_end_of_day_still_squares_off_at_last_good_price(repo, tmp_path):
+    cfg = make_config(tmp_path)
+    d = DAYS[1]
+    bad_from = ist_epoch(d, "14:00")
+    candles = [Candle(c.symbol, c.ts, 0.0, 0.0, 0.0, 0.0, c.volume)
+              if c.symbol == "A" and date_of(c.ts) == d and c.ts >= bad_from else c
+              for c in _candles()]
+    _run(repo, cfg, candles)
+    rows = repo.list_positions("t1")
+    assert rows
+    for r in rows:
+        assert r["closed_at"] is not None, "no MIS position is left open"
+        assert date_of(r["closed_at"]) == date_of(r["opened_at"])
+
+
+def test_flatten_latch_stays_false_until_everything_closes(repo, tmp_path):
+    from tradebot.types import Position
+    cfg = make_config(tmp_path, risk={"flatten_on_daily_cap": True})
+    broker = BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage)
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    eng._start_day()
+    broker._positions["A"] = Position("A", "MIS", "LONG", 10, 100.0, 90.0, 120.0, 1000, "cidcidcidcidcid6", "ema_rsi")
+    eng._flatten(1300, {})  # neither a candle nor a last price for A: square_off leaves it open
+    assert eng._day.flattened is False
+    assert set(broker.open_positions()) == {"A"}
+    eng._last_close["A"] = 100.0  # a price becomes available on a later bar
+    eng._flatten(1600, {})
+    assert broker.open_positions() == {}
+    assert eng._day.flattened is True
 
 
 def test_a_late_bar_still_simulates_exits(repo, tmp_path):
