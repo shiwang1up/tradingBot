@@ -44,7 +44,17 @@ def round_trip_charges(buy_value: float, sell_value: float, cfg: Optional[Charge
 def position_charges(direction: str, entry_price: float, exit_price: float, quantity: int,
                       cfg: Optional[ChargesConfig]) -> float:
     """Charges on one closed position. A LONG buys at entry and sells at exit; a SHORT sells at
-    entry and buys at exit."""
+    entry and buys at exit.
+
+    quantity, entry_price and exit_price are validated here regardless of whether the fee
+    schedule is enabled, like the direction check below: a caller bug must not hide behind a
+    disabled or free schedule.
+    """
+    if quantity <= 0:
+        raise ValueError(f"quantity: expected a positive integer, got {quantity!r}")
+    for name, value in (("entry_price", entry_price), ("exit_price", exit_price)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name}: expected a finite number greater than 0, got {value!r}")
     entry_value = entry_price * quantity
     exit_value = exit_price * quantity
     if direction == "LONG":

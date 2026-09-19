@@ -3,7 +3,7 @@ broker-side stop/target exits against each bar's high/low."""
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import math
 
 from tradebot.config import ChargesConfig
 from tradebot.execution.broker import BrokerEvent, Closed, Filled, Unfilled
@@ -40,7 +40,7 @@ def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
 
 class BacktestBroker:
     def __init__(self, capital: float, slippage_pct: float, mis_leverage: float,
-                 entry_buffer_pct: float | None = None, charges: Optional[ChargesConfig] = None):
+                 entry_buffer_pct: float | None = None, charges: ChargesConfig | None = None):
         """entry_buffer_pct mirrors the live marketable limit: an entry whose next open is beyond
         signal_price * (1 +/- buffer) is left unfilled, exactly as the live order would be.
         None disables the check. charges=None means a free broker (tests); the CLI always passes
@@ -49,7 +49,7 @@ class BacktestBroker:
         self.slip = slippage_pct / 100.0
         self.lev = mis_leverage
         self.buffer = None if entry_buffer_pct is None else entry_buffer_pct / 100.0
-        self.charges = charges
+        self._charges_cfg = charges
         self._pending: dict[str, ApprovedOrder] = {}
         self._positions: dict[str, Position] = {}
         self.closed: list[Position] = []
@@ -166,10 +166,16 @@ class BacktestBroker:
         return round_tick(ref * (1 - self.slip)) if direction == "LONG" else round_tick(ref * (1 + self.slip))
 
     def _close(self, pos: Position, ts: int, price: float, reason: str) -> None:
+        """All-or-nothing: nothing about `pos` or `self` changes unless every computation below
+        succeeds. Compute pnl and charges first, then commit; a raise from position_charges must
+        not leave the position half-closed."""
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError(f"{pos.symbol}: expected a finite exit price greater than 0, got {price!r}")
         pnl = (price - pos.avg_price) * pos.quantity if pos.direction == "LONG" else (pos.avg_price - price) * pos.quantity
-        pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = ts, price, reason, round(pnl, 2)
-        pos.charges = position_charges(pos.direction, pos.avg_price, price, pos.quantity, self.charges)
-        self.cash += pos.pnl - pos.charges
+        pnl = round(pnl, 2)
+        charges = position_charges(pos.direction, pos.avg_price, price, pos.quantity, self._charges_cfg)
+        pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl, pos.charges = ts, price, reason, pnl, charges
+        self.cash += pnl - charges
         if self.cash <= 0:
             log.warning("simulated cash is %.2f after closing %s: account is blown", self.cash, pos.symbol)
         del self._positions[pos.symbol]

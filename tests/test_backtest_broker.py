@@ -259,6 +259,8 @@ def test_short_charges_put_the_entry_on_the_sell_side():
     pos = ev[0].position
     assert pos.exit_reason == "TARGET" and pos.exit_price == pytest.approx(98.0)
     assert pos.charges == pytest.approx(26.88)                       # sold 10,000, bought 9,800
+    assert pos.pnl == pytest.approx(200.0)
+    assert b.cash == pytest.approx(100_000.0 + 200.0 - 26.88)
 
 
 def test_without_a_charges_config_the_cost_is_zero_not_none():
@@ -267,3 +269,39 @@ def test_without_a_charges_config_the_cost_is_zero_not_none():
     b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.2)})
     ev = b.on_bar(1600, {"X": _c(100.0, 100.2, 98.5, 98.8, ts=1600)})
     assert ev[0].position.exit_reason == "STOP" and ev[0].position.charges == 0.0
+    assert b.cash == pytest.approx(100_000.0 + ev[0].position.pnl)
+
+
+def test_charges_are_computed_on_the_slipped_fills():
+    from tradebot.config import ChargesConfig
+    from tradebot.execution.charges import position_charges
+    b = BacktestBroker(100_000.0, 0.05, 5.0, None, charges=ChargesConfig())
+    b.place_entry(_order(entry=100.0, stop=99.0, target=102.0))
+    b.on_bar(1300, {"X": _c(100.0, 100.1, 99.9, 100.0)})
+    ev = b.on_bar(1600, {"X": _c(100.0, 100.1, 98.9, 99.0)})
+    pos = ev[0].position
+    assert pos.exit_reason == "STOP"
+    assert pos.charges == pytest.approx(
+        position_charges(pos.direction, pos.avg_price, pos.exit_price, pos.quantity, ChargesConfig())
+    )
+
+
+@pytest.mark.parametrize("with_charges", [False, True])
+def test_close_rejects_a_non_finite_price_and_leaves_the_position_open(with_charges):
+    from tradebot.config import ChargesConfig
+    charges = ChargesConfig() if with_charges else None
+    b = BacktestBroker(100_000.0, 0.0, 5.0, None, charges=charges)
+    b.place_entry(_order())
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.2)})
+    pos = b.open_positions()["X"]
+    cash_before = b.cash
+    with pytest.raises(ValueError):
+        b._close(pos, 1600, float("nan"), "TARGET")
+    assert b.open_positions() == {"X": pos}
+    assert pos.closed_ts is None
+    assert pos.exit_price is None
+    assert pos.exit_reason is None
+    assert pos.pnl is None
+    assert pos.charges is None
+    assert b.cash == cash_before
+    assert b.closed == []

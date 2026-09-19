@@ -93,3 +93,15 @@ def test_position_charges_rejects_unknown_direction():
 
 def test_position_charges_with_no_config_is_free():
     assert position_charges("LONG", 100.0, 102.0, 100, None) == 0.0
+
+
+@pytest.mark.parametrize("quantity,entry_price,exit_price,match", [
+    (0, 100.0, 102.0, "quantity"),
+    (-5, 100.0, 102.0, "quantity"),
+    (100, 0.0, 102.0, "entry_price"),
+    (100, 100.0, float("nan"), "exit_price"),
+])
+def test_position_charges_validates_quantity_and_prices(quantity, entry_price, exit_price, match):
+    # these checks run whether or not the schedule is enabled, like the direction check above
+    with pytest.raises(ValueError, match=match):
+        position_charges("LONG", entry_price, exit_price, quantity, CFG)
