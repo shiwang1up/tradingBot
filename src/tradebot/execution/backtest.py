@@ -3,8 +3,11 @@ broker-side stop/target exits against each bar's high/low."""
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
+from tradebot.config import ChargesConfig
 from tradebot.execution.broker import BrokerEvent, Closed, Filled, Unfilled
+from tradebot.execution.charges import position_charges
 from tradebot.types import ApprovedOrder, Candle, Position, round_tick
 
 log = logging.getLogger("tradebot.backtest")
@@ -37,14 +40,16 @@ def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
 
 class BacktestBroker:
     def __init__(self, capital: float, slippage_pct: float, mis_leverage: float,
-                 entry_buffer_pct: float | None = None):
+                 entry_buffer_pct: float | None = None, charges: Optional[ChargesConfig] = None):
         """entry_buffer_pct mirrors the live marketable limit: an entry whose next open is beyond
         signal_price * (1 +/- buffer) is left unfilled, exactly as the live order would be.
-        None disables the check."""
+        None disables the check. charges=None means a free broker (tests); the CLI always passes
+        cfg.charges."""
         self.cash = float(capital)
         self.slip = slippage_pct / 100.0
         self.lev = mis_leverage
         self.buffer = None if entry_buffer_pct is None else entry_buffer_pct / 100.0
+        self.charges = charges
         self._pending: dict[str, ApprovedOrder] = {}
         self._positions: dict[str, Position] = {}
         self.closed: list[Position] = []
@@ -163,7 +168,8 @@ class BacktestBroker:
     def _close(self, pos: Position, ts: int, price: float, reason: str) -> None:
         pnl = (price - pos.avg_price) * pos.quantity if pos.direction == "LONG" else (pos.avg_price - price) * pos.quantity
         pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = ts, price, reason, round(pnl, 2)
-        self.cash += pos.pnl
+        pos.charges = position_charges(pos.direction, pos.avg_price, price, pos.quantity, self.charges)
+        self.cash += pos.pnl - pos.charges
         if self.cash <= 0:
             log.warning("simulated cash is %.2f after closing %s: account is blown", self.cash, pos.symbol)
         del self._positions[pos.symbol]

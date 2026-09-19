@@ -236,3 +236,34 @@ def test_restore_then_bar_fills_pending_and_exits_positions():
     assert closed.db_id == 7 and closed.exit_reason == "TARGET" and closed.pnl == pytest.approx(20.0)
     assert set(b.open_positions()) == {"B"} and b.pending_symbols() == set()
     assert b.cash == pytest.approx(99_020.0)
+
+
+def test_close_books_charges_and_moves_cash_by_net():
+    from tradebot.config import ChargesConfig
+    b = BacktestBroker(100_000.0, 0.0, 5.0, None, charges=ChargesConfig())
+    b.place_entry(_order(qty=100))                                   # LONG 100 @ 100, stop 99, target 102
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.2)})
+    ev = b.on_bar(1600, {"X": _c(101.0, 102.5, 100.8, 102.2, ts=1600)})
+    pos = ev[0].position
+    assert pos.exit_reason == "TARGET" and pos.pnl == pytest.approx(200.0)   # pnl stays gross
+    assert pos.charges == pytest.approx(27.42)                       # bought 10,000, sold 10,200
+    assert b.cash == pytest.approx(100_000.0 + 200.0 - 27.42)
+
+
+def test_short_charges_put_the_entry_on_the_sell_side():
+    from tradebot.config import ChargesConfig
+    b = BacktestBroker(100_000.0, 0.0, 5.0, None, charges=ChargesConfig())
+    b.place_entry(_order(direction="SHORT", entry=100.0, stop=101.0, target=98.0, qty=100))
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 99.8)})
+    ev = b.on_bar(1600, {"X": _c(99.0, 99.2, 97.5, 97.8, ts=1600)})
+    pos = ev[0].position
+    assert pos.exit_reason == "TARGET" and pos.exit_price == pytest.approx(98.0)
+    assert pos.charges == pytest.approx(26.88)                       # sold 10,000, bought 9,800
+
+
+def test_without_a_charges_config_the_cost_is_zero_not_none():
+    b = _broker()
+    b.place_entry(_order())
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.2)})
+    ev = b.on_bar(1600, {"X": _c(100.0, 100.2, 98.5, 98.8, ts=1600)})
+    assert ev[0].position.exit_reason == "STOP" and ev[0].position.charges == 0.0

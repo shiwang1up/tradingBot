@@ -91,6 +91,7 @@ class Position:
     exit_price: float | None = None
     exit_reason: str | None = None  # "STOP" | "TARGET" | "SQUARE_OFF" | "FLATTEN"
     pnl: float | None = None
+    charges: float | None = None  # brokerage + statutory, set at close; pnl stays gross, net = pnl - charges
     fill_status: str = "full"  # "full" | "partial"
     adopted: bool = False
     db_id: int | None = None
