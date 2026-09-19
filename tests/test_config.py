@@ -1,10 +1,13 @@
 # tests/test_config.py
 import textwrap
+from datetime import date
+from pathlib import Path
 
 import pytest
 
 from tradebot.config import load_config
 from tests.helpers import make_config
+from tradebot.engine.clock import SessionClock, ist_epoch
 
 YAML = textwrap.dedent("""
 capital: 100000
@@ -178,3 +181,17 @@ def test_bar_grace_must_fit_under_the_deadline_and_inside_a_bar(tmp_path):
     with pytest.raises(ValueError, match="shorter than a bar"):
         make_config(tmp_path, execution={"slippage_pct": 0.05, "entry_buffer_pct": 0.1, "bar_deadline_sec": 900,
                                          "interval_minutes": 5}, data={"official_fetch_concurrency": 5, "bar_grace_sec": 300})
+
+
+def test_config_15m_loads_and_fits_the_session(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    cfg = load_config(root / "config-15m.yaml", tmp_path / "nonexistent.env")
+    assert cfg.execution.interval_minutes == 15
+    assert cfg.strategy["pullback"] == {"ema_fast": 20, "ema_slow": 50, "atr_period": 14, "max_pullback_bars": 8,
+                                        "reward_risk": 2.0, "min_stop_pct": 0.1, "max_stop_atr": 3.0, "product": "MIS"}
+    base = load_config(root / "config.yaml", tmp_path / "nonexistent.env")
+    assert cfg.paths.db == base.paths.db               # shares the database with config.yaml
+    clock = SessionClock(cfg.session, cfg.execution.interval_minutes)
+    d = date(2026, 9, 14)
+    assert clock.square_off_bar_ts(d) == ist_epoch(d, "14:45")
+    assert clock.last_bar_ts(d) == ist_epoch(d, "15:15")

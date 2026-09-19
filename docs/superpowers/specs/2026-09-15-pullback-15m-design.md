@@ -20,8 +20,9 @@ tooling change needed to judge it with the forward-return table before trusting 
 | Pullback | A bar whose low touches or crosses EMA20 during an uptrend (high touches or crosses EMA20 in a downtrend) |
 | Entry | The first pullback bar that closes back above EMA20 with a low above the previous bar's low (mirror for shorts). Signal at that bar's close; the broker fills at the next open as today |
 | Stop and target | Stop one tick below the pullback's lowest low (above the highest high for shorts); target at `reward_risk` times the stop distance |
-| One trade per pullback | After a signal the symbol waits until a bar's high exceeds the swing high recorded when the pullback began (low below the swing low for shorts) before a new pullback can arm |
-| Guards | Skip a signal whose stop is closer than `min_stop_pct` of price or further than `max_stop_atr` ATRs; a pullback older than `max_pullback_bars` or a trend flip resets to idle |
+| One trade per pullback | After a signal the symbol waits until a bar's high exceeds the swing high (the high before the pullback, raised by the confirmation bar's own high) before a new pullback can arm; mirror with the swing low for shorts |
+| Guards | Skip a signal whose stop is closer than `min_stop_pct` of price or further than `max_stop_atr` ATRs. A pullback older than `max_pullback_bars` is a failing trend, not a dip: it is spent (phase done) so a fresh swing extreme is needed before another can arm. A trend flip resets to idle |
+| Session boundary | The first bar of a new IST day starts a clean cycle (idle, swings re-seeded from that bar, no arming on that bar), so a pullback from the previous afternoon can never confirm against the opening gap |
 | Product | MIS only, square-off as today (with 15-minute bars the square-off bar opens at 14:45) |
 | Evaluation | Backtest on the fetched window, then `scripts/signal_forward_returns.py` on the run; the script reads the interval from the run's stored config instead of assuming 5 minutes |
 | Out of scope | Parameter tuning, the AI filter, changes to the paper engine (it already takes the interval from config), resampling |
@@ -39,22 +40,25 @@ _State: ema_fast, ema_slow, atr (streaming, from strategy/indicators.py)
         pullback_low, pullback_high: float | None
         pullback_bars: int
         prev_low, prev_high: float | None      # previous bar, for the higher-low / lower-high test
-        bars_seen: int
+        ready_bars: int                        # bars seen with every indicator warm
+        day: date | None                       # IST date of the last bar
 ```
 
 Per bar, after updating the three indicators:
 
 1. Not ready (EMA50 or ATR is None): return None. The first ready bar only records state and never fires.
-2. Determine `trend`: LONG if `ema_fast > ema_slow`, SHORT if `ema_fast < ema_slow`, else None. If
-   `trend` differs from `direction`, reset the phase to IDLE with `direction = trend` and the swing
-   extremes set to this bar's high and low.
+2. Determine `trend`: LONG if `ema_fast > ema_slow`, SHORT if `ema_fast < ema_slow`, else None. If the
+   bar opens a new IST day, or `trend` differs from `direction`, reset the phase to IDLE with
+   `direction = trend`, the swing extremes set to this bar's high and low and the pullback extremes
+   cleared, and do nothing else on this bar (a flip bar or an opening bar never arms a pullback).
 3. IDLE, trend LONG: `swing_high = max(swing_high, high)`. If `low <= ema_fast`: phase PULLBACK,
    `pullback_low = low`, `pullback_bars = 1`. (Mirror for SHORT with `swing_low`, `high >= ema_fast`,
    `pullback_high = high`.)
 4. PULLBACK, trend LONG: `pullback_low = min(pullback_low, low)`, `pullback_bars += 1`. If
-   `pullback_bars > max_pullback_bars`: phase IDLE (keep the swing high). Else if
-   `close > ema_fast and low > prev_low`: candidate signal, phase DONE. (Mirror for SHORT:
-   `close < ema_fast and high < prev_high`.)
+   `pullback_bars > max_pullback_bars`: phase DONE without a signal (spent). Else if
+   `close > ema_fast and low > prev_low`: candidate signal, phase DONE, and
+   `swing_high = max(swing_high, high)` so a strong confirmation bar raises the bar for re-arming.
+   (Mirror for SHORT: `close < ema_fast and high < prev_high`.)
 5. DONE, trend LONG: if `high > swing_high`: phase IDLE with `swing_high = high`. (Mirror for SHORT.)
 6. Record `prev_low`, `prev_high` for the next bar.
 
@@ -77,9 +81,10 @@ max_stop_atr: 3.0
 product: MIS
 ```
 
-`snapshot(symbol)` returns `ema_fast, ema_slow, atr, phase (0 idle, 1 pullback, 2 done), swing_high,
-swing_low, pullback_low, pullback_high` as floats (None values as 0.0) so the AI filter's context has
-the setup in it. `reset` re-creates the state; `recompute` resets and replays the given candles.
+`snapshot(symbol)` returns `ema_fast, ema_slow, atr, trend (+1, -1, 0), phase (0 idle, 1 pullback,
+2 done), swing_high, swing_low, pullback_low, pullback_high` as floats (None values as 0.0) so the AI
+filter's context has the setup in it; it is empty until `is_ready` (two warm bars), per the base
+contract. `reset` re-creates the state; `recompute` resets and replays the given candles.
 `build_strategy("pullback", params)` returns it; `strategy_params` needs no change.
 
 ## `config-15m.yaml`
@@ -115,10 +120,14 @@ Unit tests on crafted 15-minute bars for `PullbackStrategy`:
 - the canonical long setup (warm trend, one bar dips to EMA20, next bar closes above it with a higher
   low) fires LONG at that bar with stop one tick under the pullback low and target at 2R;
 - a confirmation bar without a higher low does not fire, and the next bar that has one does;
-- after a signal nothing fires again until a bar exceeds the pre-pullback swing high, then a fresh
-  pullback fires again;
-- a pullback longer than `max_pullback_bars` resets without firing;
-- a trend flip mid-pullback resets without firing;
+- after a signal nothing fires again until a bar exceeds the swing high (raised by the confirmation
+  bar if it printed a new high), then a fresh pullback fires again;
+- a pullback longer than `max_pullback_bars` is spent without firing and cannot re-arm until a new
+  swing high, after which the next pullback trades;
+- a trend flip mid-pullback resets without firing, and the flip bar itself does not arm;
+- the first bar of a new day starts clean: a pullback armed on the last bar of the previous day does
+  not confirm on an opening gap bar;
+- a bar with equal EMAs has no trend and places nothing;
 - the short mirror of the canonical setup fires SHORT with the mirrored stop and target;
 - the `min_stop_pct` and `max_stop_atr` guards each drop the signal and still move the phase to DONE;
 - the first ready bar never fires; `is_ready` is False until EMA50 and ATR are warm;
