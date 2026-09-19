@@ -6,7 +6,7 @@ Order inside a bar:
   3. daily loss cap       flatten once per day if breached and configured to
   4. kill switch          flatten if requested
   5. strategies           every candle feeds every strategy (indicators stay warm)
-  6. risk -> AI -> place  only if entries are allowed; a live kill switch rejects inside evaluate()
+  6. rank -> risk -> AI -> place  only if entries are allowed; a live kill switch rejects inside evaluate()
 
 A bar handed in with now_ts past the deadline (paper) records its signals as `stale` and places
 nothing (spec 8.6).
@@ -197,6 +197,9 @@ class Engine:
                     break
                 if sig is not None and strat.is_ready(sym):
                     out.append((strat, sig))
+        # Deterministic in every mode: backtest bars arrive in SQL order and paper bars in universe
+        # order, so without this the two modes could hand the last free slot to different symbols.
+        out.sort(key=lambda pair: (-pair[1].priority, pair[1].symbol))
         return out
 
     def _lev(self, product: str) -> float:

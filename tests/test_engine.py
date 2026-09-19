@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers import make_config, synth_candles
+from tests.helpers import FixedStrategy, make_config, synth_candles
 from tradebot.ai.filter import StubFilter
 from tradebot.data.historical import HistoricalSource
 from tradebot.engine.clock import SessionClock, date_of, ist_epoch
@@ -31,6 +31,45 @@ def _run(repo, cfg, candles, run_id="t1", ai=None):
 
 def _candles():
     return synth_candles("A", DAYS, phase=0.0) + synth_candles("B", DAYS, phase=4.0, seed=99)
+
+
+MON = date(2026, 9, 14)
+
+
+def _run_fixed(repo, cfg, candles, fires, symbols, run_id="t1"):
+    repo.insert_candles(candles, interval=5)
+    src = HistoricalSource.from_repo(repo, symbols, 5, 0, 2_000_000_000)
+    strat = FixedStrategy(fires)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    BacktestEngine(cfg, repo, src, [strat], broker, StubFilter(), SessionClock(cfg.session, 5),
+                   {s: 1 for s in symbols}, run_id).run()
+    return strat
+
+
+def _decisions(repo, run_id="t1"):
+    rows = repo.conn.execute(
+        "SELECT s.symbol, s.direction, d.approved, d.reason FROM signals s JOIN risk_decisions d ON d.signal_id = s.id "
+        "WHERE s.run_id=? ORDER BY s.id", (run_id,)).fetchall()
+    return [(r["symbol"], r["direction"], r["approved"], r["reason"]) for r in rows]
+
+
+def _two_symbols():
+    return synth_candles("A", [MON]) + synth_candles("B", [MON], phase=4.0, seed=99)
+
+
+def test_same_bar_signals_are_ranked_by_priority(repo, tmp_path):
+    cfg = make_config(tmp_path, risk={"max_open_positions": 1})
+    ts = ist_epoch(MON, "10:00")
+    _run_fixed(repo, cfg, _two_symbols(), {("A", ts): ("LONG", 1.0), ("B", ts): ("LONG", 2.5)}, ["A", "B"])
+    assert _decisions(repo) == [("B", "LONG", 1, "ok"), ("A", "LONG", 0, "max_open_positions")]
+
+
+def test_equal_priority_falls_back_to_symbol_order(repo, tmp_path):
+    cfg = make_config(tmp_path, risk={"max_open_positions": 1})
+    ts = ist_epoch(MON, "10:00")
+    _run_fixed(repo, cfg, _two_symbols(), {("B", ts): ("LONG", 0.0), ("A", ts): ("LONG", 0.0)}, ["A", "B"])
+    assert _decisions(repo) == [("A", "LONG", 1, "ok"), ("B", "LONG", 0, "max_open_positions")]
 
 
 def test_engine_invariants(repo, tmp_path):
@@ -461,30 +500,38 @@ def test_stale_bars_record_signals_but_place_nothing(repo, tmp_path):
 
 def test_zero_candle_does_not_move_last_close_or_breach_daily_cap(repo, tmp_path):
     """A candle with non-positive OHLC (a bad stored row, or a bad upstream fetch) must be dropped
-    before it reaches _last_close, the indicators or the broker. Without that, an open position's
-    unrealised PnL would be marked against a 0.0 close - minus the full notional - which can trip
-    even a generous daily loss cap."""
+    before it reaches _last_close, the indicators, any strategy or the broker. Without that, an
+    open position's unrealised PnL would be marked against a 0.0 close - minus the full notional -
+    which can trip even a generous daily loss cap, and a strategy would be asked to reason about a
+    nonsense candle. A second, healthy symbol shares the same bar so the test can show the strategy
+    was never shown the bad one, and that a real signal on the healthy symbol still clears risk."""
     from tradebot.types import Position
     cfg = make_config(tmp_path, risk={"daily_loss_cap_pct": 0.001, "flatten_on_daily_cap": True})
     broker = BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage)
-    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], broker, StubFilter(),
-                         SessionClock(cfg.session, 5), {"A": 1}, "t1")
-    repo.create_run("t1", "backtest", 0, "{}")
-    eng._start_day()
     d = DAYS[1]
     t0 = ist_epoch(d, "10:00")
+    t1 = t0 + 300
+    strat = FixedStrategy({("B", t1): ("LONG", 0.0)})
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [strat], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1, "B": 1}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    eng._start_day()
     good = Candle("A", t0, 100.0, 100.5, 99.8, 100.2, 1)
     eng.process_bar(t0, {"A": good})
     assert eng._last_close["A"] == 100.2
     broker._positions["A"] = Position("A", "MIS", "LONG", 100, 100.0, 90.0, 120.0, t0, "cidcidcidcidcid5", "ema_rsi")
-    t1 = t0 + 300
     zero = Candle("A", t1, 0.0, 0.0, 0.0, 0.0, 1)
-    eng.process_bar(t1, {"A": zero})
+    healthy = Candle("B", t1, 50.0, 50.5, 49.5, 50.0, 1)
+    eng.process_bar(t1, {"A": zero, "B": healthy})
     assert eng._last_close["A"] == 100.2, "the zero candle must not move the last close"
     assert not eng._state().daily_loss_breached(cfg.risk), "no genuine breach: the zero candle didn't fool the cap"
     assert eng._day.flattened is False
     assert set(broker.open_positions()) == {"A"}
     assert "daily_loss_cap" not in repo.rejection_counts("t1")
+    assert ("A", t1) not in strat.seen_bars, "the strategy must never be shown the zero candle"
+    assert ("B", t1) in strat.seen_bars
+    b_decision = next(row for row in _decisions(repo, "t1") if row[0] == "B")
+    assert (b_decision[2], b_decision[3]) == (1, "ok"), "B's signal must be risk-approved, not caught by the cap"
 
 
 def test_symbol_bad_until_end_of_day_still_squares_off_at_last_good_price(repo, tmp_path):
@@ -516,6 +563,52 @@ def test_flatten_latch_stays_false_until_everything_closes(repo, tmp_path):
     assert set(broker.open_positions()) == {"A"}
     eng._last_close["A"] = 100.0  # a price becomes available on a later bar
     eng._flatten(1600, {})
+    assert broker.open_positions() == {}
+    assert eng._day.flattened is True
+
+
+class _FlakySquareOffBroker(BacktestBroker):
+    """square_off reports nothing closed on its first call (as if the close attempt failed for
+    some unrelated reason -- a real candle and last price are both available), then behaves
+    normally. Used to drive the daily-cap flatten's retry through process_bar itself, rather than
+    calling _flatten directly, without contorting the engine to lose a symbol's price."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._first_square_off = True
+
+    def square_off(self, *args, **kwargs):
+        if self._first_square_off:
+            self._first_square_off = False
+            return []
+        return super().square_off(*args, **kwargs)
+
+
+def test_flatten_latch_through_process_bar_retries_on_the_next_bar(repo, tmp_path):
+    """The same latch as above, but driven end-to-end through process_bar: a daily-cap breach whose
+    square_off closes nothing this bar must not spend the latch, so the next bar tries again."""
+    from tradebot.types import Position
+    cfg = make_config(tmp_path, risk={"daily_loss_cap_pct": 0.001, "flatten_on_daily_cap": True})
+    broker = _FlakySquareOffBroker(cfg.capital, 0.0, cfg.risk.mis_leverage)
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    eng._start_day()
+    d = DAYS[1]
+    t0 = ist_epoch(d, "10:00")
+    good = Candle("A", t0, 100.0, 100.5, 99.8, 100.2, 1)
+    eng.process_bar(t0, {"A": good})
+    broker._positions["A"] = Position("A", "MIS", "LONG", 100, 100.0, 90.0, 120.0, t0, "cidcidcidcidcid7", "ema_rsi")
+    t1 = t0 + 300
+    # A big drop that stays clear of the stop (low 95 > stop 90) trips the cap without on_bar
+    # closing the position on its own, so the flatten path is what is under test.
+    drop = Candle("A", t1, 100.0, 100.5, 95.0, 90.0, 1)
+    eng.process_bar(t1, {"A": drop})
+    assert eng._day.flattened is False, "the latch is not spent when square_off closed nothing"
+    assert set(broker.open_positions()) == {"A"}
+    t2 = t1 + 300
+    still_down = Candle("A", t2, 90.0, 92.0, 91.0, 90.0, 1)  # low 91 > stop 90: still no stop hit
+    eng.process_bar(t2, {"A": still_down})
     assert broker.open_positions() == {}
     assert eng._day.flattened is True
 

@@ -44,3 +44,9 @@ def test_decision_token_fields_default_to_zero():
     from tradebot.types import Decision
     d = Decision(_sig(), True, "ok", 1.0, "stub")
     assert (d.input_tokens, d.output_tokens, d.cache_read_tokens, d.cache_write_tokens) == (0, 0, 0, 0)
+
+
+def test_signal_priority_defaults_to_zero_and_is_the_last_field():
+    s = Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 1000)
+    assert s.priority == 0.0
+    assert Signal("orb", "A", "LONG", 100.0, 99.0, None, "MIS", 1000, priority=2.5).priority == 2.5

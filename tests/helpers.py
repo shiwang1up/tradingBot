@@ -7,7 +7,8 @@ import yaml
 
 from tradebot.config import Config, load_config
 from tradebot.engine.clock import ist_epoch
-from tradebot.types import Candle
+from tradebot.strategy.base import Strategy
+from tradebot.types import Candle, Signal, round_tick_down, round_tick_up
 
 BASE_CONFIG = {
     "capital": 100000,
@@ -69,6 +70,37 @@ def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int =
             prev_close = c
             i += 1
     return out
+
+
+class FixedStrategy(Strategy):
+    """Fires exactly the signals it is told to and records every symbol it was shown.
+    `fires` maps (symbol, bar_ts) to (direction, priority)."""
+    name = "fixed"
+    product = "MIS"
+
+    def __init__(self, fires: dict):
+        self.fires = dict(fires)
+        self.seen: set = set()
+        self.seen_bars: set = set()  # (symbol, bar_ts) pairs actually shown to on_candle
+
+    def on_candle(self, candle: Candle):
+        self.seen.add(candle.symbol)
+        self.seen_bars.add((candle.symbol, candle.ts))
+        hit = self.fires.get((candle.symbol, candle.ts))
+        if hit is None:
+            return None
+        direction, priority = hit
+        stop = round_tick_down(candle.close * 0.99) if direction == "LONG" else round_tick_up(candle.close * 1.01)
+        return Signal(self.name, candle.symbol, direction, candle.close, stop, None, "MIS", candle.ts, priority=priority)
+
+    def is_ready(self, symbol: str) -> bool:
+        return True
+
+    def snapshot(self, symbol: str) -> dict:
+        return {}
+
+    def reset(self, symbol: str) -> None:
+        pass
 
 
 class FakeTime:

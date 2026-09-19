@@ -60,6 +60,7 @@ class Signal:
     target_price: float | None
     product: Product
     bar_ts: int
+    priority: float = 0.0  # ranks same-bar signals when slots are short; higher first, then symbol
 
 
 @dataclass(frozen=True)
