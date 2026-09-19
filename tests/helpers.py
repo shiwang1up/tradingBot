@@ -25,7 +25,7 @@ BASE_CONFIG = {
     "data": {"official_fetch_concurrency": 5},
     "paths": {"db": "data/tradebot.db", "logs": "data/logs", "instruments": "data/instruments.csv",
               "kill_switch": "KILL", "universe": "universe.yaml"},
-    "charges": {"enabled": False},
+    "charges": {"enabled": False},  # tests pin pre-charges numbers (golden-trades fixture); opt in with charges={"enabled": True}
 }
 
 

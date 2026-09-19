@@ -1,9 +1,11 @@
 # tests/test_config.py
+import dataclasses
 import textwrap
 from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tradebot.config import ChargesConfig, load_config
 from tests.helpers import make_config
@@ -213,6 +215,25 @@ def test_charges_are_validated(tmp_path):
         make_config(tmp_path, charges={"brokerage_min": 30.0})
     with pytest.raises(ValueError, match="unknown keys"):
         make_config(tmp_path, charges={"brokrage_pct": 1})
+    with pytest.raises(ValueError, match="charges.gst_pct"):
+        make_config(tmp_path, charges={"gst_pct": float("nan")})  # yaml.safe_dump writes NaN as .nan
+
+
+def test_charges_section_non_mapping_raises_a_clear_error(tmp_path):
+    with pytest.raises(ValueError, match="must be a mapping"):
+        make_config(tmp_path, charges=False)
+    with pytest.raises(ValueError, match="must be a mapping"):
+        make_config(tmp_path, charges=5)
+
+
+def test_charges_section_absent_key_means_groww_defaults(tmp_path):
+    make_config(tmp_path)  # writes a config.yaml under tmp_path with a charges block
+    p = tmp_path / "config.yaml"
+    raw = yaml.safe_load(p.read_text())
+    del raw["charges"]  # genuinely absent, not just null
+    p.write_text(yaml.safe_dump(raw))
+    cfg = load_config(p, tmp_path / "nonexistent.env")
+    assert cfg.charges == ChargesConfig()
 
 
 def test_shipped_configs_carry_the_charges_block(tmp_path):
@@ -220,7 +241,9 @@ def test_shipped_configs_carry_the_charges_block(tmp_path):
     for name in ("config.yaml", "config-15m.yaml"):
         cfg = load_config(root / name, tmp_path / "nonexistent.env")
         assert "charges" in cfg.raw, name
-        assert cfg.charges == ChargesConfig(), name
+        assert cfg.charges.enabled is True, name
+        # the shipped block names every field so a rate correction can't silently drop a key
+        assert set(cfg.raw["charges"]) == {f.name for f in dataclasses.fields(ChargesConfig)}, name
 
 
 def test_resolved_config_records_charges(tmp_path):

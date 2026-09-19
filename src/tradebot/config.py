@@ -153,9 +153,12 @@ def _coerce(section: str, name: str, type_name: str, value: Any) -> Any:
 
 
 def _section(raw: dict, name: str, cls):
-    if name not in raw or not isinstance(raw[name], dict):
+    if name not in raw or raw[name] is None:
         raise ValueError(f"config.yaml missing section: {name}")
-    given = dict(raw[name])
+    value = raw[name]
+    if not isinstance(value, dict):
+        raise ValueError(f"config.yaml section '{name}' must be a mapping, got {value!r}")
+    given = dict(value)
     fields = {f.name: f for f in dataclasses.fields(cls)}
     unknown = set(given) - set(fields)
     if unknown:
@@ -215,7 +218,7 @@ def _validate(cfg: "Config") -> None:
     ]
     ch = cfg.charges
     for f in dataclasses.fields(ch):
-        if f.name != "enabled":
+        if f.type == "float":  # under `from __future__ import annotations`, f.type is this literal string
             v = getattr(ch, f.name)
             checks.append((math.isfinite(v) and v >= 0, f"charges.{f.name} must be a finite number >= 0"))
     checks.append((ch.brokerage_min <= ch.brokerage_max, "charges.brokerage_min must not exceed charges.brokerage_max"))
