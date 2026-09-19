@@ -349,7 +349,7 @@ Expected: `TypeError: __init__() got an unexpected keyword argument 'charges'` a
 from typing import Optional
 
 from tradebot.config import ChargesConfig
-from tradebot.execution.charges import round_trip_charges
+from tradebot.execution.charges import position_charges
 ```
 
 Change the constructor signature and body:
@@ -366,12 +366,9 @@ Replace `_close`:
 
 ```python
     def _close(self, pos: Position, ts: int, price: float, reason: str) -> None:
-        long = pos.direction == "LONG"
-        pnl = (price - pos.avg_price) * pos.quantity if long else (pos.avg_price - price) * pos.quantity
-        entry_value, exit_value = pos.avg_price * pos.quantity, price * pos.quantity
-        buy, sell = (entry_value, exit_value) if long else (exit_value, entry_value)
+        pnl = (price - pos.avg_price) * pos.quantity if pos.direction == "LONG" else (pos.avg_price - price) * pos.quantity
         pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = ts, price, reason, round(pnl, 2)
-        pos.charges = round_trip_charges(buy, sell, self.charges)
+        pos.charges = position_charges(pos.direction, pos.avg_price, price, pos.quantity, self.charges)
         self.cash += pos.pnl - pos.charges
         if self.cash <= 0:
             log.warning("simulated cash is %.2f after closing %s: account is blown", self.cash, pos.symbol)
@@ -678,7 +675,7 @@ Imports:
 from typing import Optional
 
 from tradebot.config import ChargesConfig
-from tradebot.execution.charges import round_trip_charges
+from tradebot.execution.charges import position_charges
 ```
 
 Extend the module docstring conventions with:
@@ -701,9 +698,7 @@ def row_charges(r, schedule: Optional[ChargesConfig]) -> tuple:
         return float(r["charges"]), False
     if schedule is None or not schedule.enabled or r["exit_price"] is None:
         return 0.0, False
-    entry_value, exit_value = r["avg_price"] * r["qty"], r["exit_price"] * r["qty"]
-    buy, sell = (entry_value, exit_value) if r["direction"] == "LONG" else (exit_value, entry_value)
-    return round_trip_charges(buy, sell, schedule), True
+    return position_charges(r["direction"], r["avg_price"], r["exit_price"], r["qty"], schedule), True
 ```
 
 Change `build_summary`'s signature to `def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = None) -> Summary:` and replace the `pnls`/`rs` block:
