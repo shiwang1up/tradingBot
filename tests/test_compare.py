@@ -22,14 +22,14 @@ def _seed_pair(repo, cfg_b=CFG):
         repo.insert_ai_decision("A", sa, "stub", True, "stub", 1.0, 0, None)
         cid = make_client_id("ema_rsi", sym, ts)
         pid = repo.insert_position("A", Position(sym, "MIS", "LONG", 10, 100.0, 99.0, 102.0, ts + 300, cid, "ema_rsi"))
-        repo.close_position(pid, ts + 900, 100.0 + pnl / 10, "TARGET" if pnl > 0 else "STOP", pnl)
+        repo.close_position(pid, ts + 900, 100.0 + pnl / 10, "TARGET" if pnl > 0 else "STOP", pnl, charges=None)
         sb = repo.insert_signal("B", sig)
         approve = sym == "Z"
         repo.insert_ai_decision("B", sb, "claude", approve, "fine" if approve else "chop", 0.6, 800, None,
                                 input_tokens=1000, output_tokens=60, cache_read_tokens=500, cache_write_tokens=100)
         if approve:
             pid = repo.insert_position("B", Position(sym, "MIS", "LONG", 10, 100.0, 99.0, 102.0, ts + 300, cid, "ema_rsi"))
-            repo.close_position(pid, ts + 900, 102.0, "TARGET", pnl)
+            repo.close_position(pid, ts + 900, 102.0, "TARGET", pnl, charges=None)
     # a signal Claude rejected that A never filled: must not count as avoided PnL
     sig = Signal("ema_rsi", "W", "LONG", 100.0, 99.0, 102.0, "MIS", 1900)
     repo.insert_ai_decision("A", repo.insert_signal("A", sig), "stub", True, "stub", 1.0, 0, None)

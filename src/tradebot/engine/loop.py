@@ -11,8 +11,11 @@ Order inside a bar:
 A bar handed in with now_ts past the deadline (paper) records its signals as `stale` and places
 nothing (spec 8.6).
 
-"PnL for the day" (spec 6.2) is realised today plus the change in unrealised since the day
-opened, so a position carried overnight only charges today's move against today's cap.
+"PnL for the day" (spec 6.2) is realised today, net of charges, plus the change in unrealised
+since the day opened, so a position carried overnight only charges today's move against today's
+cap. Unrealised PnL is gross of the exit charges an open position will still pay when it closes,
+so the daily-loss cap can trigger late by at most roughly the brokerage cap plus taxes per open
+position; this is accepted.
 """
 from __future__ import annotations
 
@@ -260,10 +263,10 @@ class Engine:
             elif isinstance(ev, Closed):
                 p = ev.position
                 if p.db_id is not None:
-                    self.repo.close_position(p.db_id, p.closed_ts, p.exit_price, p.exit_reason, p.pnl)
-                self._day.realised += p.pnl or 0.0
-                log.info("closed %s %s @ %.2f pnl %.2f", p.symbol, p.exit_reason, p.exit_price or 0.0, p.pnl or 0.0,
-                         extra={"symbol": p.symbol, "client_id": p.client_id})
+                    self.repo.close_position(p.db_id, p.closed_ts, p.exit_price, p.exit_reason, p.pnl, charges=p.charges)
+                self._day.realised += (p.pnl or 0.0) - (p.charges or 0.0)  # the daily cap runs on net
+                log.info("closed %s %s @ %.2f pnl %.2f charges %.2f", p.symbol, p.exit_reason, p.exit_price or 0.0,
+                         p.pnl or 0.0, p.charges or 0.0, extra={"symbol": p.symbol, "client_id": p.client_id})
                 if p.exit_reason == "STOP":
                     # Wall-clock cooldown: an overnight gap absorbs it, which is intended (intraday rule).
                     self._cooldown_until[p.symbol] = p.closed_ts + self.cfg.risk.cooldown_bars * self.interval_sec

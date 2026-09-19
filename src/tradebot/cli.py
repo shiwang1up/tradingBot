@@ -200,7 +200,8 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
         raise click.ClickException(f"run '{run_id}' already exists; pick another --run-id")
     log_path = setup_logging(cfg.paths.logs, run_id=run_id)
     strategy = build_strategy(strategy_name, strategy_params(cfg.strategy, strategy_name))
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
     clock = SessionClock(cfg.session, interval)
     ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
@@ -327,7 +328,8 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
                            # a fetch that outlives the deadline yields a stale bar anyway, so stop it earlier
                            budget_sec=max(1.0, cfg.execution.bar_deadline_sec - cfg.data.bar_grace_sec))
     strategy = build_strategy(strategy_name, params)
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
     ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
     engine = PaperEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id,

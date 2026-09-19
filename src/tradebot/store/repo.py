@@ -207,7 +207,7 @@ class Repo:
         return cur.lastrowid
 
     def close_position(self, position_id: int, closed_ts: int, exit_price: float, exit_reason: str, pnl: float,
-                       charges: Optional[float] = None) -> None:
+                       *, charges: Optional[float]) -> None:
         self.conn.execute(
             "UPDATE positions SET closed_at=?, exit_price=?, exit_reason=?, pnl=?, charges=? WHERE id=?",
             (closed_ts, exit_price, exit_reason, pnl, charges, position_id),

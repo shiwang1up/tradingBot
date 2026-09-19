@@ -21,7 +21,8 @@ def _run(repo, cfg, candles, run_id="t1", ai=None):
     repo.insert_candles(candles, interval=5)
     src = HistoricalSource.from_repo(repo, sorted({c.symbol for c in candles}), 5, 0, 2_000_000_000)
     strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
     eng = BacktestEngine(cfg, repo, src, [strat], broker, ai or StubFilter(),
                          SessionClock(cfg.session, 5), {"A": 1, "B": 1}, run_id)
     eng.run()
@@ -52,6 +53,35 @@ def test_engine_invariants(repo, tmp_path):
     days = repo.daily_pnl("t1")
     assert [d["date"] for d in days] == ["2026-09-14", "2026-09-15"]
     assert sum(d["realised"] for d in days) == pytest.approx(sum(r["pnl"] for r in rows), abs=0.01)
+
+
+def test_daily_realised_and_cash_are_net_of_charges(repo, tmp_path):
+    cfg = make_config(tmp_path, charges={"enabled": True})
+    _, broker = _run(repo, cfg, _candles())
+    rows = repo.list_positions("t1")
+    assert len(rows) >= 2 and all(r["charges"] > 0 for r in rows)
+    net = sum(r["pnl"] - r["charges"] for r in rows)
+    assert sum(d["realised"] for d in repo.daily_pnl("t1")) == pytest.approx(net, abs=0.01)
+    assert broker.cash == pytest.approx(cfg.capital + net, abs=0.01)
+
+
+@pytest.mark.parametrize("charges_cfg,expect_positive", [
+    ({"enabled": True}, True),
+    ({"enabled": False}, False),
+])
+def test_every_closed_position_has_recorded_charges(repo, tmp_path, charges_cfg, expect_positive):
+    """Amendment 1: close_position's charges is now a required keyword, so a caller cannot forget to
+    pass it. Every row a backtest run closes must have a non-NULL charges: a real number > 0 when
+    the schedule is enabled, and exactly 0.0 (not NULL) when it is disabled (the default config)."""
+    cfg = make_config(tmp_path, charges=charges_cfg)
+    _run(repo, cfg, _candles())
+    rows = repo.list_positions("t1")
+    assert len(rows) >= 2, "synthetic data must produce trades"
+    assert all(r["charges"] is not None for r in rows)
+    if expect_positive:
+        assert all(r["charges"] > 0 for r in rows)
+    else:
+        assert all(r["charges"] == 0.0 for r in rows)
 
 
 def test_engine_records_signals_decisions_and_orders(repo, tmp_path):

@@ -34,7 +34,8 @@ def _engine(repo, cfg, market, clock_time, run_id="paper-2026-09-14", calls=None
     clock = SessionClock(cfg.session, 5)
     src = LiveBarSource(_fetcher(market, calls), repo, ["A", "B"], "NSE", 5, 2, clock)
     strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
     return PaperEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, {"A": 1, "B": 1}, run_id,
                        now=clock_time.now, sleep=clock_time.sleep)
 
@@ -120,6 +121,35 @@ def test_stop_and_resume_matches_a_continuous_run(repo, tmp_path):
     assert _trades(repo, "cont")
     a, b = repo.daily_pnl("cont")[0], repo.daily_pnl("split")[0]
     assert (a["realised"], a["fills"], a["entries_placed"]) == (b["realised"], b["fills"], b["entries_placed"])
+
+
+def test_resume_restores_cash_and_realised_net_of_charges(repo, tmp_path):
+    cfg = make_config(tmp_path, charges={"enabled": True})
+    market = _market()
+    warm = _warm(market)
+    _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="cont").run(warm)
+
+    t = FakeTime(ist_epoch(TODAY, "09:00"))
+    first = _engine(repo, cfg, market, t, run_id="split")
+    stop_at = ist_epoch(TODAY, "11:30")
+
+    def sleep_then_stop(seconds):
+        t.sleep(seconds)
+        if t.t >= stop_at:
+            first.request_stop()
+
+    first.sleep = sleep_then_stop
+    first.run(warm)
+    last = repo.get_run("split")["last_bar_ts"]
+    stored_today = [c for c in repo.load_candles(["A", "B"], 5, OPEN, 2_000_000_000) if c.ts <= last]
+    second = _engine(repo, cfg, market, t, run_id="split")
+    second.run(warm + stored_today)
+    assert _trades(repo, "split") == _trades(repo, "cont") and _trades(repo, "cont")
+    a, b = repo.daily_pnl("cont")[0], repo.daily_pnl("split")[0]
+    assert a["realised"] == pytest.approx(b["realised"], abs=0.01)
+    net = sum(r["pnl"] - r["charges"] for r in repo.list_positions("split"))
+    assert b["realised"] == pytest.approx(net, abs=0.01)
+    assert second.broker.cash == pytest.approx(cfg.capital + net, abs=0.01)
 
 
 def test_outside_session_creates_no_run(repo, tmp_path):
@@ -253,9 +283,9 @@ def test_resume_restores_the_cooldown_after_a_stop_out(repo, tmp_path):
     repo.create_run("cool", "paper", 0, "{}")
     stopped_at = ist_epoch(TODAY, "09:50")
     pid = repo.insert_position("cool", Position("A", "MIS", "LONG", 5, 100.0, 99.0, 102.0, ist_epoch(TODAY, "09:40"), "c1", "ema_rsi"))
-    repo.close_position(pid, stopped_at, 99.0, "STOP", -5.0)
+    repo.close_position(pid, stopped_at, 99.0, "STOP", -5.0, charges=None)
     pid2 = repo.insert_position("cool", Position("B", "MIS", "SHORT", 5, 50.0, 51.0, 48.0, ist_epoch(TODAY, "09:40"), "c2", "ema_rsi"))
-    repo.close_position(pid2, stopped_at, 48.0, "TARGET", 10.0)
+    repo.close_position(pid2, stopped_at, 48.0, "TARGET", 10.0, charges=None)
     assert eng.resume(TODAY) is True
     assert eng._cooldown_until == {"A": stopped_at + 3 * 300}
     assert eng._state().cooldown_until == {"A": stopped_at + 3 * 300}

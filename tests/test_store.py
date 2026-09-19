@@ -63,7 +63,7 @@ def test_positions_roundtrip(repo):
     repo.create_run("r1", "backtest", 0, "{}")
     p = Position("RELIANCE", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 5, "cid", "ema_rsi")
     p.db_id = repo.insert_position("r1", p)
-    repo.close_position(p.db_id, closed_ts=9, exit_price=102.0, exit_reason="TARGET", pnl=20.0)
+    repo.close_position(p.db_id, closed_ts=9, exit_price=102.0, exit_reason="TARGET", pnl=20.0, charges=None)
     rows = repo.list_positions("r1")
     assert len(rows) == 1
     assert rows[0]["exit_reason"] == "TARGET"
@@ -100,7 +100,7 @@ def test_foreign_keys_enforced(repo):
 def test_close_position_accepts_null_pnl(repo):
     repo.create_run("r1", "backtest", 0, "{}")
     pid = repo.insert_position("r1", Position("X", "MIS", "LONG", 1, 1.0, 0.5, None, 1, "c", "s"))
-    repo.close_position(pid, closed_ts=2, exit_price=None, exit_reason=None, pnl=None)
+    repo.close_position(pid, closed_ts=2, exit_price=None, exit_reason=None, pnl=None, charges=None)
     assert repo.list_positions("r1")[0]["pnl"] is None
 
 
@@ -230,7 +230,7 @@ def test_close_position_stores_charges(repo):
     repo.close_position(pid, 9, 102.0, "TARGET", 20.0, charges=3.21)
     assert repo.list_positions("r")[0]["charges"] == 3.21
     pid2 = repo.insert_position("r", Position("B", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 1, "c2", "ema_rsi"))
-    repo.close_position(pid2, 9, 102.0, "TARGET", 20.0)     # older callers: charges stays NULL
+    repo.close_position(pid2, 9, 102.0, "TARGET", 20.0, charges=None)     # a row with no recorded charges
     assert repo.list_positions("r")[1]["charges"] is None
 
 
@@ -252,7 +252,7 @@ def test_last_bar_ts_open_positions_and_pending_orders(repo):
 
     open_id = repo.insert_position("p", Position("B", "MIS", "SHORT", 5, 50.0, 51.0, 48.0, 1200, "c2", "ema_rsi"))
     done_id = repo.insert_position("p", Position("C", "MIS", "LONG", 1, 10.0, 9.0, 12.0, 600, "c3", "ema_rsi"))
-    repo.close_position(done_id, 900, 9.0, "STOP", -1.0)
+    repo.close_position(done_id, 900, 9.0, "STOP", -1.0, charges=None)
     assert [r["id"] for r in repo.open_positions("p")] == [open_id]
 
 
@@ -280,7 +280,7 @@ def test_positions_by_client_id(repo):
     repo.create_run("r1", "backtest", 0, "{}")
     p = Position("A", "MIS", "LONG", 1, 100.0, 99.0, None, 5, "cid-a", "ema_rsi")
     pid = repo.insert_position("r1", p)
-    repo.close_position(pid, 9, 101.0, "TARGET", 1.0)
+    repo.close_position(pid, 9, 101.0, "TARGET", 1.0, charges=None)
     m = repo.positions_by_client_id("r1")
     assert m["cid-a"]["pnl"] == 1.0
 

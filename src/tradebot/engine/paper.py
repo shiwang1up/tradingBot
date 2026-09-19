@@ -42,6 +42,12 @@ def order_from_row(r) -> ApprovedOrder:
     return ApprovedOrder(sig, r["qty"], r["client_id"])
 
 
+def _net(r) -> float:
+    """pnl minus charges for one closed position row. A NULL charges (a paper run resumed on the
+    day the schema was upgraded to record it) is treated as 0.0, same as pnl."""
+    return (r["pnl"] or 0.0) - (r["charges"] or 0.0)
+
+
 class PaperEngine(Engine):
     def __init__(self, cfg, repo, source: LiveBarSource, strategies, broker, ai_filter, clock, lot_sizes: dict,
                  run_id: str, now: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep):
@@ -81,7 +87,7 @@ class PaperEngine(Engine):
         closed = [r for r in self.repo.list_positions(self.run_id) if r["closed_at"] is not None]
         positions = [position_from_row(r) for r in self.repo.open_positions(self.run_id)]
         pending = [order_from_row(r) for r in self.repo.pending_orders(self.run_id)]
-        self.broker.restore(positions, pending, self.cfg.capital + sum(r["pnl"] or 0.0 for r in closed))
+        self.broker.restore(positions, pending, self.cfg.capital + sum(_net(r) for r in closed))
         for p in positions:  # unrealised needs a price for every open symbol; a gap falls back to cost
             self._last_close.setdefault(p.symbol, p.avg_price)
         for r in closed:  # the same wall-clock cooldown _record applies after a stop-out
@@ -90,7 +96,7 @@ class PaperEngine(Engine):
                 self._cooldown_until[r["symbol"]] = max(self._cooldown_until.get(r["symbol"], 0), until)
         rows = {r["date"]: r for r in self.repo.daily_pnl(self.run_id)}
         row = rows.get(today.isoformat())
-        self._day = DayCounters(realised=sum(r["pnl"] or 0.0 for r in closed if date_of(r["closed_at"]) == today),
+        self._day = DayCounters(realised=sum(_net(r) for r in closed if date_of(r["closed_at"]) == today),
                                  entries_placed=row["entries_placed"] if row else 0,
                                  fills=row["fills"] if row else 0)
         log.info("resumed run %s: %d open position(s), %d pending entr%s, last bar %s", self.run_id,

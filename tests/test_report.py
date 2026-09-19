@@ -16,10 +16,10 @@ def _seed(repo):
         p = Position("S%d" % i, "MIS", d, q, e, s, None, ct - 5, "cid%d" % i, "ema_rsi")
         pid = repo.insert_position("r1", p)
         pnl = (x - e) * q if d == "LONG" else (e - x) * q
-        repo.close_position(pid, ct, x, why, pnl)
+        repo.close_position(pid, ct, x, why, pnl, charges=None)
     adopted = Position("ADO", "MIS", "LONG", 1, 100.0, 98.5, None, 1, "cidA", "adopted", adopted=True)
     pid = repo.insert_position("r1", adopted)
-    repo.close_position(pid, 50, 90.0, "STOP", -10.0)
+    repo.close_position(pid, 50, 90.0, "STOP", -10.0, charges=None)
     open_pos = Position("OPEN", "CNC", "LONG", 1, 100.0, 95.0, None, 60, "cidO", "ema_rsi")
     repo.insert_position("r1", open_pos)
     sid = repo.insert_signal("r1", Signal("ema_rsi", "X", "LONG", 1, 0.5, 2, "MIS", 1))
@@ -70,9 +70,9 @@ def test_empty_run_reports_without_dividing_by_zero(repo):
 def test_zero_risk_trade_is_excluded_from_avg_r_and_null_pnl_tolerated(repo):
     repo.create_run("r2", "backtest", 0, "{}")
     pid = repo.insert_position("r2", Position("Z", "MIS", "LONG", 10, 100.0, 100.0, None, 1, "c", "s"))
-    repo.close_position(pid, 2, 105.0, "TARGET", 50.0)
+    repo.close_position(pid, 2, 105.0, "TARGET", 50.0, charges=None)
     pid2 = repo.insert_position("r2", Position("N", "MIS", "LONG", 1, 100.0, 99.0, None, 3, "c2", "s"))
-    repo.close_position(pid2, 4, None, "SQUARE_OFF", None)
+    repo.close_position(pid2, 4, None, "SQUARE_OFF", None, charges=None)
     s = build_summary(repo, "r2")
     assert s.trades == 2 and s.r_trades == 1 and s.avg_r == 0.0 and s.total_pnl == 50.0
 
