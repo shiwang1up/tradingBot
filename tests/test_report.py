@@ -92,3 +92,44 @@ def test_daily_table_alignment_survives_large_numbers(repo):
     lines = format_summary(build_summary(repo, "r4")).splitlines()
     table = [ln for ln in lines if ln[:4] in ("Date", "2026")]
     assert len({len(ln) for ln in table}) == 1, "header and every row have identical width"
+
+
+def test_summary_is_net_of_stored_charges(repo):
+    repo.create_run("n1", "backtest", 0, "{}")
+    for i, (exit_, pnl, ch) in enumerate([(102.0, 20.0, 5.0), (100.2, 2.0, 5.0)]):
+        p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, i, "c%d" % i, "ema_rsi")
+        repo.close_position(repo.insert_position("n1", p), 10 + i, exit_, "TARGET", pnl, charges=ch)
+    s = build_summary(repo, "n1")
+    assert s.gross_pnl == pytest.approx(22.0) and s.charges == pytest.approx(10.0)
+    assert s.total_pnl == pytest.approx(12.0) and s.charges_estimated is False
+    assert s.wins == 1 and s.losses == 1          # +2 gross is -3 net: a loss
+    assert s.avg_r == pytest.approx((15.0 / 10.0 + -3.0 / 10.0) / 2)
+    text = format_summary(s)
+    assert "Gross PnL" in text and "Charges" in text and "estimated" not in text
+
+
+def test_old_rows_are_estimated_with_the_given_schedule(repo):
+    from tradebot.config import ChargesConfig
+    repo.create_run("o1", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 100, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("o1", p), 9, 102.0, "TARGET", 200.0, charges=None)  # charges NULL
+    bare = build_summary(repo, "o1")
+    assert bare.charges == 0.0 and bare.total_pnl == pytest.approx(200.0)           # no schedule given: as before
+    s = build_summary(repo, "o1", ChargesConfig())
+    assert s.charges == pytest.approx(27.42) and s.total_pnl == pytest.approx(172.58)
+    assert s.charges_estimated is True and "estimated" in format_summary(s)
+
+
+def test_row_charges_tolerates_a_bad_stored_row(repo):
+    """A closed row with a nonsensical exit price (e.g. a zero from a bad candle, spec elsewhere)
+    must not crash the report when a schedule is given to estimate its charges: position_charges
+    raises ValueError on a non-positive price, and row_charges must contain that per row."""
+    from tradebot.config import ChargesConfig
+    from tradebot.report.summary import row_charges
+    repo.create_run("bad1", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("bad1", p), 9, 0.0, "TARGET", -1000.0, charges=None)
+    row = repo.list_positions("bad1")[0]
+    assert row_charges(row, ChargesConfig()) == (0.0, False)
+    s = build_summary(repo, "bad1", ChargesConfig())
+    assert s.charges == 0.0 and s.total_pnl == pytest.approx(-1000.0)

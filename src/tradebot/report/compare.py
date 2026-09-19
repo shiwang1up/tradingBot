@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Optional
 
+from tradebot.config import ChargesConfig
 from tradebot.engine.clock import iso_ist
-from tradebot.report.summary import Summary, build_summary
+from tradebot.report.summary import Summary, build_summary, row_charges
 from tradebot.store.repo import Repo
 from tradebot.types import make_client_id
 
-COMPARABLE_KEYS = ("strategy", "session", "capital", "risk", "execution")
+COMPARABLE_KEYS = ("strategy", "session", "capital", "risk", "execution", "charges")
 
 
 @dataclass(frozen=True)
@@ -71,8 +73,8 @@ def _compat_warnings(repo: Repo, run_a: str, run_b: str, a: Summary, b: Summary)
     return out
 
 
-def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices) -> Compare:
-    a, b = build_summary(repo, run_a), build_summary(repo, run_b)  # raises ValueError for unknown runs
+def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices, schedule: Optional[ChargesConfig] = None) -> Compare:
+    a, b = build_summary(repo, run_a, schedule), build_summary(repo, run_b, schedule)  # raises ValueError for unknown runs
     warnings = _compat_warnings(repo, run_a, run_b, a, b)
     positions_a = repo.positions_by_client_id(run_a)
     rows, closed, open_, net, losses, wins = [], 0, 0, 0.0, 0.0, 0.0
@@ -85,7 +87,7 @@ def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices) -> Compare
             status, pnl = "open", None
             open_ += 1
         else:
-            status, pnl = "closed", float(pos["pnl"] or 0.0)
+            status, pnl = "closed", float(pos["pnl"] or 0.0) - row_charges(pos, schedule)[0]
             closed += 1
             net += pnl
             if pnl <= 0:  # same convention as summary: a scratch counts on the loss side
@@ -114,6 +116,7 @@ def _side_by_side(a: Summary, b: Summary) -> list:
         ("Trades", f"{a.trades}", f"{b.trades}"),
         ("Win rate", f"{a.win_rate * 100:.1f}%", f"{b.win_rate * 100:.1f}%"),
         ("Total PnL", f"{a.total_pnl:,.2f}", f"{b.total_pnl:,.2f}"),
+        ("Charges", f"{a.charges:,.2f}", f"{b.charges:,.2f}"),
         ("Avg R", f"{a.avg_r:.2f}", f"{b.avg_r:.2f}"),
         ("Max DD (closed)", f"{a.max_drawdown:,.2f}", f"{b.max_drawdown:,.2f}"),
         ("Max DD (equity)", f"{a.max_drawdown_equity:,.2f}", f"{b.max_drawdown_equity:,.2f}"),

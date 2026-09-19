@@ -7,7 +7,8 @@ grid.json maps a label to an override of the `strategy.confluence` section (nest
 {"weights": {"trend": 2.0}} changes one weight). Two reserved keys override other sections:
 "_exec" (execution: slippage_pct, ...) and "_risk" (risk: per_trade_pct, ...). The AI filter is
 always the stub. One backtest per variant over the window; the IS/OOS columns split the daily PnL at
---oos-from. Results are appended to <grid>.results.jsonl next to the grid file."""
+--oos-from. Results (including "pnl") are net of charges, same as `tradebot backtest`. Results are
+appended to <grid>.results.jsonl next to the grid file."""
 import json, logging, sys, time
 from dataclasses import replace as dc_replace
 from datetime import datetime
@@ -58,13 +59,14 @@ def run_variant(cfg, label: str, over: dict):
                                         ist_epoch(START.date(), "00:00"), ist_epoch(END.date(), "23:59"))
     run_id = f"sw-{label}-{int(time.time()*1000) % 10**8}"
     strategy = build_strategy("confluence", strategy_params(cfg.strategy, "confluence"))
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct,
+                            charges=cfg.charges)
     ai_cfg = dc_replace(cfg.ai, filter="stub")
     clock = SessionClock(cfg.session, interval)
     ai = build_filter(ai_cfg, None, repo=repo, clock=clock)
     engine = BacktestEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id)
     rid = engine.run()
-    s = build_summary(repo, rid)
+    s = build_summary(repo, rid, cfg.charges)
     is_pnl = sum(d["realised"] for d in s.days if d["date"] < OOS_FROM)
     oos_pnl = sum(d["realised"] for d in s.days if d["date"] >= OOS_FROM)
     ex = s.exit_reasons

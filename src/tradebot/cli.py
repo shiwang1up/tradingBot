@@ -208,7 +208,7 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     # The engine stores the resolved config with the run, so record the effective filter there too.
     engine = BacktestEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id)
     rid = engine.run()
-    click.echo(format_summary(build_summary(repo, rid)))
+    click.echo(format_summary(build_summary(repo, rid, cfg.charges)))
     if log_path:
         click.echo(f"log: {log_path}")
 
@@ -228,9 +228,9 @@ def report(cfg: Config, run_id: Optional[str], compare) -> None:
         raise click.ClickException("--run and --compare are mutually exclusive")
     repo = Repo(connect(cfg.paths.db))
     if compare:
-        click.echo(format_compare(build_compare(repo, compare[0], compare[1], _prices(cfg))))
+        click.echo(format_compare(build_compare(repo, compare[0], compare[1], _prices(cfg), cfg.charges)))
         return
-    click.echo(format_summary(build_summary(repo, run_id)))
+    click.echo(format_summary(build_summary(repo, run_id, cfg.charges)))
 
 
 def _estimate_candidate(cfg: Config, r, window) -> Candidate:
@@ -350,7 +350,7 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
     if rid is None:
         click.echo("nothing to trade: the session closed while warming up")
         return
-    click.echo(format_summary(build_summary(repo, rid)))
+    click.echo(format_summary(build_summary(repo, rid, cfg.charges)))
     if repo.get_run(rid)["ended_at"] is None:
         click.echo(f"run {rid} is still open: start the command again today to resume it")
     if log_path:

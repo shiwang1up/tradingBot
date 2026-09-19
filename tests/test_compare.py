@@ -106,3 +106,14 @@ def test_compare_requires_both_runs(repo):
     repo.create_run("A", "backtest", 0, CFG)
     with pytest.raises(ValueError):
         build_compare(repo, "A", "missing", P)
+
+
+def test_compare_is_net_when_a_schedule_is_given(repo):
+    from tradebot.config import ChargesConfig
+    _seed_pair(repo)
+    gross = build_compare(repo, "A", "B", P)
+    net = build_compare(repo, "A", "B", P, ChargesConfig())
+    assert gross.a.charges == 0.0
+    assert net.a.charges > 0 and net.a.total_pnl == pytest.approx(gross.a.total_pnl - net.a.charges)
+    assert net.rejected_pnl_in_a < gross.rejected_pnl_in_a     # the two rejected trades now carry their costs
+    assert "Charges" in format_compare(net)
