@@ -73,9 +73,10 @@ class Repo:
     # -- signals & decisions ----------------------------------------------
     def insert_signal(self, run_id: str, s: Signal) -> int:
         cur = self.conn.execute(
-            "INSERT INTO signals(run_id, strategy, symbol, bar_ts, direction, entry, stop, target, product) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (run_id, s.strategy, s.symbol, s.bar_ts, s.direction, s.entry_price, s.stop_price, s.target_price, s.product),
+            "INSERT INTO signals(run_id, strategy, symbol, bar_ts, direction, entry, stop, target, product, priority) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (run_id, s.strategy, s.symbol, s.bar_ts, s.direction, s.entry_price, s.stop_price, s.target_price,
+             s.product, s.priority),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -228,7 +229,8 @@ class Repo:
         """ENTRY orders still PENDING, joined to the signal they came from, so a paper resume can
         rebuild the ApprovedOrder the broker was holding."""
         return self.conn.execute(
-            "SELECT o.client_id, o.qty, s.strategy, s.symbol, s.direction, s.entry, s.stop, s.target, s.product, s.bar_ts "
+            "SELECT o.client_id, o.qty, s.strategy, s.symbol, s.direction, s.entry, s.stop, s.target, s.product, "
+            "s.bar_ts, s.priority "
             "FROM orders o JOIN signals s ON s.id = o.signal_id "
             "WHERE o.run_id=? AND o.kind='ENTRY' AND o.status='PENDING' ORDER BY o.id", (run_id,)
         ).fetchall()

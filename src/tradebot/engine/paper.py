@@ -38,7 +38,8 @@ def position_from_row(r) -> Position:
 
 
 def order_from_row(r) -> ApprovedOrder:
-    sig = Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"], r["product"], r["bar_ts"])
+    sig = Signal(r["strategy"], r["symbol"], r["direction"], r["entry"], r["stop"], r["target"], r["product"],
+                r["bar_ts"], priority=r["priority"])
     return ApprovedOrder(sig, r["qty"], r["client_id"])
 
 

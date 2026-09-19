@@ -7,7 +7,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Union
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class SchemaVersionError(RuntimeError):
@@ -30,6 +30,9 @@ MIGRATIONS = {
     ],
     3: [
         "ALTER TABLE positions ADD COLUMN charges REAL",
+    ],
+    4: [
+        "ALTER TABLE signals ADD COLUMN priority REAL NOT NULL DEFAULT 0",
     ],
 }
 

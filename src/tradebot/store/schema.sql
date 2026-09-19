@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS signals (
   entry     REAL NOT NULL,
   stop      REAL NOT NULL,
   target    REAL,
-  product   TEXT NOT NULL
+  product   TEXT NOT NULL,
+  priority  REAL NOT NULL DEFAULT 0  -- ranks same-bar signals (Signal.priority); 0 on rows written before schema v5
 );
 
 CREATE TABLE IF NOT EXISTS risk_decisions (
