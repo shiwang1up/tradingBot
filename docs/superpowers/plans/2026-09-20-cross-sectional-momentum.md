@@ -310,11 +310,8 @@ This reads the database read-only and writes nothing to it.
 """
 import argparse
 import importlib.util
-import math
 import sqlite3
 import sys
-from collections import defaultdict
-from datetime import date
 from pathlib import Path
 
 DB = "data/tradebot.db"
@@ -388,7 +385,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run**
 
-Run: `.venv/bin/pytest tests/test_momentum_screen.py -q` → `5 passed`. Then `.venv/bin/pytest -q` → `606 passed`.
+Run: `.venv/bin/pytest tests/test_momentum_screen.py -q` → `5 passed`. Then `.venv/bin/pytest -q` → `607 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -521,7 +518,7 @@ def basket_return(closes, names, entry_date, exit_date):
 
 - [ ] **Step 4: Run**
 
-Run: `.venv/bin/pytest -q` → `612 passed`.
+Run: `.venv/bin/pytest -q` → `613 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -607,7 +604,8 @@ Run: `.venv/bin/pytest tests/test_momentum_screen.py -q` → `AttributeError: ..
 
 - [ ] **Step 3: Implement**
 
-Add to `scripts/momentum_screen.py`, after `basket_return`:
+Add `import math` to the imports at the top of `scripts/momentum_screen.py` (Task 2 left it out
+because nothing needed it yet), then add this after `basket_return`:
 
 ```python
 def series_t(values):
@@ -851,7 +849,8 @@ Run: `.venv/bin/pytest tests/test_momentum_screen.py -q` → `AttributeError: ..
 
 - [ ] **Step 3: Implement**
 
-Add to `scripts/momentum_screen.py`, replacing `main`:
+Add `from datetime import date` to the imports at the top of `scripts/momentum_screen.py`
+(`run_phase` compares dates), then add this, replacing `main`:
 
 ```python
 SECONDARY_LOOKBACKS = (12, 6, 3)        # the primary is 12; 6 and 3 are descriptive only
@@ -949,9 +948,9 @@ def main():
     ap.add_argument("phase", choices=["run", "quintiles"])
     ap.add_argument("--db", default=DB)
     a = ap.parse_args()
-    import yaml
     from tradebot.config import load_config
-    symbols = list(yaml.safe_load(open(load_config("config.yaml").paths.universe))["symbols"])
+    from tradebot.data.universe import load_universe
+    symbols = list(load_universe(load_config("config.yaml").paths.universe).symbols)
     conn = sqlite3.connect("file:%s?mode=ro" % a.db, uri=True)
     try:
         if a.phase == "run":
