@@ -96,3 +96,136 @@ def test_rolling_extremes_exclude_the_current_bar():
     """A breakout must clear the PREVIOUS n closes; including today's would make it trivially true."""
     assert ds.rolling_max_prev([1.0, 5.0, 3.0, 2.0], 2) == [None, None, 5.0, 5.0]
     assert ds.rolling_min_prev([4.0, 1.0, 3.0, 2.0], 2) == [None, None, 1.0, 1.0]
+
+
+from datetime import timedelta
+
+
+def _flat(n, price=100.0, start=date(2020, 1, 1)):
+    return [ds.Bar(start + timedelta(days=k), price, price + 1, price - 1, price) for k in range(n)]
+
+
+def _ind(bars):
+    return ds.Indicators(bars)
+
+
+# -- entry and exit rules ---------------------------------------------------------------------
+def test_mean_reversion_enters_on_an_oversold_dip_in_an_uptrend():
+    """Rising series (close above SMA200), then two sharp down closes drive RSI(2) under 10."""
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), 100.0 + k, 101.0 + k, 99.0 + k, 100.0 + k)
+            for k in range(240)]
+    for k, c in ((238, 300.0), (239, 250.0)):          # two big down bars at the end
+        bars[k] = ds.Bar(bars[k].date, c, c + 1, c - 1, c)
+    ind = _ind(bars)
+    assert ind.rsi2[239] < 10.0 and ind.closes[239] > ind.sma200[239]
+    assert ds.mr_entry(ind, 239) is True
+    assert ds.mr_entry(ind, 200) is False              # no dip there
+
+
+def test_mean_reversion_exits_above_the_5_day_average_or_after_10_days():
+    bars = _flat(30)
+    ind = _ind(bars)
+    # flat series: close == sma5, so no sma5 exit; the time stop must fire on the 10th day
+    assert ds.mr_exit(ind, 15, 10, 0.0) is None
+    assert ds.mr_exit(ind, 20, 10, 0.0) == "time"
+    rising = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), 100.0 + k, 101.0 + k, 99.0 + k, 100.0 + k)
+              for k in range(30)]
+    assert ds.mr_exit(_ind(rising), 15, 14, 0.0) == "sma5"      # close is above its 5-day mean
+
+
+def test_trend_following_enters_only_on_the_bar_the_averages_cross():
+    """A series that falls for 150 bars then rises brings SMA50 up through SMA200 exactly once."""
+    closes = [200.0 - k for k in range(150)] + [50.0 + 2.0 * k for k in range(150)]
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), c, c + 1, c - 1, c) for k, c in enumerate(closes)]
+    ind = _ind(bars)
+    crosses = [i for i in range(len(bars)) if ds.tf_entry(ind, i)]
+    assert len(crosses) == 1, crosses
+    i = crosses[0]
+    assert ind.sma50[i - 1] <= ind.sma200[i - 1] and ind.sma50[i] > ind.sma200[i]
+
+
+def test_trend_following_exits_when_price_falls_3_atr_below_the_run_high():
+    bars = _flat(30)                       # true range 2 every bar -> ATR(20) = 2, trail = 6
+    ind = _ind(bars)
+    assert ds.tf_exit(ind, 25, 20, run_high=100.0) is None       # close 100, high 100: no drop
+    assert ds.tf_exit(ind, 25, 20, run_high=106.5) == "trail"    # 100 < 106.5 - 6
+    assert ds.tf_exit(ind, 25, 20, run_high=105.0) is None       # 100 > 105 - 6
+
+
+def test_breakout_needs_a_new_100_day_high_above_the_200_day_average():
+    closes = [100.0 + (k % 7) for k in range(300)]               # range-bound: no new highs
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), c, c + 1, c - 1, c) for k, c in enumerate(closes)]
+    assert ds.bo_entry(_ind(bars), 250) is False
+    bars[250] = ds.Bar(bars[250].date, 130.0, 131.0, 129.0, 130.0)
+    ind = _ind(bars)
+    assert ind.closes[250] > ind.max100_prev[250] and ind.closes[250] > ind.sma200[250]
+    assert ds.bo_entry(ind, 250) is True
+
+
+def test_breakout_exits_below_the_50_day_low():
+    closes = [100.0 + k for k in range(120)] + [60.0]
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), c, c + 1, c - 1, c) for k, c in enumerate(closes)]
+    ind = _ind(bars)
+    assert ds.bo_exit(ind, 120, 100, 0.0) == "min50"
+    assert ds.bo_exit(ind, 110, 100, 0.0) is None
+
+
+# -- the simulation --------------------------------------------------------------------------
+_ALWAYS = (lambda ind, i: True, lambda ind, i, e, h: "x")        # enter every bar, exit immediately
+_NEVER_EXIT = (lambda ind, i: i == 3, lambda ind, i, e, h: None)
+
+
+def test_entry_and_exit_both_happen_at_the_next_bar_open():
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), 10.0 + k, 12.0 + k, 9.0 + k, 10.0 + k)
+            for k in range(8)]
+    trades, excluded = ds.simulate("A", "mr", bars, _ind(bars), set(), (bars[0].date, bars[-1].date),
+                                   cost=0.0, system=_NEVER_EXIT, warmup=0)
+    assert excluded == 0 and len(trades) == 1
+    t = trades[0]
+    assert t.entry_date == bars[4].date and t.entry_price == bars[4].open   # signal on bar 3, enter bar 4
+    assert t.exit_date == bars[7].date and t.exit_price == bars[7].open     # no exit: window end
+    assert t.reason == "window_end" and t.days == 3
+    assert t.gross == pytest.approx(bars[7].open / bars[4].open - 1.0)
+
+
+def test_only_one_trade_is_open_at_a_time():
+    bars = _flat(10)
+    trades, _ = ds.simulate("A", "mr", bars, _ind(bars), set(), (bars[0].date, bars[-1].date),
+                            cost=0.0, system=_ALWAYS, warmup=0)
+    # entry on the bar after each signal, exit on the bar after that: trades cannot overlap
+    for a, b in zip(trades, trades[1:]):
+        assert a.exit_date <= b.entry_date
+
+
+def test_cost_is_deducted_from_the_net_return():
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), 100.0, 101.0, 99.0, 100.0) for k in range(8)]
+    bars[7] = ds.Bar(bars[7].date, 110.0, 111.0, 109.0, 110.0)
+    trades, _ = ds.simulate("A", "mr", bars, _ind(bars), set(), (bars[0].date, bars[-1].date),
+                            cost=0.01, system=_NEVER_EXIT, warmup=0)
+    assert trades[0].gross == pytest.approx(0.10)
+    assert trades[0].net == pytest.approx(0.09)
+
+
+def test_a_trade_touching_a_masked_date_is_excluded_not_counted():
+    bars = _flat(8)
+    masked = {bars[6].date}
+    trades, excluded = ds.simulate("A", "mr", bars, _ind(bars), masked, (bars[0].date, bars[-1].date),
+                                   cost=0.0, system=_NEVER_EXIT, warmup=0)
+    assert trades == [] and excluded == 1
+
+
+def test_no_entry_on_a_masked_signal_bar():
+    bars = _flat(8)
+    trades, excluded = ds.simulate("A", "mr", bars, _ind(bars), {bars[3].date},
+                                   (bars[0].date, bars[-1].date), cost=0.0, system=_NEVER_EXIT, warmup=0)
+    assert trades == [] and excluded == 0        # the signal never fired, so nothing was excluded
+
+
+def test_the_window_bounds_which_bars_can_trade():
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), 10.0, 11.0, 9.0, 10.0) for k in range(20)]
+    window = (bars[5].date, bars[10].date)
+    trades, _ = ds.simulate("A", "mr", bars, _ind(bars), set(), window, cost=0.0,
+                            system=_ALWAYS, warmup=0)
+    assert trades, "the window must contain trades"
+    for t in trades:
+        assert window[0] <= t.entry_date <= window[1] and t.exit_date <= window[1]

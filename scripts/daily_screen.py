@@ -163,6 +163,109 @@ class Indicators(object):
         self.min50_prev = rolling_min_prev(self.closes, 50)
 
 
+# -- the three systems. Long only. Entry is judged on day i's close and filled at day i+1's open;
+# an exit condition met on day u's close (u strictly after the entry day) is filled at u+1's open.
+def mr_entry(ind, i):
+    """Mean reversion: an oversold dip inside an uptrend."""
+    return (ind.sma200[i] is not None and ind.rsi2[i] is not None
+            and ind.closes[i] > ind.sma200[i] and ind.rsi2[i] < 10.0)
+
+
+def mr_exit(ind, i, entry_i, run_high):
+    """Out on the bounce, or out anyway after 10 trading days: the edge is short-lived, and a dip
+    that has not bounced by then is a downtrend, not a pullback."""
+    if ind.sma5[i] is not None and ind.closes[i] > ind.sma5[i]:
+        return "sma5"
+    if i - entry_i >= 10:
+        return "time"
+    return None
+
+
+def tf_entry(ind, i):
+    """Trend following: the bar the 50-day average crosses above the 200-day, price above the 200."""
+    if i == 0:
+        return False
+    prev_fast, prev_slow = ind.sma50[i - 1], ind.sma200[i - 1]
+    fast, slow = ind.sma50[i], ind.sma200[i]
+    if prev_fast is None or prev_slow is None or fast is None or slow is None:
+        return False
+    return prev_fast <= prev_slow and fast > slow and ind.closes[i] > slow
+
+
+def tf_exit(ind, i, entry_i, run_high):
+    """A trailing stop, not a target: the whole point is to let one winner run."""
+    if ind.atr20[i] is None:
+        return None
+    return "trail" if ind.closes[i] < run_high - 3.0 * ind.atr20[i] else None
+
+
+def bo_entry(ind, i):
+    """Breakout: a new 100-day closing high, in an uptrend."""
+    return (ind.max100_prev[i] is not None and ind.sma200[i] is not None
+            and ind.closes[i] > ind.max100_prev[i] and ind.closes[i] > ind.sma200[i])
+
+
+def bo_exit(ind, i, entry_i, run_high):
+    return "min50" if ind.min50_prev[i] is not None and ind.closes[i] < ind.min50_prev[i] else None
+
+
+SYSTEMS = {"mr": (mr_entry, mr_exit), "tf": (tf_entry, tf_exit), "bo": (bo_entry, bo_exit)}
+SYSTEM_TITLES = {
+    "mr": "mean reversion (close > SMA200, RSI(2) < 10; exit close > SMA5 or 10 days)",
+    "tf": "trend following (SMA50 crosses above SMA200, close > SMA200; exit 3 x ATR(20) trail)",
+    "bo": "breakout (100-day closing high, close > SMA200; exit below the 50-day closing low)",
+}
+
+Trade = namedtuple("Trade", "symbol system entry_date exit_date entry_price exit_price days "
+                            "gross net reason excess")
+Trade.__new__.__defaults__ = (0.0,)
+
+
+def simulate(symbol, name, bars, ind, masked, window, cost, system=None, warmup=WARMUP_BARS):
+    """(trades, excluded) for one system on one symbol inside one window.
+
+    One trade at a time: a signal while a trade is open is ignored, so the count is not inflated by
+    a rule that fires every day of a dip. A trade still open at the window's last bar is closed at
+    that bar's open, so an in-sample trade can never reach into the holdout. A trade any of whose
+    days is masked by a corporate action is dropped and counted in `excluded` rather than silently
+    scoring a split as a 50% loss."""
+    entry_fn, exit_fn = system if system is not None else SYSTEMS[name]
+    lo, hi = window
+    in_window = [i for i in range(len(bars)) if lo <= bars[i].date <= hi]
+    if not in_window:
+        return [], 0
+    first_i, last_i = in_window[0], in_window[-1]
+    trades, excluded = [], 0
+    i = max(first_i, warmup)
+    while i < last_i:
+        if bars[i].date in masked or not entry_fn(ind, i):
+            i += 1
+            continue
+        entry_i = i + 1
+        if entry_i >= last_i:
+            break
+        run_high = bars[entry_i].high
+        u, reason = entry_i + 1, None
+        while u < last_i:
+            run_high = max(run_high, bars[u].high)
+            reason = exit_fn(ind, u, entry_i, run_high)
+            if reason:
+                break
+            u += 1
+        exit_i = min(u + 1, last_i)
+        if reason is None:
+            reason = "window_end"
+        if any(bars[k].date in masked for k in range(entry_i, exit_i + 1)):
+            excluded += 1
+        else:
+            entry_px, exit_px = bars[entry_i].open, bars[exit_i].open
+            gross = (exit_px / entry_px - 1.0) if entry_px > 0 else 0.0
+            trades.append(Trade(symbol, name, bars[entry_i].date, bars[exit_i].date, entry_px,
+                                exit_px, exit_i - entry_i, gross, gross - cost, reason))
+        i = exit_i
+    return trades, excluded
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("phase", choices=["fetch", "insample", "holdout"])
