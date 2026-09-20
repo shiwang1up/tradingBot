@@ -203,6 +203,14 @@ def split_quintiles(ranked, n_groups=QUINTILES):
     return groups
 
 
+def quintile_months(rows):
+    """(kept, dropped) from a list of per-month group returns. A month is kept only if EVERY group
+    priced, so all five means are taken over the same months and top-minus-bottom is a real
+    difference rather than two unrelated averages."""
+    kept = [r for r in rows if all(x is not None for x in r)]
+    return kept, len(rows) - len(kept)
+
+
 def _max_drawdown(returns):
     """Largest peak-to-trough fall of the cumulative curve, as a positive fraction."""
     cum, peak, dd = 1.0, 1.0, 0.0
@@ -333,7 +341,7 @@ def quintiles_phase(conn, symbols, out=sys.stdout):
     masked = {s: gap_mask(b) for s, b in bars.items()}
     all_dates = sorted({d for by in closes.values() for d in by})
     ends = month_ends(all_dates)
-    buckets = [[] for _ in range(QUINTILES)]
+    rows = []
     for i, rank_date in enumerate(ends):
         j_skip, j_start = i - SKIP_MONTHS, i - (LOOKBACK_MONTHS + SKIP_MONTHS)
         if j_start < 0 or i + 1 >= len(ends):
@@ -347,17 +355,18 @@ def quintiles_phase(conn, symbols, out=sys.stdout):
             continue
         ranked = sorted(names, key=lambda s: momentum_score(
             closes[s], rank_date, ends[j_skip], ends[j_start]), reverse=True)
-        for g, group in enumerate(split_quintiles(ranked)):
-            r = basket_return(closes, group, entry, exit_)
-            if r is not None:
-                buckets[g].append(r)
+        rows.append([basket_return(closes, g, entry, exit_)
+                     for g in split_quintiles(ranked)])
+    kept, dropped = quintile_months(rows)
     print("quintiles by 12-1 momentum, gross of costs (group 1 = highest ranked)", file=out)
-    print("  %-8s%10s%10s" % ("group", "months", "mean/mo"), file=out)
-    for g, rs in enumerate(buckets, 1):
-        m = (sum(rs) / len(rs) * 100) if rs else 0.0
-        print("  %-8d%10d%9.3f%%" % (g, len(rs), m), file=out)
-    spread = ((sum(buckets[0]) / len(buckets[0])) - (sum(buckets[-1]) / len(buckets[-1]))) * 100 \
-        if buckets[0] and buckets[-1] else 0.0
+    print("  %d months; %d dropped because some group could not be priced"
+          % (len(kept), dropped), file=out)
+    print("  %-8s%10s" % ("group", "mean/mo"), file=out)
+    for g in range(QUINTILES):
+        m = (sum(r[g] for r in kept) / len(kept) * 100) if kept else 0.0
+        print("  %-8d%9.3f%%" % (g + 1, m), file=out)
+    spread = ((sum(r[0] for r in kept) - sum(r[-1] for r in kept)) / len(kept) * 100) \
+        if kept else 0.0
     print("  top minus bottom: %+.3f%%/mo (gross; a ranking that carries no information gives ~0)"
           % spread, file=out)
     print("", file=out)

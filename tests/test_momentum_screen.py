@@ -227,3 +227,14 @@ def test_run_phase_prints_the_primary_the_grid_and_the_caveats(tmp_path):
     text = buf.getvalue()
     assert "primary" in text and "spread" in text and "Caveats" in text
     assert "12-1" in text
+
+
+def test_quintile_months_are_dropped_for_every_group_or_none():
+    """A month where any group fails to price is dropped from ALL groups. Otherwise the
+    top-minus-bottom figure subtracts two means taken over different months, which is not a
+    comparison. Two such months exist in the real data, both in late 2025."""
+    kept, dropped = ms.quintile_months([[0.01, 0.02, 0.03, 0.04, 0.05],
+                                        [0.01, 0.02, None, 0.04, 0.05],
+                                        [0.02, 0.03, 0.04, 0.05, 0.06]])
+    assert dropped == 1
+    assert kept == [[0.01, 0.02, 0.03, 0.04, 0.05], [0.02, 0.03, 0.04, 0.05, 0.06]]
