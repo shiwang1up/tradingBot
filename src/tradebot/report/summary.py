@@ -13,14 +13,19 @@ Conventions:
   planned entry. "R on risk" pools net PnL and rupees at risk over every trade before dividing, so
   a scrap-sized position with a razor-thin stop cannot dominate it the way it can dominate an
   unweighted mean of per-trade R; its sign is the sign of net PnL over those trades.
-- Expectancy is the net PnL per trade; the printed decomposition
-  `win_rate x avg_win - loss_rate x |avg_loss|` is the same number by identity, shown because it is
-  the form the trade-off between win rate and payoff is usually argued in. The breakeven win rate is
-  1 / (1 + payoff): the win rate this system's own payoff would need to break even.
+- Expectancy is the net PnL per trade; the printed line also shows
+  `win_rate x avg_win` against `loss_rate x |avg_loss|`, the form the trade-off between win rate and
+  payoff is usually argued in, but that is not asserted to equal expectancy: the two averages are
+  themselves rounded to 2dp for display, so the arithmetic would not reconcile at that precision.
+  Payoff (avg_win / |avg_loss|) and the breakeven win rate (1 / (1 + payoff)) are undefined - `None`,
+  printed `n/a` - when there are no losing trades or no winning trades to divide by; treating that as
+  0.0 would make a flawless run look the worst.
 - Evidence (days, mean, t) is computed from the trades' NET PnL summed per IST close date, NOT from
   the daily_pnl rows: those are gross for runs whose charges were estimated after the fact, and one
   source keeps the block internally consistent. The day is the unit because same-day trades are
-  correlated.
+  correlated. Only days with at least one closed trade are counted - a flat day contributes no PnL
+  observation either way, and folding zeros in would dilute the variance without changing the mean
+  it is compared against, so it is labelled "days traded" rather than implied to cover the whole run.
 """
 from __future__ import annotations
 
@@ -65,9 +70,9 @@ class Summary:
     r_on_risk: float = 0.0           # net PnL / rupees at risk, pooled over the trades that entered avg_r
     avg_win: float = 0.0             # mean net PnL of winning trades
     avg_loss: float = 0.0            # mean net PnL of the rest, negative; a scratch counts as a loss
-    payoff: float = 0.0              # avg_win / |avg_loss|
+    payoff: Optional[float] = None   # avg_win / |avg_loss|; None with no losses or no wins to divide
     expectancy: float = 0.0          # net PnL per trade
-    breakeven_win_rate: float = 0.0  # 1 / (1 + payoff): what this payoff would need to break even
+    breakeven_win_rate: Optional[float] = None  # 1 / (1 + payoff); None when payoff is
     evidence_days: int = 0           # days with at least one closed trade
     evidence_mean: float = 0.0       # mean net PnL per such day
     evidence_t: Optional[float] = None  # None when fewer than 2 days or no variance
@@ -153,10 +158,11 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
     loss_pnls = [p for p in pnls if p <= 0]
     avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0.0
     avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0.0
-    payoff = avg_win / abs(avg_loss) if avg_loss < 0 and avg_win > 0 else 0.0
+    payoff = avg_win / abs(avg_loss) if avg_loss < 0 and avg_win > 0 else None
     by_day: dict = {}
     for r, p in zip(closed, pnls):
-        by_day[date_of(r["closed_at"])] = by_day.get(date_of(r["closed_at"]), 0.0) + p
+        d = date_of(r["closed_at"])
+        by_day[d] = by_day.get(d, 0.0) + p
     evidence_mean, evidence_t = _day_t([by_day[d] for d in sorted(by_day)])
     return Summary(
         run_id=run_id,
@@ -186,7 +192,7 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
         avg_loss=avg_loss,
         payoff=payoff,
         expectancy=(sum(pnls) / len(pnls)) if pnls else 0.0,
-        breakeven_win_rate=(1 / (1 + payoff)) if payoff > 0 else 0.0,
+        breakeven_win_rate=(1 / (1 + payoff)) if payoff is not None else None,
         evidence_days=len(by_day),
         evidence_mean=evidence_mean,
         evidence_t=evidence_t,
@@ -223,14 +229,32 @@ def format_summary(s: Summary) -> str:
         equity_dd_note = "; partly gross: some daily rows have no recorded charges"
     else:
         equity_dd_note = ""
-    if s.trades < 30 or s.evidence_days < 20:
-        evidence = (f"{s.evidence_days} days, mean {s.evidence_mean:,.2f} per day   "
-                    f"too few to judge (needs 30+ trades and 20+ days)")
-    elif s.evidence_t is None:
-        evidence = f"{s.evidence_days} days, mean {s.evidence_mean:,.2f} per day, t n/a"
+    payoff_str = "n/a" if s.payoff is None else f"{s.payoff:.2f}"
+    if s.trades == 0:
+        avg_line = "n/a"
+        expectancy_line = "n/a"
+        breakeven_line = "n/a"
+        evidence = "n/a"
     else:
-        weak = "   not distinguishable from zero" if abs(s.evidence_t) < 2 else ""
-        evidence = f"{s.evidence_days} days, mean {s.evidence_mean:,.2f} per day, t {s.evidence_t:.1f}{weak}"
+        avg_line = f"{s.avg_win:+,.2f} / {s.avg_loss:+,.2f}   payoff {payoff_str}"
+        expectancy_line = (f"{s.expectancy:,.2f} per trade   {s.win_rate * 100:.1f}% x {s.avg_win:,.2f} won against "
+                            f"{(1 - s.win_rate) * 100:.1f}% x {abs(s.avg_loss):,.2f} lost")
+        breakeven_str = "n/a" if s.breakeven_win_rate is None else f"{s.breakeven_win_rate * 100:.1f}%"
+        breakeven_line = (f"{breakeven_str} at the payoff this run actually achieved ({payoff_str}); "
+                           f"actual win rate {s.win_rate * 100:.1f}%")
+        if s.trades < 30 or s.evidence_days < 20:
+            evidence = (f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day   "
+                        f"too few to judge (needs 30+ trades and 20+ days)")
+        elif s.evidence_t is None:
+            evidence = f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day, t n/a"
+        else:
+            if s.evidence_t <= -2:
+                note = "   consistently losing"
+            elif s.evidence_t < 2:
+                note = "   not distinguishable from zero"
+            else:
+                note = "   consistently profitable"
+            evidence = f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day, t {s.evidence_t:.1f}{note}"
     lines = [
         f"Run {s.run_id} ({s.mode})",
         "Survivorship note: universe.yaml is today's constituent list; past-period results are overstated.",
@@ -242,10 +266,9 @@ def format_summary(s: Summary) -> str:
         f"Total PnL             {s.total_pnl:,.2f}   net",
         f"Avg R (per trade)     {s.avg_r:.2f}   (over {s.r_trades} of {s.trades} trades with non-zero risk)",
         f"R on risk             {s.r_on_risk:.2f}   net PnL / rupees at risk, pooled over the same {s.r_trades} trades",
-        f"Avg win / avg loss    {s.avg_win:+,.2f} / {s.avg_loss:+,.2f}   payoff {s.payoff:.2f}",
-        f"Expectancy            {s.expectancy:,.2f} per trade = {s.win_rate * 100:.1f}% x {s.avg_win:,.2f}"
-        f" - {(1 - s.win_rate) * 100:.1f}% x {abs(s.avg_loss):,.2f}",
-        f"Breakeven win rate    {s.breakeven_win_rate * 100:.1f}% at this payoff (actual {s.win_rate * 100:.1f}%)",
+        f"Avg win / avg loss    {avg_line}",
+        f"Expectancy            {expectancy_line}",
+        f"Breakeven win rate    {breakeven_line}",
         f"Evidence              {evidence}",
         f"Max drawdown (closed) {s.max_drawdown:,.2f}   realised, closed trades only",
         f"Max drawdown (equity) {s.max_drawdown_equity:,.2f}   daily realised + unrealised{equity_dd_note}",

@@ -1,6 +1,6 @@
 import pytest
 
-from tradebot.report.summary import build_summary, format_summary
+from tradebot.report.summary import Summary, build_summary, format_summary
 from tradebot.types import Position, Signal
 
 
@@ -277,11 +277,26 @@ def test_expectancy_identity_payoff_and_breakeven(repo):
     assert s.breakeven_win_rate == pytest.approx(1 / (1 + 0.75))
 
 
-def test_expectancy_is_zero_and_payoff_zero_without_trades(repo):
+def test_expectancy_is_zero_and_payoff_undefined_without_trades(repo):
     repo.create_run("e2", "backtest", 0, "{}")
     s = build_summary(repo, "e2")
-    assert (s.avg_win, s.avg_loss, s.payoff, s.expectancy, s.breakeven_win_rate) == (0.0, 0.0, 0.0, 0.0, 0.0)
+    assert (s.avg_win, s.avg_loss, s.expectancy) == (0.0, 0.0, 0.0)
+    assert s.payoff is None and s.breakeven_win_rate is None
     assert (s.evidence_days, s.evidence_t) == (0, None)
+
+
+def test_all_wins_run_has_no_payoff_or_breakeven(repo):
+    """With no losing trades avg_loss is 0.0, not negative, so payoff (avg_win / |avg_loss|) has
+    nothing to divide by: it and breakeven_win_rate must be None, not the misleadingly worst-looking
+    0.0, and the formatted report must say so rather than print zeros."""
+    repo.create_run("aw1", "backtest", 0, "{}")
+    for i, (exit_price, pnl) in enumerate([(105.0, 50.0), (110.0, 100.0)]):
+        p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, i, "c%d" % i, "ema_rsi")
+        repo.close_position(repo.insert_position("aw1", p), 10 + i, exit_price, "TARGET", pnl, charges=0.0)
+    s = build_summary(repo, "aw1")
+    assert s.payoff is None and s.breakeven_win_rate is None
+    text = format_summary(s)
+    assert "n/a" in text
 
 
 def test_evidence_is_computed_across_close_dates_not_trades(repo):
@@ -319,10 +334,15 @@ def test_evidence_t_is_none_without_variance_or_enough_days(repo):
 
 
 def test_format_summary_prints_the_expectancy_block(repo):
+    """4 trades, 2 wins (+20, +5) 2 losses (-10, -10): avg_win 12.5, avg_loss -10, payoff 1.25,
+    expectancy total/trades = 5/4 = 1.25, breakeven 1/(1+1.25) = 44.4%."""
     _seed(repo)                     # 4 trades, 2 wins, from the existing helper
     text = format_summary(build_summary(repo, "r1"))
-    assert "Avg win / avg loss" in text and "payoff" in text
-    assert "Expectancy" in text and "Breakeven win rate" in text and "Evidence" in text
+    assert "Avg win / avg loss" in text and "payoff 1.25" in text
+    assert "1.25 per trade" in text
+    assert "44.4%" in text and "Evidence" in text
+    # the decomposition is shown, not asserted as an equality
+    assert " = " not in next(l for l in text.splitlines() if l.startswith("Expectancy"))
 
 
 def test_evidence_line_says_too_few_below_the_thresholds(repo):
@@ -350,3 +370,38 @@ def test_evidence_line_flags_a_weak_t(repo):
     s = build_summary(repo, "w1")
     assert s.trades == 50 and s.evidence_days == 25
     assert "not distinguishable from zero" in format_summary(s)
+
+
+def _summary_with_t(evidence_t):
+    """A Summary built directly (not via a seeded repo) with enough trades/days to clear the
+    too-few-to-judge thresholds, varying only evidence_t - for exercising the sign-aware note."""
+    return Summary(
+        run_id="t1", mode="backtest", trades=50, wins=25, losses=25, win_rate=0.5, total_pnl=-500.0,
+        avg_r=0.0, r_trades=50, max_drawdown=0.0, max_drawdown_equity=0.0, exit_reasons={},
+        risk_rejections={}, ai_rejections=0, open_positions=0, adopted_trades=0, adopted_pnl=0.0,
+        avg_win=100.0, avg_loss=-120.0, payoff=100.0 / 120.0, expectancy=-10.0,
+        breakeven_win_rate=1 / (1 + 100.0 / 120.0), evidence_days=25, evidence_mean=-20.0,
+        evidence_t=evidence_t,
+    )
+
+
+def test_evidence_line_flags_a_strongly_negative_t_as_consistently_losing():
+    text = format_summary(_summary_with_t(-8.6))
+    assert "t -8.6" in text and "consistently losing" in text
+
+
+def test_evidence_line_flags_a_strongly_positive_t_as_consistently_profitable():
+    text = format_summary(_summary_with_t(8.6))
+    assert "t 8.6" in text and "consistently profitable" in text
+
+
+def test_zero_trade_run_expectancy_lines_show_na_not_zero_percent(repo):
+    """The four expectancy-block lines must degrade the same way Win rate already does when there
+    are no trades: n/a, not zeros that would misleadingly read as a real (and terrible) result."""
+    repo.create_run("z1", "backtest", 0, "{}")
+    s = build_summary(repo, "z1")
+    text = format_summary(s)
+    for label in ("Avg win / avg loss", "Expectancy", "Breakeven win rate", "Evidence"):
+        line = next(l for l in text.splitlines() if l.startswith(label))
+        assert "0.0%" not in line
+        assert line.rstrip().endswith("n/a")

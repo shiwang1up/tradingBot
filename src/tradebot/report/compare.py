@@ -135,11 +135,13 @@ def _dd_suffix(kind: Optional[str]) -> str:
     return ""
 
 
-def _side_by_side(a: Summary, b: Summary) -> list:
+def _side_by_side(a: Summary, b: Summary, warnings: Optional[list] = None) -> list:
     charges_a = f"{a.charges:,.2f}" + (" (est.)" if a.charges_estimated else "")
     charges_b = f"{b.charges:,.2f}" + (" (est.)" if b.charges_estimated else "")
     dd_equity_a = f"{a.max_drawdown_equity:,.2f}" + _dd_suffix(gross_kind(a))
     dd_equity_b = f"{b.max_drawdown_equity:,.2f}" + _dd_suffix(gross_kind(b))
+    payoff_a = "n/a" if a.payoff is None else f"{a.payoff:.2f}"
+    payoff_b = "n/a" if b.payoff is None else f"{b.payoff:.2f}"
     metrics = [
         ("Trades", f"{a.trades}", f"{b.trades}"),
         ("Win rate", f"{a.win_rate * 100:.1f}%", f"{b.win_rate * 100:.1f}%"),
@@ -147,10 +149,10 @@ def _side_by_side(a: Summary, b: Summary) -> list:
         ("Charges", charges_a, charges_b),
         ("Avg R (per trade)", f"{a.avg_r:.2f}", f"{b.avg_r:.2f}"),
         ("R on risk", f"{a.r_on_risk:.2f}", f"{b.r_on_risk:.2f}"),
-        ("Payoff", f"{a.payoff:.2f}", f"{b.payoff:.2f}"),
+        ("Payoff", payoff_a, payoff_b),
         ("Expectancy", f"{a.expectancy:,.2f}", f"{b.expectancy:,.2f}"),
-        ("t (days)", "n/a" if a.evidence_t is None else f"{a.evidence_t:.1f}",
-                      "n/a" if b.evidence_t is None else f"{b.evidence_t:.1f}"),
+        ("t (daily PnL)", "n/a" if a.evidence_t is None else f"{a.evidence_t:.1f}",
+                          "n/a" if b.evidence_t is None else f"{b.evidence_t:.1f}"),
         ("Max DD (closed)", f"{a.max_drawdown:,.2f}", f"{b.max_drawdown:,.2f}"),
         ("Max DD (equity)", dd_equity_a, dd_equity_b),
         ("AI rejects", f"{a.ai_rejections}", f"{b.ai_rejections}"),
@@ -160,13 +162,16 @@ def _side_by_side(a: Summary, b: Summary) -> list:
     if a.charges_estimated or b.charges_estimated:
         out.append("(est.) charges were not recorded for that run; its Total PnL, R figures and "
                     "closed drawdown use estimated charges")
+    if warnings and any("'risk'" in w for w in warnings):
+        out.append("Expectancy and the two averages are in rupees, so they move with position sizing; "
+                    "compare R on risk when the runs' risk settings differ.")
     return out
 
 
 def format_compare(c: Compare) -> str:
     lines = [f"Compare  A={c.a.run_id} (unfiltered)  vs  B={c.b.run_id} (Claude filter)"]
     lines += [f"WARNING: {w}" for w in c.warnings]
-    lines += [""] + _side_by_side(c.a, c.b)
+    lines += [""] + _side_by_side(c.a, c.b, c.warnings)
     n = c.rejected
     lines += ["",
               f"Rejected by Claude      {n} signal{'' if n == 1 else 's'}: {c.rejected_closed_in_a} closed in A, "
