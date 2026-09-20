@@ -223,6 +223,14 @@ def format_summary(s: Summary) -> str:
         equity_dd_note = "; partly gross: some daily rows have no recorded charges"
     else:
         equity_dd_note = ""
+    if s.trades < 30 or s.evidence_days < 20:
+        evidence = (f"{s.evidence_days} days, mean {s.evidence_mean:,.2f} per day   "
+                    f"too few to judge (needs 30+ trades and 20+ days)")
+    elif s.evidence_t is None:
+        evidence = f"{s.evidence_days} days, mean {s.evidence_mean:,.2f} per day, t n/a"
+    else:
+        weak = "   not distinguishable from zero" if abs(s.evidence_t) < 2 else ""
+        evidence = f"{s.evidence_days} days, mean {s.evidence_mean:,.2f} per day, t {s.evidence_t:.1f}{weak}"
     lines = [
         f"Run {s.run_id} ({s.mode})",
         "Survivorship note: universe.yaml is today's constituent list; past-period results are overstated.",
@@ -234,6 +242,11 @@ def format_summary(s: Summary) -> str:
         f"Total PnL             {s.total_pnl:,.2f}   net",
         f"Avg R (per trade)     {s.avg_r:.2f}   (over {s.r_trades} of {s.trades} trades with non-zero risk)",
         f"R on risk             {s.r_on_risk:.2f}   net PnL / rupees at risk, pooled over the same {s.r_trades} trades",
+        f"Avg win / avg loss    {s.avg_win:+,.2f} / {s.avg_loss:+,.2f}   payoff {s.payoff:.2f}",
+        f"Expectancy            {s.expectancy:,.2f} per trade = {s.win_rate * 100:.1f}% x {s.avg_win:,.2f}"
+        f" - {(1 - s.win_rate) * 100:.1f}% x {abs(s.avg_loss):,.2f}",
+        f"Breakeven win rate    {s.breakeven_win_rate * 100:.1f}% at this payoff (actual {s.win_rate * 100:.1f}%)",
+        f"Evidence              {evidence}",
         f"Max drawdown (closed) {s.max_drawdown:,.2f}   realised, closed trades only",
         f"Max drawdown (equity) {s.max_drawdown_equity:,.2f}   daily realised + unrealised{equity_dd_note}",
         f"Exit reasons          {_counts(s.exit_reasons)}",

@@ -316,3 +316,37 @@ def test_evidence_t_is_none_without_variance_or_enough_days(repo):
                             "TARGET", 10.0, charges=0.0)
     s = build_summary(repo, "e4")
     assert s.evidence_days == 1 and s.evidence_t is None
+
+
+def test_format_summary_prints_the_expectancy_block(repo):
+    _seed(repo)                     # 4 trades, 2 wins, from the existing helper
+    text = format_summary(build_summary(repo, "r1"))
+    assert "Avg win / avg loss" in text and "payoff" in text
+    assert "Expectancy" in text and "Breakeven win rate" in text and "Evidence" in text
+
+
+def test_evidence_line_says_too_few_below_the_thresholds(repo):
+    _seed(repo)                     # 4 trades on few days
+    text = format_summary(build_summary(repo, "r1"))
+    assert "too few to judge" in text
+
+
+def test_evidence_line_flags_a_weak_t(repo):
+    """25 days x 2 trades, day sums alternating +4 and -4: 50 trades and 25 days clear the
+    thresholds, but the mean (0.16) is tiny against the spread (t about 0.2), so the line must say
+    so rather than let a reader take the sign seriously. The days must differ: identical days have
+    no variance and t would be n/a instead."""
+    from tradebot.engine.clock import ist_epoch
+    from datetime import date, timedelta
+    repo.create_run("w1", "backtest", 0, "{}")
+    i = 0
+    for k in range(25):
+        d = date(2026, 6, 1) + timedelta(days=k)
+        for pnl in ((100.0, -96.0) if k % 2 == 0 else (100.0, -104.0)):
+            p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, ist_epoch(d, "09:20"), "c%d" % i, "ema_rsi")
+            repo.close_position(repo.insert_position("w1", p), ist_epoch(d, "10:00"), 100.0 + pnl / 10,
+                                "TARGET", pnl, charges=0.0)
+            i += 1
+    s = build_summary(repo, "w1")
+    assert s.trades == 50 and s.evidence_days == 25
+    assert "not distinguishable from zero" in format_summary(s)

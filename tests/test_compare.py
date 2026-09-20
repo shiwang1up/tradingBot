@@ -177,3 +177,9 @@ def test_compare_does_not_warn_when_the_other_side_has_regime_disabled(repo):
     _seed_pair(repo, cfg_b=other)
     c = build_compare(repo, "A", "B", P)
     assert not any("'regime'" in w for w in c.warnings)
+
+
+def test_side_by_side_carries_the_expectancy_rows(repo):
+    _seed_pair(repo)
+    text = format_compare(build_compare(repo, "A", "B", P))
+    assert "Payoff" in text and "Expectancy" in text and "t (days)" in text
