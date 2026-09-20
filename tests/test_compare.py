@@ -139,3 +139,27 @@ def test_compare_warns_on_charges_mismatch(repo):
     _seed_pair(repo, cfg_b=other)
     c = build_compare(repo, "A", "B", P)
     assert any("'charges'" in w for w in c.warnings)
+
+
+def test_compare_warns_when_regime_is_enabled_on_one_side_but_absent_on_the_other(repo):
+    """'regime' is not a COMPARABLE_KEYS entry (it is checked on its effective value, not raw
+    equality), so this must come from the dedicated regime check, not the loop above."""
+    other = json.dumps({**json.loads(CFG), "regime": {"enabled": True, "source": "index", "ema_period": 20}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert any("'regime'" in w for w in c.warnings)
+
+
+def test_compare_does_not_warn_on_regime_when_both_sides_are_absent(repo):
+    _seed_pair(repo)  # neither CFG carries a 'regime' key at all
+    c = build_compare(repo, "A", "B", P)
+    assert not any("'regime'" in w for w in c.warnings)
+
+
+def test_compare_does_not_warn_when_the_other_side_has_regime_disabled(repo):
+    """An explicit, disabled regime section must compare equal to no section at all: both mean
+    the filter played no part in the run."""
+    other = json.dumps({**json.loads(CFG), "regime": {"enabled": False, "source": "index", "ema_period": 20}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert not any("'regime'" in w for w in c.warnings)

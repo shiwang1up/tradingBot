@@ -1,13 +1,13 @@
 """The per-bar cycle (spec sections 4-8). Mode-independent given a broker and clock; subclasses supply the loop.
 
 Order inside a bar:
-  0. split off the index   the regime filter sees it; nothing else does
+  0. usable -> split      drop unusable candles, then split off the index; the regime filter sees it, nothing else does
   1. broker.on_bar        fills pending entries at this bar's open, simulates exits
   2. square-off           once per day, from the square-off bar onward (latched)
   3. daily loss cap       flatten once per day if breached and configured to
   4. kill switch          flatten if requested
   5. strategies           every candle feeds every strategy (indicators stay warm)
-  6. rank -> risk -> AI -> place  only if entries are allowed; a live kill switch rejects inside evaluate()
+  6. rank -> regime -> risk -> AI -> place  only if entries are allowed; a live kill switch rejects inside evaluate()
 
 A bar handed in with now_ts past the deadline (paper) records its signals as `stale` and places
 nothing (spec 8.6).
@@ -238,6 +238,11 @@ class Engine:
         batch: list[tuple[int, ApprovedOrder, Candidate]] = []
         for strat, sig in signals:
             sid = self.repo.insert_signal(self.run_id, sig)
+            # Runs before the risk check so a blocked signal takes no slot: it never joins
+            # state.pending_symbols or bumps entries_today, leaving the slot free for the next
+            # signal this same bar. Consequence: a `regime` rejection masks whatever reason the
+            # risk check would have given (kill switch, daily loss cap, max entries); the `regime`
+            # count in a report is the number of signals gated, not the number of trades removed.
             blocked = self._regime.rejection(sig.direction) if self._regime is not None else None
             if blocked is not None:
                 self.repo.insert_risk_decision(self.run_id, sid, False, blocked, 0)
@@ -337,15 +342,16 @@ class BacktestEngine(Engine):
         try:
             for ts in bars:
                 candles = self.source.candles_at(ts)
+                d = date_of(ts)
+                if not self.clock.is_trading_day(d):
+                    continue
                 if self._index_symbol and candles and all(sym == self._index_symbol for sym in candles):
                     # Nothing tradable this instant: feed the filter and skip everything else (day
                     # bookkeeping and last_ts included) so this timestamp never reaches broker.on_bar,
                     # which would otherwise mark every pending entry unfilled (no_candle) for a bar
-                    # with no real trading activity.
+                    # with no real trading activity. Checked after is_trading_day so a holiday's
+                    # index bars are not fed either, the same as a holiday's mixed bars are skipped.
                     self._split_index(self._usable(candles))
-                    continue
-                d = date_of(ts)
-                if not self.clock.is_trading_day(d):
                     continue
                 if d != current:
                     if current is not None:

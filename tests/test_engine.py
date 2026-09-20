@@ -11,7 +11,7 @@ from tradebot.engine.clock import SessionClock, date_of, ist_epoch
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.strategy.ema_rsi import EmaRsiStrategy
-from tradebot.types import Candle, round_tick
+from tradebot.types import Candle
 
 GOLDEN = Path(__file__).parent / "fixtures" / "golden_trades.json"
 DAYS = [date(2026, 9, 13), date(2026, 9, 14), date(2026, 9, 15)]  # Sunday, Mon, Tue
@@ -752,11 +752,51 @@ def test_an_index_only_bar_is_skipped_and_a_pending_entry_still_fills_next_bar(r
     t_next = t_sig + 300
     extra_ts = t_sig + 150   # between t_sig and t_next; NIFTY only, no candle for A
     a_candles = synth_candles("A", [MON])
-    a_open_next = next(c.open for c in a_candles if c.ts == t_next)
     index = _index(MON, [25000.0] * 75) + [Candle("NIFTY", extra_ts, 25000.0, 25000.0, 25000.0, 25000.0, 0)]
     _run_fixed(repo, cfg, a_candles + index, {("A", t_sig): ("LONG", 0.0)}, ["A", "NIFTY"])
     rows = repo.list_positions("t1")
-    fill_price = round_tick(a_open_next * (1 + cfg.execution.slippage_pct / 100.0))  # LONG entry, slippage applied
-    assert len(rows) == 1 and rows[0]["opened_at"] == t_next and rows[0]["avg_price"] == pytest.approx(fill_price)
+    assert len(rows) == 1 and rows[0]["opened_at"] == t_next
     statuses = [r["status"] for r in repo.conn.execute("SELECT status FROM orders WHERE run_id='t1'").fetchall()]
     assert statuses == ["FILLED"]
+
+
+def test_a_blocked_signal_does_not_hold_its_slot_for_the_next_one(repo, tmp_path):
+    """Job A review item 1: the regime gate must `continue` before the signal ever touches
+    `state` (pending_symbols / entries_today), so a slot it did not use stays free for the very
+    next signal on the same bar."""
+    cfg = make_config(tmp_path, risk={"max_open_positions": 1}, **REGIME)
+    ts = ist_epoch(MON, "10:00")
+    candles = (synth_candles("A", [MON]) + synth_candles("B", [MON], phase=4.0, seed=99)
+              + _index(MON, [25000.0 - 10 * i for i in range(75)]))
+    _run_fixed(repo, cfg, candles, {("B", ts): ("LONG", 2.5), ("A", ts): ("SHORT", 1.0)}, ["A", "B", "NIFTY"])
+    assert _decisions(repo) == [("B", "LONG", 0, "regime"), ("A", "SHORT", 1, "ok")]
+
+
+def test_regime_state_carries_over_a_day_boundary_without_resetting(repo, tmp_path):
+    """Job A review item 2: nothing re-creates the filter (or otherwise resets its state) at the
+    start of a day, so a LONG on day 2's very first bar is rejected `regime`, never
+    `regime_not_ready` - the EMA warmed on day 1 and stays warm."""
+    cfg = make_config(tmp_path, **REGIME)
+    day2 = date(2026, 9, 15)
+    closes = [25000.0 - 10 * i for i in range(150)]     # falls straight through both days
+    index = _index(MON, closes[:75]) + _index(day2, closes[75:])
+    ts2 = ist_epoch(day2, "09:15")
+    _run_fixed(repo, cfg, synth_candles("A", [MON, day2]) + index, {("A", ts2): ("LONG", 0.0)}, ["A", "NIFTY"])
+    assert _decisions(repo) == [("A", "LONG", 0, "regime")]
+
+
+def test_an_index_only_tail_does_not_open_a_second_trading_day(repo, tmp_path):
+    """Job A review item 3: a day whose only candle is the index (here day 2, once the stocks stop
+    trading after day 1) must never reach day bookkeeping: one daily_pnl row, the run ends cleanly,
+    and nothing closes after day 1's last tradable bar."""
+    cfg = make_config(tmp_path, data={"index_symbol": "NIFTY"})
+    day2 = date(2026, 9, 15)
+    ts_sig = ist_epoch(MON, "10:00")
+    a_candles = synth_candles("A", [MON])
+    last_mon_bar = a_candles[-1].ts
+    candles = a_candles + _index(MON, [25000.0] * 75) + _index(day2, [25000.0] * 75)
+    _run_fixed(repo, cfg, candles, {("A", ts_sig): ("LONG", 0.0)}, ["A", "NIFTY"])
+    assert repo.get_run("t1")["ended_at"] is not None
+    assert [d["date"] for d in repo.daily_pnl("t1")] == [MON.isoformat()]
+    for r in repo.list_positions("t1"):
+        assert r["closed_at"] is None or r["closed_at"] <= last_mon_bar

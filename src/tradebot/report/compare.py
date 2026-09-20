@@ -70,6 +70,12 @@ def _compat_warnings(repo: Repo, run_a: str, run_b: str, a: Summary, b: Summary)
     for key in COMPARABLE_KEYS:
         if ca.get(key) != cb.get(key):
             out.append(f"runs differ in '{key}': the comparison may not be like-for-like")
+    # The effective regime, not the raw section: an older run with no 'regime' key at all must not
+    # warn against a newer run that stores the (disabled, default) section explicitly.
+    ra = ca["regime"] if (ca.get("regime") or {}).get("enabled") else None
+    rb = cb["regime"] if (cb.get("regime") or {}).get("enabled") else None
+    if ra != rb:
+        out.append("runs differ in 'regime': the comparison may not be like-for-like")
     return out
 
 
