@@ -287,3 +287,87 @@ def test_quintiles_rank_highest_first():
     """A sign flip in quintiles_phase alone was not caught by any test."""
     ranked = ["HIGH", "MID", "LOW"]
     assert ms.split_quintiles(ranked, n_groups=3)[0] == ["HIGH"]
+
+
+def _spiky_level(i):
+    """Rises faster than WINNER for twelve month ends, then halves at index 12 and stays there."""
+    return 100.0 * (1.08 ** i) if i <= 11 else 100.0 * (1.08 ** 11) * 0.5
+
+
+def test_run_months_uses_the_full_lookback_not_one_month_short():
+    """Pins WHERE the lookback window ends. The first qualifying month shifts with the window
+    length, so a 12-1 and an 11-1 run both start their score window at the first month end and
+    differ only in where it STOPS: 12-1 scores to index 12, 11-1 to index 11. SPIKY outruns WINNER
+    up to index 11 and then halves, so 11-1 ranks it first and 12-1 does not. A pure geometric
+    fixture cannot tell the two apart, which is why SPIKY is here.
+
+    An off-by-one in the lookback (`j_start = i - (lookback + skip) + 1`) makes the 12-1 run score
+    exactly the window 11-1 scores, so the two runs pick the same name and this test fails."""
+    closes, masked = _toy_closes(), _toy_masked()
+    ends = sorted({d for d in closes["WINNER"] if d.day == 28})
+    nexts = sorted({d for d in closes["WINNER"] if d.day == 1})
+    spiky = {}
+    for i, e in enumerate(ends):
+        spiky[e] = _spiky_level(i)
+    for i, n in enumerate(nexts):
+        spiky[n] = _spiky_level(i) * 1.01
+    closes["SPIKY"], masked["SPIKY"] = spiky, set()
+    twelve = ms.run_months(closes, masked, top_n=1, cost=0.0, lookback=12, skip=1)
+    eleven = ms.run_months(closes, masked, top_n=1, cost=0.0, lookback=11, skip=1)
+    assert twelve[0]["held"] == ["WINNER"], "12-1 must see SPIKY's crash inside its window"
+    assert eleven[0]["held"] == ["SPIKY"], "11-1 must stop one month short of the crash"
+    assert twelve[0]["held"] != eleven[0]["held"], (
+        "the 12-month and 11-month lookbacks must not pick the same name on this fixture; "
+        "if they do the fixture is degenerate again and the test proves nothing")
+
+
+def test_run_months_charges_the_baseline_its_own_turnover():
+    """The baseline pays on its own turnover. It is near zero in the real data because the
+    eligible set barely moves, but 'near zero' must come from the data, not from the code
+    forgetting to charge it."""
+    months = ms.run_months(_toy_closes(), _toy_masked(), top_n=1, cost=0.006,
+                           lookback=12, skip=1)
+    assert months[0]["base"] == pytest.approx(months[0]["base_gross"] - 0.006)
+    for m in months[1:]:
+        assert m["base"] == pytest.approx(m["base_gross"])   # same four names, nothing changes
+
+
+def _drift_db(tmp_path, n_symbols, days=800):
+    """A database of `n_symbols` names whose drift rates rise with their index, so the true
+    momentum ordering is known: Z is the fastest riser and A the slowest."""
+    import string
+    db = tmp_path / "q.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE candles (symbol TEXT, ts INTEGER, interval INTEGER, o REAL, h REAL,"
+                 " l REAL, c REAL, v INTEGER, source TEXT)")
+    base = 1577836800                                   # 2020-01-01 00:00 UTC
+    syms = list(string.ascii_uppercase[:n_symbols])
+    for si, sym in enumerate(syms):
+        for k in range(days):
+            c = 100.0 * (1.0 + 0.0002 * (si + 1)) ** k
+            conn.execute("INSERT INTO candles VALUES (?,?,?,?,?,?,?,0,'official')",
+                         (sym, base + k * 86400, 1440, c, c, c, c))
+    conn.commit(); conn.close()
+    return sqlite3.connect("file:%s?mode=ro" % db, uri=True), syms
+
+
+def _parse_group_means(text):
+    """The printed per-group means, in group order, as floats in percent."""
+    import re
+    return [float(m.group(1)) for m in
+            re.finditer(r"^  \d\s+(-?\d+\.\d+)%$", text, re.M)]
+
+
+def test_quintiles_phase_ranks_the_fastest_risers_into_group_one(tmp_path):
+    """End to end through the phase itself, which no other test touched. Ten symbols with strictly
+    increasing drift rates make the true ordering unambiguous, so group 1 must out-return group 5.
+    A `reverse=False` in this phase alone inverts the groups and this test fails."""
+    import io as _io
+    ro, syms = _drift_db(tmp_path, 10)
+    buf = _io.StringIO()
+    ms.quintiles_phase(ro, syms, out=buf)
+    text = buf.getvalue()
+    means = _parse_group_means(text)
+    assert len(means) == ms.QUINTILES, text
+    assert means[0] > means[-1], "group 1 must beat group 5 when the fastest risers rank first"
+    assert "top minus bottom: +" in text
