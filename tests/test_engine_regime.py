@@ -251,8 +251,10 @@ def test_composite_level_guards_against_a_non_finite_result(repo, tmp_path):
 def test_a_missing_index_bar_with_tradable_candles_logs_once_per_trading_day(repo, tmp_path, caplog):
     """With the filter on and source 'index', a bar with tradable candles but no index candle used
     to keep the last state silently - in paper mode that could last all day with nothing in the log
-    to say so. Two consecutive such bars on the same day must log exactly one warning; a later bar
-    that does carry an index candle must log none."""
+    to say so. A warm-up (quiet=True) over index-less bars must log nothing and must not consume the
+    once-a-day slot; two consecutive index-less bars once live must still log exactly one warning
+    (that suffix says further misses are not logged); a later bar that does carry an index candle
+    must log none of the stale warning, and exactly one recovery line naming the whole miss streak."""
     cfg = make_config(tmp_path, **REGIME)
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
                             cfg.execution.entry_buffer_pct, charges=cfg.charges)
@@ -266,18 +268,28 @@ def test_a_missing_index_bar_with_tradable_candles_logs_once_per_trading_day(rep
     def a(ts, close=100.0):
         return Candle("A", ts, close, close + 0.5, close - 0.2, close, 1000)
 
-    t1, t2 = ist_epoch(MON, "09:30"), ist_epoch(MON, "09:35")
+    t_warm = ist_epoch(MON, "09:30")
+    with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
+        # quiet=True: what PaperEngine.warm passes for every warmed bar; no NIFTY candle here.
+        eng._feed_regime(None, {"A": a(t_warm)}, quiet=True)
+    assert not caplog.records
+
+    t1, t2 = ist_epoch(MON, "09:35"), ist_epoch(MON, "09:40")
     with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
         eng.process_bar(t1, {"A": a(t1)})      # no NIFTY candle this bar
         eng.process_bar(t2, {"A": a(t2)})      # still none, same trading day: rate-limited
     stale = [r for r in caplog.records if "no index candle" in r.getMessage()]
     assert len(stale) == 1 and iso_ist(t1) in stale[0].getMessage()
+    assert "further misses today are not logged" in stale[0].getMessage()
 
     caplog.clear()
-    t3 = ist_epoch(MON, "09:40")
+    t3 = ist_epoch(MON, "09:45")
     with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
         eng.process_bar(t3, {"A": a(t3), "NIFTY": Candle("NIFTY", t3, 25000.0, 25000.0, 25000.0, 25000.0, 0)})
     assert not any("no index candle" in r.getMessage() for r in caplog.records)
+    recovered = [r for r in caplog.records if "index candle back after" in r.getMessage()]
+    # 3 bars missing the index: the quiet warm-up bar plus t1 and t2, all consecutive.
+    assert len(recovered) == 1 and "index candle back after 3 bar(s)" in recovered[0].getMessage()
 
 
 def test_no_stale_regime_warning_with_the_filter_off_or_on_composite(repo, tmp_path, caplog):
@@ -308,7 +320,18 @@ def test_a_run_that_ends_still_not_ready_warns_that_every_entry_was_rejected(rep
     # trips the once-a-day stale-index warning, whose own message happens to quote the state
     # (NOT_READY) too - not what this assertion is pinning.
     warnings = [r for r in caplog.records if "ended with the regime filter still NOT_READY" in r.getMessage()]
-    assert len(warnings) == 1 and "t1" in warnings[0].getMessage() and "no usable index candles" in warnings[0].getMessage()
+    assert len(warnings) == 1 and "t1" in warnings[0].getMessage() \
+        and "fewer than ema_period usable index candles" in warnings[0].getMessage()
+
+
+def test_a_run_with_no_trading_day_does_not_get_the_not_ready_warning(repo, tmp_path, caplog):
+    """Job A item 7: a run whose bar stream never reaches a trading day (current stays None) had no
+    entries to have silently rejected, so the never-ready safety net must stay quiet even though the
+    filter (enabled, never fed) is still NOT_READY at the end."""
+    cfg = make_config(tmp_path, **REGIME)
+    with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
+        run_fixed(repo, cfg, [], {}, [])
+    assert not any("ended with the regime filter still NOT_READY" in r.getMessage() for r in caplog.records)
 
 
 def test_a_run_that_warms_up_the_regime_does_not_get_the_not_ready_warning(repo, tmp_path, caplog):

@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from tests.helpers import FakeTime, make_config, synth_candles
+from tests.helpers import FakeTime, FixedStrategy, make_config, synth_candles
 from tradebot.ai.filter import StubFilter
 from tradebot.data.historical import HistoricalSource
 from tradebot.data.live import LiveBarSource
@@ -31,13 +31,18 @@ def _fetcher(market, calls=None):
     return fetch
 
 
-def _engine(repo, cfg, market, clock_time, run_id="paper-2026-09-14", calls=None):
+def _engine(repo, cfg, market, clock_time, run_id="paper-2026-09-14", calls=None, strategy=None,
+           symbols=("A", "B"), index_symbol=""):
+    """`strategy`/`symbols`/`index_symbol` default to the plain two-symbol EmaRsi setup most tests
+    use; a caller exercising the regime filter passes its own FixedStrategy and a symbol list with
+    the index included (see test_live_bar_regime_rejects_a_long_the_index_would_block)."""
     clock = SessionClock(cfg.session, 5)
-    src = LiveBarSource(_fetcher(market, calls), repo, ["A", "B"], "NSE", 5, 2, clock)
-    strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
+    src = LiveBarSource(_fetcher(market, calls), repo, list(symbols), "NSE", 5, 2, clock, index_symbol=index_symbol)
+    strat = strategy if strategy is not None else EmaRsiStrategy(cfg.strategy["ema_rsi"])
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
                             cfg.execution.entry_buffer_pct, charges=cfg.charges)
-    return PaperEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, {"A": 1, "B": 1}, run_id,
+    lots = {s: 1 for s in symbols if s != index_symbol}
+    return PaperEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, lots, run_id,
                        now=clock_time.now, sleep=clock_time.sleep)
 
 
@@ -93,6 +98,26 @@ def test_warm_up_feeds_the_composite_regime_filter(repo, tmp_path):
     eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")))
     eng.warm(rising_a + rising_b)
     assert eng._regime.state == "UP"
+
+
+def test_live_bar_regime_rejects_a_long_the_index_would_block(repo, tmp_path):
+    """Job A item 9: the missing end-to-end case for the regime filter in paper mode - a LONG fired
+    by a live bar is rejected `regime` when the live fetcher's own NIFTY series has the index
+    falling, exactly as the backtester rejects it (test_engine_regime.py), with no warm-up candles
+    at all: the filter warms up live, off the same fetcher."""
+    cfg = make_config(tmp_path, regime={"enabled": True, "source": "index", "ema_period": 3},
+                      data={"index_symbol": "NIFTY"})
+    market = _market()
+    t_sig = OPEN + 3 * 300  # the 4th bar: EMA3 is warm by then
+    strat = FixedStrategy({("A", t_sig): ("LONG", 0.0)})
+    falling = [25000.0 - 10 * i for i in range(75)]
+    index_candles = [Candle("NIFTY", OPEN + i * 300, c, c, c, c, 0) for i, c in enumerate(falling)]
+    live_market = {**market, "NIFTY": index_candles}
+    eng = _engine(repo, cfg, live_market, FakeTime(ist_epoch(TODAY, "09:00")), strategy=strat,
+                 symbols=["NIFTY", "A", "B"], index_symbol="NIFTY")
+    rid = eng.run([])
+    assert repo.rejection_counts(rid).get("regime") == 1
+    assert repo.list_positions(rid) == []
 
 
 def test_full_day_matches_the_backtester_bar_for_bar(repo, tmp_path):

@@ -74,7 +74,9 @@ class PaperEngine(Engine):
         last = None
         for ts in sorted(by_ts):
             bar, index_candle = self._strip_index(self._usable(by_ts[ts]))
-            self._feed_regime(index_candle, bar)  # before _observe: composite reads last closes it is about to overwrite
+            # quiet=True: a cold start commonly warms through days that predate the index feed or the
+            # session close, and none of that is paper's live operation the stale-index warning exists for.
+            self._feed_regime(index_candle, bar, quiet=True)  # before _observe: composite reads closes about to be overwritten
             self._observe(bar)
             self._run_strategies(bar)  # signals discarded: warm-up never places
             last = ts

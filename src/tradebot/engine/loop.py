@@ -82,6 +82,7 @@ class Engine:
         self._regime = RegimeFilter(cfg.regime.ema_period) if cfg.regime.enabled else None
         self._composite_level = 100.0  # regime.source == "composite": chained from 100, unused otherwise
         self._regime_stale_warned_on: Optional[date] = None  # rate-limits the missing-index-candle warning
+        self._regime_miss_streak = 0  # consecutive index-less bars (source 'index'); reported on recovery
 
     def _reenable_strategies(self) -> None:
         """A strategy disabled earlier missed bars; its incremental indicators would silently carry
@@ -146,13 +147,21 @@ class Engine:
         tradable = {s: c for s, c in candles.items() if s != idx} if index_candle is not None else candles
         return tradable, index_candle
 
-    def _feed_regime(self, index_candle: Optional[Candle], tradable: dict[str, Candle]) -> None:
+    def _feed_regime(self, index_candle: Optional[Candle], tradable: dict[str, Candle], quiet: bool = False) -> None:
         """Update the regime filter for this bar, if enabled. Must run before _observe - already
         the order in process_bar and PaperEngine.warm - because with source 'composite' this reads
         the previous closes that _observe is about to overwrite. With no index bar at this
         timestamp (source 'index') the filter simply keeps its last state; if the bar was otherwise
         tradable, that also logs a warning (see `_warn_stale_regime`) - in paper mode a hole in the
-        index feed could otherwise last all day with nothing in the log to say so.
+        index feed could otherwise last all day with nothing in the log to say so. Consecutive
+        index-less bars are counted (`_regime_miss_streak`) so that when an index candle arrives
+        again, one line reports how many bars it was missing for.
+
+        `quiet=True` (passed by `PaperEngine.warm`) replays stored bars without touching the log or
+        the once-a-day warning slot: a cold start commonly warms through days of history that
+        predate the index feed, and none of that is paper's live operation the warning exists for.
+        The miss streak itself still updates while quiet, so a recovery once live bars resume
+        reports the whole gap, warm-up bars included.
 
         The `composite` source is the equal-weight mean of the universe's close-to-close bar
         returns, chained from 100, for when index history is unavailable; the index candle, if
@@ -170,9 +179,16 @@ class Engine:
             return
         if self.cfg.regime.source == "index":
             if index_candle is not None:
+                if self._regime_miss_streak and not quiet:
+                    log.warning("regime filter (source: index) saw its index candle again at %s: "
+                               "index candle back after %d bar(s)", iso_ist(index_candle.ts),
+                               self._regime_miss_streak)
+                self._regime_miss_streak = 0
                 self._regime.update(index_candle.close)
             elif tradable:
-                self._warn_stale_regime(next(iter(tradable.values())).ts)
+                self._regime_miss_streak += 1
+                if not quiet:
+                    self._warn_stale_regime(next(iter(tradable.values())).ts)
             return
         ret = self._composite_return(tradable)
         if ret is None:
@@ -190,8 +206,8 @@ class Engine:
         d = date_of(ts)
         if d != self._regime_stale_warned_on:
             self._regime_stale_warned_on = d
-            log.warning("regime filter (source: index) saw no index candle at %s; keeping its last state (%s)",
-                       iso_ist(ts), self._regime.state)
+            log.warning("regime filter (source: index) saw no index candle at %s; keeping its last state (%s); "
+                       "further misses today are not logged", iso_ist(ts), self._regime.state)
 
     def _composite_return(self, tradable: dict[str, Candle]) -> Optional[float]:
         """Equal-weight mean close-to-close return of this bar, over symbols that have both a
@@ -437,11 +453,12 @@ class BacktestEngine(Engine):
             except Exception:  # noqa: BLE001
                 log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
             finally:
-                if self._regime is not None and self._regime.state == NOT_READY:
+                if current is not None and self._regime is not None and self._regime.state == NOT_READY:
                     # Safety net for callers that bypass the CLI's start-up check (scripts/orb_experiment.py
                     # does): the filter never warmed up, so every entry of this run was silently
-                    # rejected as regime_not_ready.
-                    why = ("no usable index candles reached the filter" if self.cfg.regime.source == "index"
+                    # rejected as regime_not_ready. Skipped when the run processed no trading day at
+                    # all (current is None): there were no entries to have silently rejected.
+                    why = ("fewer than ema_period usable index candles reached the filter" if self.cfg.regime.source == "index"
                           else "the universe never gave the composite enough breadth to warm up")
                     log.warning("run %s ended with the regime filter still NOT_READY (%s); every entry "
                                "was rejected as regime_not_ready", self.run_id, why)

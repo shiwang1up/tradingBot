@@ -1,5 +1,6 @@
-"""Live bars for paper mode: the just-closed official candle for every universe symbol, fetched over
-REST at each bar boundary (paper spec, 'Bar source'). Nothing here places orders."""
+"""Live bars for paper mode: the just-closed official candle for every symbol in `symbols` - the
+universe, plus the regime index when the CLI decides the filter needs it - fetched over REST at
+each bar boundary (paper spec, 'Bar source'). Nothing here places orders."""
 from __future__ import annotations
 
 import logging
@@ -20,7 +21,8 @@ class LiveBarSource:
     CLI passes GrowwAdapter.fetch_candles and tests pass a fake."""
 
     def __init__(self, fetcher: Fetcher, repo: Repo, symbols: list[str], exchange: str, interval: int,
-                 concurrency: int, clock: SessionClock, budget_sec: Optional[float] = None):
+                 concurrency: int, clock: SessionClock, budget_sec: Optional[float] = None,
+                 index_symbol: str = ""):
         self.fetcher = fetcher
         self.repo = repo
         self.symbols = list(symbols)
@@ -30,6 +32,9 @@ class LiveBarSource:
         self.concurrency = max(1, concurrency)
         self.clock = clock
         self.budget_sec = budget_sec  # None waits for every symbol; paper passes the bar deadline
+        self.index_symbol = index_symbol  # in `symbols` when the regime filter needs it; "" otherwise.
+        # Never traded, so it is excluded from the tradable counts below; storage and fetching treat
+        # it like any other symbol.
 
     def fetch_range(self, start_ts: int, end_ts: int) -> dict[int, dict[str, Candle]]:
         """Bars with start_ts <= ts <= end_ts (bar open times), keyed by ts then symbol. Requests one
@@ -60,27 +65,32 @@ class LiveBarSource:
                         self.budget_sec or 0.0, extra={"symbol": futures[f]})
 
         out: dict[int, dict[str, Candle]] = {}
-        failed = len(pending)
         stored: list[Candle] = []
         results = dict(f.result() for f in done)
-        for sym in self.symbols:  # universe order, so every bar reaches the strategies the same way; SQLite stays here
-            if sym not in results:
-                continue  # over budget: already counted as failed
-            candles = results[sym]
+        ok: dict[str, bool] = {}
+        for sym in self.symbols:  # symbol order, so every bar reaches the strategies the same way; SQLite stays here
+            candles = results.get(sym)  # None: over budget (absent from `results`) or the fetch raised
             if candles is None:
-                failed += 1
+                ok[sym] = False
                 continue
+            ok[sym] = True
             completed = [c for c in candles if c.ts <= end_ts and self.clock.in_session(c.ts)]
             stored.extend(completed)
             for c in completed:
                 if c.ts >= start_ts:
                     out.setdefault(c.ts, {})[sym] = c
         new_bars = self.repo.insert_candles(stored, self.interval)  # the whole window is offered: earlier gaps heal
-        if self.symbols and failed == len(self.symbols):
+        # The index is never traded, so it counts toward neither the "every fetch failed" alarm nor
+        # the tradable tally: an index-only outage must not drown out (or hide behind) the stocks.
+        tradables = [s for s in self.symbols if s != self.index_symbol]
+        tradable_failed = sum(1 for s in tradables if not ok.get(s, False))
+        if tradables and tradable_failed == len(tradables):
             log.error("every candle fetch failed for bars %s..%s", iso_ist(start_ts), iso_ist(end_ts))
-        log.info("bars %s..%s: %d of %d symbols in %.1fs, %d failed, %d new bars stored", iso_ist(start_ts),
-                 iso_ist(end_ts), len(self.symbols) - failed, len(self.symbols), time.monotonic() - t0, failed,
-                 new_bars)
+        index_note = (f"; index {'ok' if ok.get(self.index_symbol, False) else 'missing'}"
+                     if self.index_symbol else "")
+        log.info("bars %s..%s: %d of %d symbols in %.1fs, %d failed, %d new bars stored%s", iso_ist(start_ts),
+                 iso_ist(end_ts), len(tradables) - tradable_failed, len(tradables), time.monotonic() - t0,
+                 tradable_failed, new_bars, index_note)
         return out
 
     def fetch_bar(self, bar_ts: int) -> dict[str, Candle]:
