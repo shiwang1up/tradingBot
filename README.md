@@ -2,7 +2,9 @@
 
 NSE/BSE trading bot on the Groww Trade API. Spec: `docs/superpowers/specs/2026-09-14-nse-bse-trading-bot-design.md`.
 Plan 1 is the backtester, Plan 2 the Claude filter and compare report, Plan 3 paper trading on live
-candles. Live order placement is a separate, later plan.
+candles. A later plan (`docs/superpowers/specs/2026-09-19-charges-orb-regime-design.md`) added real
+charges, the opening-range breakout and the regime filter; results are in `docs/superpowers/notes/`.
+Live order placement is a separate, later plan.
 
 ## Setup
 
@@ -28,6 +30,42 @@ history, so a weekly run grows the local cache past that window. `--full` refetc
 repairs the whole window.
 
 Survivorship bias: `universe.yaml` is today's constituent list, so backtests overstate results.
+
+## Charges
+
+Backtest and paper results are net of brokerage and statutory charges (`charges:` in the config,
+Groww intraday equity rates; check them against Groww's pricing page). `pnl` in the database stays
+gross; `positions.charges` holds the cost. Reports print gross, charges, net and `R on risk`: net PnL
+over rupees at risk, all trades pooled. That is the figure to judge a run by; the per-trade `Avg R`
+is dominated by scrap-sized trades. Runs stored before the charges model are estimated after the fact
+and marked so.
+
+## Opening-range breakout
+
+    .venv/bin/tradebot --config config-orb.yaml backtest --strategy orb --start 2026-06-17 --end 2026-08-15
+    .venv/bin/tradebot --config config-orb.yaml paper --strategy orb --ai stub
+    .venv/bin/python scripts/orb_experiment.py tune
+
+`config-orb.yaml` configures only the `orb` strategy, so `--strategy orb` is required. 15-minute bars,
+one signal per symbol per day, at most two entries a day, no entries after 13:00, positions flattened
+at 15:00. When several symbols break out on one bar the engine takes the ones with the highest volume
+relative to their opening range (`Signal.priority`), then alphabetical order, in backtest and paper
+alike. Start the ORB paper session before 09:45: most breakouts fire on the first bar after the range,
+and one seen during warm-up is spent, not traded.
+
+`scripts/orb_experiment.py` has three phases: `tune` (six parameter sets on 2026-06-17..2026-08-15),
+`holdout` (2026-08-16..2026-09-15, a fixed run id, so it runs once; guarded) and `regime` (filter off
+and on for ORB and confluence, tuning window only). `holdout` and `regime` take `--range` and `--rr`.
+Results so far, none of them profitable: `docs/superpowers/notes/2026-09-19-charges-orb-regime-results.md`.
+
+## Regime filter
+
+`data.index_symbol: NIFTY` is fetched and stored with the universe and never traded. `fetch-data`
+fetches it last, and an index failure never blocks the universe. With `regime.enabled: true` longs
+are taken only while the index is above its EMA and shorts only while at or below; blocked signals
+appear under "Risk rejects" as `regime` or `regime_not_ready`. `regime.source: composite` builds the
+index from the universe's own returns when Groww serves no index history. The live paper feed carries
+the index only when the filter is on.
 
 ## Paper trading
 
