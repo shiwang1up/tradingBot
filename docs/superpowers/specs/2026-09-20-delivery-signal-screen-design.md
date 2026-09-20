@@ -94,18 +94,38 @@ equivalent); windows exclude day t itself so no signal reads its own bar.
 
 ## Part 4: how it is judged
 
-- **Primary test**: each of the five signals at H = 10, in-sample 2020-01-01..2023-12-31.
-- **Multiplicity**: five signals tested at once means a plain t of 2 yields a false positive about
-  one time in four. The bar is therefore **t >= 2.6** (Bonferroni, five tests, 5% two-sided), AND
-  excess over baseline > 0, AND at least 200 trades.
-- **Secondary, descriptive only**: H = 5 and H = 20, reported, never decision-relevant. Fixing one
-  primary horizon stops the horizon becoming a parameter to shop in.
-- **Holdout** 2024-01-01..2025-11-21: run only if a signal clears the primary bar, and only for
-  that signal. Written to `docs/superpowers/notes/delivery-screen-holdout.txt`, which the script
+Horizons H = 5, 20, 60 and 120 trading days. The long end is deliberate: at a 0.572% delivery round
+trip, cost is about 11 bps a month over 120 days, so if cost was the binding constraint on every
+earlier attempt, the long columns are where that stops being true.
+
+- **Primary grid**: 5 signals x 4 horizons = 20 cells, in-sample 2020-01-01..2023-12-31.
+- **Multiplicity**: twenty tests at a plain t of 2 would throw up about one false positive every
+  time the grid is run. The bar is therefore **t >= 3.1** (Bonferroni, twenty tests, 5% two-sided;
+  the exact figure is 3.02, rounded up), AND excess over baseline > 0, AND at least 200 trades.
+- **Thin cells are inconclusive, not failures.** One trade at a time per symbol means a 120-day
+  hold locks a symbol for 120 days after each entry, so the ceiling is about 416 trades in-sample
+  even if a signal fired every day. A cell with fewer than 200 trades is reported `inconclusive
+  (n too small)`; a null from 60 trades says nothing and must not be read as a rejection.
+- **Holdout** 2024-01-01..2025-11-21: run only for a cell that clears the primary bar, and only
+  that cell. Written to `docs/superpowers/notes/delivery-screen-holdout.txt`, which the script
   refuses to overwrite.
-- Scoring is the existing machinery: net of the ~0.572% delivery round trip, excess over holding
-  the same stock the same number of days, t across ENTRY DATES (delivery spikes cluster on
-  market-wide days), and the corporate-action gap mask applied to BOTH trades and baseline.
+
+**A second, descriptive reading, kept separate from the pass bar.** The long-hold hypothesis has a
+softer test that does not depend on any cell being significant: does excess trend upward with the
+horizon? If cost was the binding constraint, the 120-day column should look systematically better
+than the 5-day column across all five signals. Report the per-horizon mean excess across signals
+and say plainly whether such a trend exists. This is a description of the grid, never a pass, and
+it must be labelled as such: picking the best of four horizons after seeing them is selection, and
+the Bonferroni bar is what guards the actual decision.
+
+**Note on the control at long horizons.** `churn` was designed to falsify at the short end, where
+churn plausibly precedes a reversal. At 60 and 120 days it degenerates into a generic high-volume
+signal and tests less. Keep it in every cell, and state in the results that its value as a control
+is strongest at H = 5 and H = 20.
+
+Scoring is the existing machinery: net of the ~0.572% delivery round trip, excess over holding the
+same stock the same number of days, t across ENTRY DATES (delivery spikes cluster on market-wide
+days), and the corporate-action gap mask applied to BOTH trades and the baseline.
 
 ## Part 5: what this can and cannot answer
 
