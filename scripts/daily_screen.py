@@ -18,7 +18,9 @@ would have made.
 This reads the database read-only and writes nothing to it.
 """
 import argparse
+import io
 import math
+import os
 import sqlite3
 import sys
 from collections import Counter, defaultdict, namedtuple
@@ -359,12 +361,116 @@ def format_system(name, label, window, s, excluded, cost):
     ])
 
 
+CAVEATS = (
+    "Caveats: universe.yaml is today's constituent list, so six years of it is survivorship-biased;\n"
+    "trade-level expectancy ignores capital, overlapping positions and position sizing;\n"
+    "one parameter set per system, fixed in the spec before any daily candle was stored;\n"
+    "the charge rates are from the spec and have not been checked against Groww's pricing page."
+)
+
+
+def run_phase(conn, symbols, window, label, out=sys.stdout):
+    cost = round_trip_cost()
+    series = load_series(conn, symbols)
+    missing = [s for s in symbols if s not in series]
+    print("%d symbols with daily candles%s"
+          % (len(series), ("; no candles for " + ", ".join(missing)) if missing else ""), file=out)
+    prepared = {}
+    gaps = {}
+    for sym, bars in series.items():
+        masked = gap_mask(bars)
+        prepared[sym] = (bars, Indicators(bars), masked)
+        if masked:
+            gaps[sym] = len(masked)
+    print("corporate-action gaps masked: %s"
+          % (", ".join("%s %d dates" % kv for kv in sorted(gaps.items())) if gaps else "none"), file=out)
+    print("", file=out)
+    for name in ("mr", "tf", "bo"):
+        trades, excluded = [], 0
+        for sym in sorted(prepared):
+            bars, ind, masked = prepared[sym]
+            got, ex = simulate(sym, name, bars, ind, masked, window, cost)
+            trades.extend(attach_excess(got, bars, window, cost))
+            excluded += ex
+        print(format_system(name, label, window, describe(trades), excluded, cost), file=out)
+        print("", file=out)
+    print(CAVEATS, file=out)
+
+
+def guard_holdout():
+    """The holdout is worth one look. A second look at the same window, after seeing the first, is
+    tuning with extra steps."""
+    if os.path.exists(HOLDOUT_FILE):
+        sys.exit("%s exists: the holdout has already been run and is meant to be looked at once. "
+                 "Read that file instead." % HOLDOUT_FILE)
+
+
+def fetch_daily(db_path):
+    """Pull daily candles from 2020-01-01 for the universe. Needs the Groww key approved today.
+    No session filter: daily bars are stamped 00:00 IST and SessionClock would drop every one."""
+    import time
+    from tradebot.config import load_config
+    from tradebot.data.historical import fetch_incremental
+    from tradebot.data.universe import load_universe
+    from tradebot.execution.groww_adapter import GrowwAdapter
+    from tradebot.store.db import connect
+    from tradebot.store.repo import Repo
+
+    cfg = load_config("config.yaml")
+    uni = load_universe(cfg.paths.universe)
+    adapter = GrowwAdapter(cfg.secrets.groww_api_key, cfg.secrets.groww_totp_secret,
+                           cfg.secrets.groww_api_secret)
+    adapter.client
+    repo = Repo(connect(db_path))
+    now = int(time.time())
+    lookback = (date.today() - date(2020, 1, 1)).days + 1
+
+    def throttled(sym, exch, start, end, interval):
+        try:
+            return adapter.fetch_candles(sym, exch, start, end, interval)
+        finally:
+            time.sleep(0.4)
+
+    total, failed = 0, []
+    for i, sym in enumerate(uni.symbols, 1):
+        try:
+            n = fetch_incremental(repo, throttled, [sym], uni.exchange, INTERVAL, lookback, now,
+                                  keep=None)[sym]
+            total += n
+            print("[%d/%d] %s: +%d" % (i, len(uni.symbols), sym, n))
+        except Exception as e:                      # noqa: BLE001 - isolate per symbol
+            failed.append(sym)
+            print("[%d/%d] %s: FAILED %s: %s" % (i, len(uni.symbols), sym, type(e).__name__, str(e)[:160]))
+    print("done: %d daily candles inserted; failed: %s" % (total, failed or "none"))
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("phase", choices=["fetch", "insample", "holdout"])
-    ap.add_argument("--db", default=DB)
+    ap.add_argument("--db", default=DB, help="read-only for insample and holdout")
     a = ap.parse_args()
-    sys.exit("phase %s is not implemented yet" % a.phase)
+    if a.phase == "fetch":
+        fetch_daily(a.db)
+        return
+    if a.phase == "holdout":
+        guard_holdout()
+    from tradebot.config import load_config
+    from tradebot.data.universe import load_universe
+    symbols = list(load_universe(load_config("config.yaml").paths.universe).symbols)
+    conn = sqlite3.connect("file:%s?mode=ro" % a.db, uri=True)
+    try:
+        if a.phase == "insample":
+            run_phase(conn, symbols, INSAMPLE, "in-sample")
+        else:
+            buf = io.StringIO()
+            run_phase(conn, symbols, HOLDOUT, "holdout", out=buf)
+            with open(HOLDOUT_FILE, "w") as fh:
+                fh.write(buf.getvalue())
+            print(buf.getvalue())
+            print("written to %s; this window is now spent" % HOLDOUT_FILE)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

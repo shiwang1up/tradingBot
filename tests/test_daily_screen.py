@@ -284,3 +284,41 @@ def test_describe_reports_expectancy_payoff_and_breakeven():
     assert s["payoff"] == pytest.approx(1.0) and s["breakeven"] == pytest.approx(0.5)
     assert s["expectancy"] == pytest.approx(0.0)
     assert s["median_days"] == 2
+
+
+def test_holdout_refuses_when_its_file_already_exists(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "daily-screen-holdout.txt"
+    f.write_text("an earlier run\n")
+    monkeypatch.setattr(ds, "HOLDOUT_FILE", str(f))
+    with pytest.raises(SystemExit) as e:
+        ds.guard_holdout()
+    assert "already been run" in str(e.value)
+    assert f.read_text() == "an earlier run\n"          # untouched
+
+
+def test_holdout_guard_passes_when_the_file_is_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(ds, "HOLDOUT_FILE", str(tmp_path / "nope.txt"))
+    ds.guard_holdout()                                   # must not raise
+
+
+def test_run_phase_prints_a_block_per_system(tmp_path):
+    """A tiny two-symbol database: the point is the shape of the output, not the numbers."""
+    import io
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE candles (symbol TEXT, ts INTEGER, interval INTEGER, o REAL, h REAL,"
+                 " l REAL, c REAL, v INTEGER, source TEXT)")
+    base = 1577836800                                    # 2020-01-01 00:00 UTC
+    for sym in ("A", "B"):
+        for k in range(300):
+            c = 100.0 + k * 0.5
+            conn.execute("INSERT INTO candles VALUES (?,?,?,?,?,?,?,0,'official')",
+                         (sym, base + k * 86400, 1440, c, c + 1, c - 1, c))
+    conn.commit(); conn.close()
+    ro = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    buf = io.StringIO()
+    ds.run_phase(ro, ["A", "B"], (date(2020, 1, 1), date(2020, 10, 26)), "test", out=buf)
+    text = buf.getvalue()
+    for title in ds.SYSTEM_TITLES.values():
+        assert title in text
+    assert "2 symbols with daily candles" in text and "survivorship" in text
