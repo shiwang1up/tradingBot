@@ -74,6 +74,7 @@ class DataConfig:
     official_fetch_concurrency: int
     bar_grace_sec: int = 5      # paper: seconds to wait after a bar boundary before fetching the closed bar
     warmup_bars: int = 300      # paper: stored bars replayed per symbol before the first live bar (~4 days of 5m)
+    index_symbol: str = ""      # index fetched and stored with the universe for the regime filter; never traded
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,17 @@ class ChargesConfig:
     gst_pct: float = 18.0              # on brokerage + exchange txn + SEBI
 
 
+REGIME_SOURCES = ("index", "composite")
+
+
+@dataclass(frozen=True)
+class RegimeConfig:
+    """Market-direction gate: longs only while the index is above its EMA, shorts only while at or below."""
+    enabled: bool = False
+    source: str = "index"    # index: data.index_symbol candles | composite: equal-weight mean of universe returns
+    ema_period: int = 20     # bars of the run's interval
+
+
 @dataclass(frozen=True)
 class Secrets:
     groww_api_key: str
@@ -121,6 +133,7 @@ class Config:
     secrets: Secrets
     raw: dict
     charges: ChargesConfig = ChargesConfig()
+    regime: RegimeConfig = RegimeConfig()
 
 
 _COERCE = {"float": float, "int": int, "bool": bool, "str": str, "tuple": tuple}
@@ -233,6 +246,13 @@ def _validate(cfg: "Config") -> None:
         checks.append((orb.get("session_open") == s.open,
                        f"strategy.orb.session_open must equal session.open ({s.open!r}), "
                        f"got {orb.get('session_open')!r}"))
+    g = cfg.regime
+    checks += [
+        (g.source in REGIME_SOURCES, f"regime.source must be one of {REGIME_SOURCES}"),
+        (g.ema_period >= 1, "regime.ema_period must be >= 1"),
+        (not (g.enabled and g.source == "index") or bool(d.index_symbol),
+         "data.index_symbol must be set when regime.enabled uses source: index"),
+    ]
     for ok, msg in checks:
         if not ok:
             raise ValueError(f"config.yaml {msg}")
@@ -276,6 +296,7 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         ),
         raw=raw,
         charges=_optional_section(raw, "charges", ChargesConfig),
+        regime=_optional_section(raw, "regime", RegimeConfig),
     )
     _validate(cfg)
     return cfg

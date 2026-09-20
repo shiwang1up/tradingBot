@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tradebot.config import ChargesConfig, load_config
+from tradebot.config import ChargesConfig, RegimeConfig, load_config
 from tests.helpers import make_config
 from tradebot.engine.clock import SessionClock, ist_epoch
 
@@ -274,3 +274,28 @@ def test_orb_keys_must_match_the_session_and_the_interval(tmp_path):
     with pytest.raises(ValueError, match="orb.session_open"):
         make_config(tmp_path, strategy={"orb": dict(ORB, interval_minutes=5, session_open="09:30")})
     make_config(tmp_path, strategy={"orb": dict(ORB, interval_minutes=5, range_minutes=30)})
+
+
+def test_regime_defaults_off_and_is_validated(tmp_path):
+    cfg = make_config(tmp_path)
+    assert cfg.regime == RegimeConfig() and cfg.regime.enabled is False
+    assert (cfg.regime.source, cfg.regime.ema_period, cfg.data.index_symbol) == ("index", 20, "")
+    with pytest.raises(ValueError, match="regime.source"):
+        make_config(tmp_path, regime={"source": "vix"})
+    with pytest.raises(ValueError, match="regime.ema_period"):
+        make_config(tmp_path, regime={"ema_period": 0})
+    with pytest.raises(ValueError, match="data.index_symbol"):
+        make_config(tmp_path, regime={"enabled": True})                  # the index source needs a symbol
+    assert make_config(tmp_path, regime={"enabled": True, "source": "composite"}).regime.enabled
+    assert make_config(tmp_path, regime={"enabled": True}, data={"index_symbol": "NIFTY"}).data.index_symbol == "NIFTY"
+
+
+def test_shipped_configs_name_the_index_and_keep_the_filter_off(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    for name in ("config.yaml", "config-15m.yaml", "config-orb.yaml"):
+        cfg = load_config(root / name, tmp_path / "nonexistent.env")
+        assert cfg.data.index_symbol == "NIFTY", name
+        assert cfg.regime.enabled is False, name
+        assert "regime" in cfg.raw, name
+        # the shipped block names every field so a rate correction can't silently drop a key
+        assert set(cfg.raw["regime"]) == {f.name for f in dataclasses.fields(RegimeConfig)}, name

@@ -59,6 +59,11 @@ charges:                        # Groww intraday equity; check against groww.in/
   stamp_buy_pct: 0.003          # buy side only
   gst_pct: 18.0                 # on brokerage + exchange txn + SEBI
 
+regime:                         # longs only while the index is above its EMA, shorts only while at or below
+  enabled: false
+  source: index                 # index | composite (equal-weight mean of universe returns; needs no index data)
+  ema_period: 20                # bars of execution.interval_minutes
+
 session:
   open: "09:15"
   close: "15:30"
@@ -70,6 +75,7 @@ data:
   official_fetch_concurrency: 5
   bar_grace_sec: 5              # paper: wait this long after the boundary before fetching the closed bar
   warmup_bars: 300              # paper: stored bars replayed per symbol before the first live bar (~12 sessions of 15-minute bars)
+  index_symbol: NIFTY           # fetched and stored with the universe; feeds the regime filter, never traded
 
 paths:
   db: data/tradebot.db
