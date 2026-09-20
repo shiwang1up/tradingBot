@@ -168,3 +168,31 @@ def test_run_months_charges_the_first_month_a_full_round_trip():
     months = ms.run_months(_toy_closes(), _toy_masked(), top_n=1, cost=0.006,
                             lookback=12, skip=1)
     assert months[0]["port"] == pytest.approx(months[0]["port_gross"] - 0.006)
+
+
+def test_quintile_split_handles_a_count_not_divisible_by_five():
+    """12 names into 5 groups: the remainder goes to the top groups, and every name lands in
+    exactly one group. Group 0 is the highest-ranked."""
+    groups = ms.split_quintiles(list("ABCDEFGHIJKL"), n_groups=5)
+    assert [len(g) for g in groups] == [3, 3, 2, 2, 2]
+    assert sorted(sum(groups, [])) == sorted(list("ABCDEFGHIJKL"))
+    assert groups[0] == ["A", "B", "C"]
+
+
+def test_quintile_split_returns_empty_groups_when_there_are_too_few_names():
+    groups = ms.split_quintiles(list("AB"), n_groups=5)
+    assert [len(g) for g in groups] == [1, 1, 0, 0, 0]
+
+
+def test_summarise_reports_the_spread_its_t_and_drawdown():
+    """Two months of portfolio +3%, -1% against a baseline +1%, +1%: spread +2%, -2%, mean 0."""
+    months = [dict(port=0.03, base=0.01, spread=0.02, turnover=4, n_eligible=40),
+              dict(port=-0.01, base=0.01, spread=-0.02, turnover=2, n_eligible=40)]
+    s = ms.summarise(months)
+    assert s["months"] == 2
+    assert s["mean_spread"] == pytest.approx(0.0)
+    assert s["mean_port"] == pytest.approx(0.01) and s["mean_base"] == pytest.approx(0.01)
+    assert s["cum_port"] == pytest.approx(1.03 * 0.99 - 1)
+    assert s["max_dd_port"] == pytest.approx(0.01)          # +3% then -1%: a 1% drawdown from peak
+    assert s["mean_turnover"] == pytest.approx(3.0)
+    assert s["mean_eligible"] == pytest.approx(40.0)

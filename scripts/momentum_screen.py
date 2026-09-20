@@ -189,6 +189,81 @@ def run_months(closes, masked, top_n=TOP_N, cost=None, lookback=LOOKBACK_MONTHS,
     return out
 
 
+def split_quintiles(ranked, n_groups=QUINTILES):
+    """`ranked` highest first, split into `n_groups` groups with any remainder given to the top
+    groups. Every name lands in exactly one group, so the groups together are the baseline."""
+    n = len(ranked)
+    base, extra = divmod(n, n_groups)
+    groups, k = [], 0
+    for g in range(n_groups):
+        size = base + (1 if g < extra else 0)
+        groups.append(ranked[k:k + size])
+        k += size
+    return groups
+
+
+def _max_drawdown(returns):
+    """Largest peak-to-trough fall of the cumulative curve, as a positive fraction."""
+    cum, peak, dd = 1.0, 1.0, 0.0
+    for r in returns:
+        cum *= (1.0 + r)
+        peak = max(peak, cum)
+        dd = max(dd, (peak - cum) / peak)
+    return dd
+
+
+def summarise(months):
+    """Headline figures over the monthly series."""
+    n = len(months)
+    if n == 0:
+        return dict(months=0, mean_port=0.0, mean_base=0.0, mean_spread=0.0, t=None,
+                    cum_port=0.0, cum_base=0.0, max_dd_port=0.0, max_dd_base=0.0,
+                    mean_turnover=0.0, mean_eligible=0.0)
+    ports = [m["port"] for m in months]
+    bases = [m["base"] for m in months]
+    spreads = [m["spread"] for m in months]
+
+    def cum(rs):
+        out = 1.0
+        for r in rs:
+            out *= (1.0 + r)
+        return out - 1.0
+
+    return dict(months=n, mean_port=sum(ports) / n, mean_base=sum(bases) / n,
+                mean_spread=sum(spreads) / n, t=series_t(spreads),
+                cum_port=cum(ports), cum_base=cum(bases),
+                max_dd_port=_max_drawdown(ports), max_dd_base=_max_drawdown(bases),
+                mean_turnover=sum(m["turnover"] for m in months) / float(n),
+                mean_eligible=sum(m["n_eligible"] for m in months) / float(n))
+
+
+CAVEATS = (
+    "Caveats: universe.yaml is TODAY'S index, so stocks added during the window because they rose\n"
+    "are present with the history of that rise (biases FOR momentum) and stocks dropped after\n"
+    "falling are absent (biases against the bottom group); the net direction is unknown and could\n"
+    "be material, and cannot be fixed without a point-in-time constituent list.\n"
+    "Monthly observations are few for a t. The window is one long bull market plus two corrections.\n"
+    "Costs assume the delivery schedule in the spec, unverified against Groww's pricing page, and\n"
+    "are charged at the portfolio's real per-position value (1 lakh split across the basket), but\n"
+    "they ignore market impact and lot sizes."
+)
+
+
+def format_run(label, s, cost):
+    t = "n/a" if s["t"] is None else "%.2f" % s["t"]
+    return "\n".join([
+        "%s   %d months" % (label, s["months"]),
+        "  portfolio   mean %+.3f%%/mo   cumulative %+.1f%%   max drawdown %.1f%%"
+        % (s["mean_port"] * 100, s["cum_port"] * 100, s["max_dd_port"] * 100),
+        "  baseline    mean %+.3f%%/mo   cumulative %+.1f%%   max drawdown %.1f%%"
+        % (s["mean_base"] * 100, s["cum_base"] * 100, s["max_dd_base"] * 100),
+        "  spread      mean %+.3f%%/mo   t %s        turnover %.1f of %d names/mo (round trip %.3f%%)"
+        % (s["mean_spread"] * 100, t, s["mean_turnover"], TOP_N, cost * 100),
+        "  eligible    %.1f of the universe ranked per month on average"
+        % s["mean_eligible"],
+    ])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
