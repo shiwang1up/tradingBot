@@ -75,15 +75,17 @@ def test_eligibility_needs_all_three_closes_and_a_clean_lookback():
               "SHORT": {skip: 150.0, rank: 160.0},                    # no m-13 close
               "SPLIT": {start: 100.0, skip: 150.0, rank: 160.0}}
     masked = {"OK": set(), "SHORT": set(), "SPLIT": {date(2020, 6, 15)}}   # inside the lookback
-    got = ms.eligible(closes, masked, rank, skip, start)
+    got = ms.eligible(closes, masked, rank, skip, start, date(2021, 4, 1))
     assert sorted(got) == ["OK"]
 
 
 def test_eligibility_ignores_a_corporate_action_outside_the_lookback():
     rank, skip, start = date(2021, 2, 26), date(2021, 1, 29), date(2020, 1, 31)
     closes = {"A": {start: 100.0, skip: 150.0, rank: 160.0}}
-    assert ms.eligible(closes, {"A": {date(2019, 6, 15)}}, rank, skip, start) == ["A"]
-    assert ms.eligible(closes, {"A": {date(2021, 6, 15)}}, rank, skip, start) == ["A"]
+    assert ms.eligible(closes, {"A": {date(2019, 6, 15)}}, rank, skip, start,
+                       date(2021, 4, 1)) == ["A"]
+    assert ms.eligible(closes, {"A": {date(2021, 6, 15)}}, rank, skip, start,
+                       date(2021, 4, 1)) == ["A"]
 
 
 def test_next_trading_day_is_strictly_after_the_rank_date():
@@ -135,7 +137,9 @@ def _toy_closes():
         by = {}
         for i, (e, n) in enumerate(zip(ends, nexts)):
             by[e] = path(i)
-            by[n] = path(i)          # the entry day carries the same level; returns come from the path
+            # The entry/exit day must NOT equal the month-end close, or a test cannot tell
+            # entering on the rank date from entering the day after it.
+            by[n] = path(i) * 1.01
         out[sym] = by
     return out
 
@@ -198,7 +202,7 @@ def test_summarise_reports_the_spread_its_t_and_drawdown():
     assert s["mean_eligible"] == pytest.approx(40.0)
 
 
-def test_portfolio_cost_rises_as_the_basket_concentrates_capital_into_fewer_names():
+def test_portfolio_cost_falls_as_each_position_gets_larger():
     """1 lakh across 10 names is 10,000 a position; across 5 it is 20,000, which is cheaper per
     rupee because the 20 rupee brokerage floor and the flat DP charge are spread wider. Charging
     the daily screen's 25,000 position would understate every cell."""
@@ -238,3 +242,48 @@ def test_quintile_months_are_dropped_for_every_group_or_none():
                                         [0.02, 0.03, 0.04, 0.05, 0.06]])
     assert dropped == 1
     assert kept == [[0.01, 0.02, 0.03, 0.04, 0.05], [0.02, 0.03, 0.04, 0.05, 0.06]]
+
+
+def test_run_months_enters_after_the_rank_date_and_exits_after_the_next_one():
+    """Pins the dates, not just the helper. With the entry day priced differently from the month
+    end, entering on the rank date itself would change the returns and this test would fail."""
+    months = ms.run_months(_toy_closes(), _toy_masked(), top_n=1, cost=0.0, lookback=12, skip=1)
+    m = months[0]
+    assert m["entry"] > m["rank_date"]
+    assert m["exit"] > months[1]["rank_date"] if len(months) > 1 else m["exit"] > m["entry"]
+    assert m["entry"].day == 1 and m["rank_date"].day == 28
+
+
+def test_run_months_baseline_covers_exactly_the_eligible_set():
+    """The baseline must be the eligible names, not every symbol in the dict. A baseline over a
+    different set is not a comparison, and the spec requires this test by name."""
+    closes = _toy_closes()
+    closes["NOHIST"] = {date(2021, 3, 1): 100.0, date(2021, 4, 1): 200.0}   # ineligible, huge return
+    masked = _toy_masked()
+    masked["NOHIST"] = set()
+    months = ms.run_months(closes, masked, top_n=1, cost=0.0, lookback=12, skip=1)
+    assert months[0]["n_eligible"] == 4              # NOHIST excluded, not 5
+    clean = ms.run_months(_toy_closes(), _toy_masked(), top_n=1, cost=0.0, lookback=12, skip=1)
+    assert months[0]["base"] == pytest.approx(clean[0]["base"])
+
+
+def test_eligible_rejects_a_corporate_action_during_the_month_actually_held():
+    """The hold runs from the day after the rank date to the day after the next month end, so a
+    split in that window prices as a real -50% return. The guard must cover it."""
+    rank, skip, start = date(2021, 2, 26), date(2021, 1, 29), date(2020, 1, 31)
+    exit_ = date(2021, 4, 1)
+    closes = {"A": {start: 100.0, skip: 150.0, rank: 160.0}}
+    assert ms.eligible(closes, {"A": set()}, rank, skip, start, exit_) == ["A"]
+    # inside the hold, after the rank date: previously invisible
+    assert ms.eligible(closes, {"A": {date(2021, 3, 15)}}, rank, skip, start, exit_) == []
+    # exactly on the exit date, and exactly on the start date: both disqualify
+    assert ms.eligible(closes, {"A": {exit_}}, rank, skip, start, exit_) == []
+    assert ms.eligible(closes, {"A": {start}}, rank, skip, start, exit_) == []
+    # outside the whole window: fine
+    assert ms.eligible(closes, {"A": {date(2021, 4, 2)}}, rank, skip, start, exit_) == ["A"]
+
+
+def test_quintiles_rank_highest_first():
+    """A sign flip in quintiles_phase alone was not caught by any test."""
+    ranked = ["HIGH", "MID", "LOW"]
+    assert ms.split_quintiles(ranked, n_groups=3)[0] == ["HIGH"]

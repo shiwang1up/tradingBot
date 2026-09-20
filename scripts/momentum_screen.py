@@ -36,7 +36,6 @@ from datetime import date
 from pathlib import Path
 
 DB = "data/tradebot.db"
-FIRST_RANK_MONTH = (2021, 1)            # the first month with 13 months of history behind it
 TOP_N = 10                              # a quintile of 50; five names is too concentrated at 1 lakh
 LOOKBACK_MONTHS = 12                    # the "12" of 12-1
 SKIP_MONTHS = 1                         # the "-1"
@@ -81,17 +80,27 @@ def momentum_score(closes_for_symbol, rank_date, skip_date, start_date):
     return b / a - 1.0
 
 
-def eligible(closes, masked, rank_date, skip_date, start_date):
+def eligible(closes, masked, rank_date, skip_date, start_date, exit_date):
     """Symbols that may be ranked at `rank_date`, sorted for determinism. A symbol qualifies only
-    if it has closes at all three legs and no corporate action anywhere in [start_date, rank_date]:
-    an unadjusted split inside the lookback makes the score meaningless, and one at the rank date
-    makes the entry price meaningless. The same list feeds BOTH the ranked portfolio and the
-    baseline, so the two always compare the same candidate set."""
+    if it has closes at all three legs and no corporate action anywhere in the closed interval
+    [start_date, exit_date] -- the lookback AND the month actually held.
+
+    Guarding only as far as the rank date is not enough: entry and exit are strictly AFTER the rank
+    date, so an unadjusted split during the held month sits outside such a guard and `basket_return`
+    prices it as a genuine -50% to -91% return. That is not lookahead. Splits are announced in
+    advance, and refusing to trade a symbol whose STORED price series is known to be corrupted is
+    data hygiene, not foresight.
+
+    `exit_date` is required rather than defaulted, so a caller that forgets it fails loudly instead
+    of silently reintroducing the bug.
+
+    The same list feeds BOTH the ranked portfolio and the baseline, so the two always compare the
+    same candidate set."""
     out = []
     for sym, by_date in closes.items():
         if momentum_score(by_date, rank_date, skip_date, start_date) is None:
             continue
-        if any(start_date <= d <= rank_date for d in masked.get(sym, ())):
+        if any(start_date <= d <= exit_date for d in masked.get(sym, ())):
             continue
         out.append(sym)
     return sorted(out)
@@ -170,7 +179,7 @@ def run_months(closes, masked, top_n=TOP_N, cost=None, lookback=LOOKBACK_MONTHS,
         exit_ = next_trading_day(all_dates, ends[i + 1])
         if entry is None or exit_ is None:
             continue
-        names = eligible(closes, masked, rank_date, ends[j_skip], ends[j_start])
+        names = eligible(closes, masked, rank_date, ends[j_skip], ends[j_start], exit_)
         if len(names) < top_n:
             continue
         ranked = sorted(names, key=lambda s: momentum_score(
@@ -258,7 +267,7 @@ CAVEATS = (
 )
 
 
-def format_run(label, s, cost):
+def format_run(label, s, cost, top_n):
     t = "n/a" if s["t"] is None else "%.2f" % s["t"]
     return "\n".join([
         "%s   %d months" % (label, s["months"]),
@@ -267,7 +276,7 @@ def format_run(label, s, cost):
         "  baseline    mean %+.3f%%/mo   cumulative %+.1f%%   max drawdown %.1f%%"
         % (s["mean_base"] * 100, s["cum_base"] * 100, s["max_dd_base"] * 100),
         "  spread      mean %+.3f%%/mo   t %s        turnover %.1f of %d names/mo (round trip %.3f%%)"
-        % (s["mean_spread"] * 100, t, s["mean_turnover"], TOP_N, cost * 100),
+        % (s["mean_spread"] * 100, t, s["mean_turnover"], top_n, cost * 100),
         "  eligible    %.1f of the universe ranked per month on average"
         % s["mean_eligible"],
     ])
@@ -290,7 +299,11 @@ def portfolio_cost(top_n):
 def run_phase(conn, symbols, top_n=TOP_N, out=sys.stdout):
     cost = portfolio_cost(top_n)
     closes, bars = load_closes(conn, symbols)
-    masked = {s: gap_mask(b) for s, b in bars.items()}
+    # mask_days=0, unlike the daily screen: there a corporate action poisons SMA200 for the
+    # next 200 bars, so the carry is right. Here the score is a ratio of two closes and the
+    # [m-13, m] window rule in `eligible` already covers every date that is priced; carrying
+    # the 200-bar forward mask would only strike out clean names.
+    masked = {s: gap_mask(b, mask_days=0) for s, b in bars.items()}
     missing = [s for s in symbols if s not in closes]
     print("%d symbols with daily candles%s"
           % (len(closes), ("; no candles for " + ", ".join(missing)) if missing else ""), file=out)
@@ -305,7 +318,7 @@ def run_phase(conn, symbols, top_n=TOP_N, out=sys.stdout):
     label = "primary  12-1 momentum, top %d, monthly" % top_n
     if months:
         label += "   %s..%s" % (months[0]["rank_date"], months[-1]["rank_date"])
-    print(format_run(label, s, cost), file=out)
+    print(format_run(label, s, cost, top_n), file=out)
     print("", file=out)
 
     # Stability, not a holdout: the same primary split at the end of 2023.
@@ -320,14 +333,17 @@ def run_phase(conn, symbols, top_n=TOP_N, out=sys.stdout):
     print("", file=out)
 
     print("secondary grid (descriptive only; the decision is the primary cell above)", file=out)
-    print("  %-10s%s" % ("", "".join("%14s" % ("top %d" % n) for n in SECONDARY_TOP_NS)), file=out)
+    # Each cell prints its own month count: a shorter lookback clears its first rank date earlier,
+    # so the rows are computed over different numbers of months and are not directly comparable.
+    print("  %-10s%s" % ("", "".join("%18s" % ("top %d" % n) for n in SECONDARY_TOP_NS)), file=out)
     for lb in SECONDARY_LOOKBACKS:
         cells = []
         for n in SECONDARY_TOP_NS:
             g = summarise(run_months(closes, masked, top_n=n, cost=portfolio_cost(n),
                                      lookback=lb))
             gt = "n/a" if g["t"] is None else "%.1f" % g["t"]
-            cells.append("%14s" % ("%+.2f%% t%s" % (g["mean_spread"] * 100, gt)))
+            cells.append("%18s" % ("%+.2f%% t%s n%d"
+                                   % (g["mean_spread"] * 100, gt, g["months"])))
         print("  %-10s%s" % ("%d-1" % lb, "".join(cells)), file=out)
     print("", file=out)
     print(CAVEATS, file=out)
@@ -338,7 +354,11 @@ def quintiles_phase(conn, symbols, out=sys.stdout):
     is far harder to produce by chance than one significant cell, and the bottom group is a
     built-in control: if top and bottom perform alike, the ranking carries no information."""
     closes, bars = load_closes(conn, symbols)
-    masked = {s: gap_mask(b) for s, b in bars.items()}
+    # mask_days=0, unlike the daily screen: there a corporate action poisons SMA200 for the
+    # next 200 bars, so the carry is right. Here the score is a ratio of two closes and the
+    # [m-13, m] window rule in `eligible` already covers every date that is priced; carrying
+    # the 200-bar forward mask would only strike out clean names.
+    masked = {s: gap_mask(b, mask_days=0) for s, b in bars.items()}
     all_dates = sorted({d for by in closes.values() for d in by})
     ends = month_ends(all_dates)
     rows = []
@@ -350,7 +370,7 @@ def quintiles_phase(conn, symbols, out=sys.stdout):
         exit_ = next_trading_day(all_dates, ends[i + 1])
         if entry is None or exit_ is None:
             continue
-        names = eligible(closes, masked, rank_date, ends[j_skip], ends[j_start])
+        names = eligible(closes, masked, rank_date, ends[j_skip], ends[j_start], exit_)
         if len(names) < QUINTILES:
             continue
         ranked = sorted(names, key=lambda s: momentum_score(
