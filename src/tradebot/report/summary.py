@@ -72,7 +72,7 @@ class Summary:
     avg_loss: float = 0.0            # mean net PnL of the rest, negative; a scratch counts as a loss
     payoff: Optional[float] = None   # avg_win / |avg_loss|; None with no losses or no wins to divide
     expectancy: float = 0.0          # net PnL per trade
-    breakeven_win_rate: Optional[float] = None  # 1 / (1 + payoff); None when payoff is
+    breakeven_win_rate: Optional[float] = None  # 1 / (1 + payoff); None when payoff is undefined
     evidence_days: int = 0           # days with at least one closed trade
     evidence_mean: float = 0.0       # mean net PnL per such day
     evidence_t: Optional[float] = None  # None when fewer than 2 days or no variance
@@ -248,12 +248,16 @@ def format_summary(s: Summary) -> str:
         elif s.evidence_t is None:
             evidence = f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day, t n/a"
         else:
-            if s.evidence_t <= -2:
-                note = "   consistently losing"
-            elif s.evidence_t < 2:
-                note = "   not distinguishable from zero"
-            else:
+            if s.evidence_t >= 4:
                 note = "   consistently profitable"
+            elif s.evidence_t >= 2:
+                note = "   some evidence of an edge"
+            elif s.evidence_t <= -4:
+                note = "   consistently losing"
+            elif s.evidence_t <= -2:
+                note = "   some evidence of a loss"
+            else:
+                note = "   not distinguishable from zero"
             evidence = f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day, t {s.evidence_t:.1f}{note}"
     lines = [
         f"Run {s.run_id} ({s.mode})",
@@ -280,7 +284,14 @@ def format_summary(s: Summary) -> str:
     if s.adopted_trades:
         lines.append(f"Adopted               {s.adopted_trades} trades, gross PnL {s.adopted_pnl:,.2f} (excluded from stats above)")
     if s.days:
-        lines += ["", f"{'Date':<10}  {'Realised':>14}  {'Unrealised':>14}  {'Fills/Entries':>14}  {'Fill rate':>9}"]
+        if kind == "full":
+            table_note = "   (gross: no recorded charges)"
+        elif kind == "partial":
+            table_note = "   (partly gross: some days have no recorded charges)"
+        else:
+            table_note = ""
+        lines += ["", f"{'Date':<10}  {'Realised':>14}  {'Unrealised':>14}  {'Fills/Entries':>14}  "
+                      f"{'Fill rate':>9}{table_note}"]
         for d in s.days:
             fe = f"{d['fills']}/{d['entries_placed']}"
             lines.append(f"{d['date']:<10}  {d['realised']:>14,.2f}  {d['unrealised']:>14,.2f}  {fe:>14}  "

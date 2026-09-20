@@ -164,6 +164,30 @@ def test_equity_drawdown_says_partly_gross_for_a_mixed_run(repo):
     assert "partly gross: some daily rows have no recorded charges" in line
 
 
+def test_day_table_header_is_marked_gross_when_charges_are_estimated(repo):
+    """The day table's Realised column comes from daily_pnl rows, which are gross when charges
+    were estimated after the fact, unlike everything above them in the report which is net. The
+    header must say so at the point of use, not just in the Evidence line above."""
+    from tradebot.config import ChargesConfig
+    repo.create_run("gt1", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("gt1", p), 9, 102.0, "TARGET", 20.0, charges=None)
+    repo.upsert_daily_pnl("gt1", "2026-09-14", realised=20.0, unrealised=0.0, fills=1, entries_placed=1)
+    s = build_summary(repo, "gt1", ChargesConfig())
+    line = next(ln for ln in format_summary(s).splitlines() if ln.startswith("Date"))
+    assert "(gross: no recorded charges)" in line
+
+
+def test_day_table_header_is_unmarked_when_charges_are_recorded(repo):
+    repo.create_run("gt2", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("gt2", p), 9, 102.0, "TARGET", 20.0, charges=5.0)
+    repo.upsert_daily_pnl("gt2", "2026-09-14", realised=15.0, unrealised=0.0, fills=1, entries_placed=1)
+    s = build_summary(repo, "gt2")
+    line = next(ln for ln in format_summary(s).splitlines() if ln.startswith("Date"))
+    assert "gross" not in line
+
+
 def test_adopted_line_says_gross_pnl(repo):
     _seed(repo)
     text = format_summary(build_summary(repo, "r1"))
@@ -393,6 +417,20 @@ def test_evidence_line_flags_a_strongly_negative_t_as_consistently_losing():
 def test_evidence_line_flags_a_strongly_positive_t_as_consistently_profitable():
     text = format_summary(_summary_with_t(8.6))
     assert "t 8.6" in text and "consistently profitable" in text
+
+
+def test_evidence_line_flags_a_borderline_positive_t_as_some_evidence_of_an_edge():
+    """t just past the too-few-to-judge gate (2 <= t < 4) is real but far weaker than a run with
+    hundreds of days at t 8.6, and must not be called "consistently profitable"."""
+    text = format_summary(_summary_with_t(2.01))
+    assert "t 2.0" in text and "some evidence of an edge" in text
+    assert "consistently profitable" not in text
+
+
+def test_evidence_line_flags_a_borderline_negative_t_as_some_evidence_of_a_loss():
+    text = format_summary(_summary_with_t(-2.01))
+    assert "t -2.0" in text and "some evidence of a loss" in text
+    assert "consistently losing" not in text
 
 
 def test_zero_trade_run_expectancy_lines_show_na_not_zero_percent(repo):
