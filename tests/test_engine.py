@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers import FixedStrategy, make_config, synth_candles
+from tests.helpers import MON, FixedStrategy, decisions, make_config, run_fixed, synth_candles
 from tradebot.ai.filter import StubFilter
 from tradebot.data.historical import HistoricalSource
 from tradebot.engine.clock import SessionClock, date_of, ist_epoch
@@ -33,48 +33,19 @@ def _candles():
     return synth_candles("A", DAYS, phase=0.0) + synth_candles("B", DAYS, phase=4.0, seed=99)
 
 
-MON = date(2026, 9, 14)
-
-
-def _run_fixed(repo, cfg, candles, fires, symbols, run_id="t1"):
-    repo.insert_candles(candles, interval=5)
-    src = HistoricalSource.from_repo(repo, symbols, 5, 0, 2_000_000_000)
-    strat = FixedStrategy(fires)
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
-                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
-    BacktestEngine(cfg, repo, src, [strat], broker, StubFilter(), SessionClock(cfg.session, 5),
-                   {s: 1 for s in symbols}, run_id).run()
-    return strat
-
-
-def _decisions(repo, run_id="t1"):
-    rows = repo.conn.execute(
-        "SELECT s.symbol, s.direction, d.approved, d.reason FROM signals s JOIN risk_decisions d ON d.signal_id = s.id "
-        "WHERE s.run_id=? ORDER BY s.id", (run_id,)).fetchall()
-    return [(r["symbol"], r["direction"], r["approved"], r["reason"]) for r in rows]
-
-
 def _two_symbols():
     return synth_candles("A", [MON]) + synth_candles("B", [MON], phase=4.0, seed=99)
-
-
-REGIME = dict(regime={"enabled": True, "ema_period": 3}, data={"index_symbol": "NIFTY"})
-
-
-def _index(day, closes):
-    t0 = ist_epoch(day, "09:15")
-    return [Candle("NIFTY", t0 + i * 300, c, c, c, c, 0) for i, c in enumerate(closes)]   # an index has no volume
 
 
 def test_same_bar_signals_are_ranked_by_priority(repo, tmp_path):
     cfg = make_config(tmp_path, risk={"max_open_positions": 1})
     ts = ist_epoch(MON, "10:00")
-    _run_fixed(repo, cfg, _two_symbols(), {("A", ts): ("LONG", 1.0), ("B", ts): ("LONG", 2.5)}, ["A", "B"])
-    assert _decisions(repo) == [("B", "LONG", 1, "ok"), ("A", "LONG", 0, "max_open_positions")]
+    run_fixed(repo, cfg, _two_symbols(), {("A", ts): ("LONG", 1.0), ("B", ts): ("LONG", 2.5)}, ["A", "B"])
+    assert decisions(repo) == [("B", "LONG", 1, "ok"), ("A", "LONG", 0, "max_open_positions")]
 
 
 def test_equal_priority_falls_back_to_symbol_order(repo, tmp_path):
-    """`_run_fixed` goes through HistoricalSource.from_repo, which hands candles over in SQL
+    """`run_fixed` goes through HistoricalSource.from_repo, which hands candles over in SQL
     ts, symbol order regardless of dict order - so it can never show B before A and this test
     must drive process_bar directly, the way the zero-candle test above does, to actually
     exercise the tie-break rather than just agreeing with it by construction."""
@@ -90,7 +61,7 @@ def test_equal_priority_falls_back_to_symbol_order(repo, tmp_path):
     candle_a = Candle("A", ts, 100.0, 100.5, 99.8, 100.2, 1000)
     candle_b = Candle("B", ts, 50.0, 50.5, 49.5, 50.0, 1000)
     eng.process_bar(ts, {"B": candle_b, "A": candle_a})
-    assert _decisions(repo, "t1") == [("A", "LONG", 1, "ok"), ("B", "LONG", 0, "max_open_positions")]
+    assert decisions(repo, "t1") == [("A", "LONG", 1, "ok"), ("B", "LONG", 0, "max_open_positions")]
 
 
 def test_engine_invariants(repo, tmp_path):
@@ -569,7 +540,7 @@ def test_zero_candle_does_not_move_last_close_or_breach_daily_cap(repo, tmp_path
     assert "daily_loss_cap" not in repo.rejection_counts("t1")
     assert ("A", t1) not in strat.seen_bars, "the strategy must never be shown the zero candle"
     assert ("B", t1) in strat.seen_bars
-    b_decision = next(row for row in _decisions(repo, "t1") if row[0] == "B")
+    b_decision = next(row for row in decisions(repo, "t1") if row[0] == "B")
     assert (b_decision[2], b_decision[3]) == (1, "ok"), "B's signal must be risk-approved, not caught by the cap"
 
 
@@ -672,131 +643,3 @@ def test_a_late_bar_still_simulates_exits(repo, tmp_path):
     rows = repo.list_positions("late-exit")
     assert broker.open_positions() == {} and rows and rows[0]["exit_reason"] == "STOP"
 
-
-# -- regime filter: the engine splits off the index and gates entries ---------------------------
-
-def test_regime_blocks_longs_in_a_falling_index_and_lets_shorts_through(repo, tmp_path):
-    cfg = make_config(tmp_path, **REGIME)
-    t_long, t_short = ist_epoch(MON, "10:00"), ist_epoch(MON, "10:30")
-    strat = _run_fixed(repo, cfg, synth_candles("A", [MON]) + _index(MON, [25000.0 - 10 * i for i in range(75)]),
-                       {("A", t_long): ("LONG", 0.0), ("A", t_short): ("SHORT", 0.0)}, ["A", "NIFTY"])
-    assert _decisions(repo) == [("A", "LONG", 0, "regime"), ("A", "SHORT", 1, "ok")]
-    assert strat.seen == {"A"}                     # the index never reaches a strategy
-    assert repo.rejection_counts("t1") == {"regime": 1}
-    assert [r["symbol"] for r in repo.list_positions("t1")] == ["A"]
-
-
-def test_regime_blocks_shorts_in_a_rising_index(repo, tmp_path):
-    cfg = make_config(tmp_path, **REGIME)
-    t_short, t_long = ist_epoch(MON, "10:00"), ist_epoch(MON, "10:30")
-    _run_fixed(repo, cfg, synth_candles("A", [MON]) + _index(MON, [25000.0 + 10 * i for i in range(75)]),
-               {("A", t_short): ("SHORT", 0.0), ("A", t_long): ("LONG", 0.0)}, ["A", "NIFTY"])
-    assert _decisions(repo) == [("A", "SHORT", 0, "regime"), ("A", "LONG", 1, "ok")]
-
-
-def test_regime_holds_everything_back_until_the_ema_is_warm(repo, tmp_path):
-    cfg = make_config(tmp_path, **REGIME)
-    _run_fixed(repo, cfg, synth_candles("A", [MON]) + _index(MON, [25000.0 + 10 * i for i in range(75)]),
-               {("A", ist_epoch(MON, "09:20")): ("LONG", 0.0)}, ["A", "NIFTY"])    # second bar; EMA3 needs three
-    assert _decisions(repo) == [("A", "LONG", 0, "regime_not_ready")]
-
-
-def test_a_missing_index_bar_keeps_the_last_state(repo, tmp_path):
-    cfg = make_config(tmp_path, **REGIME)
-    ts = ist_epoch(MON, "10:00")
-    index = [c for c in _index(MON, [25000.0 - 10 * i for i in range(75)]) if c.ts != ts]
-    _run_fixed(repo, cfg, synth_candles("A", [MON]) + index, {("A", ts): ("LONG", 0.0)}, ["A", "NIFTY"])
-    assert _decisions(repo) == [("A", "LONG", 0, "regime")]
-
-
-def test_index_candles_never_reach_strategies_with_the_filter_off(repo, tmp_path):
-    cfg = make_config(tmp_path, data={"index_symbol": "NIFTY"})
-    strat = _run_fixed(repo, cfg, synth_candles("A", [MON]) + _index(MON, [25000.0 - 10 * i for i in range(75)]),
-                       {("A", ist_epoch(MON, "10:00")): ("LONG", 0.0)}, ["A", "NIFTY"])
-    assert _decisions(repo) == [("A", "LONG", 1, "ok")] and strat.seen == {"A"}
-
-
-def test_usable_runs_before_the_index_split_so_a_bad_index_candle_is_dropped_not_crashed_on(repo, tmp_path):
-    """A NaN index candle on the same bar as a signal must be dropped by _usable before it ever
-    reaches the regime filter (amendment A1): the filter keeps its last (DOWN) state and the bar
-    still processes normally, instead of RegimeFilter.update raising on the NaN close.
-
-    Driven straight through process_bar, not the repo round trip _run_fixed uses: SQLite's REAL
-    column binds float('nan') as NULL, and the `c REAL NOT NULL` column then makes INSERT OR IGNORE
-    silently drop the row, so a NaN candle sent through the database never reaches the engine at
-    all - not what this test needs to exercise."""
-    cfg = make_config(tmp_path, **REGIME)
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
-                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
-    warmup_ts = [ist_epoch(MON, t) for t in ("09:15", "09:20", "09:25")]
-    ts = ist_epoch(MON, "10:00")
-    strat = FixedStrategy({("A", ts): ("LONG", 0.0)})
-    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [strat], broker, StubFilter(),
-                         SessionClock(cfg.session, 5), {"A": 1}, "t1")
-    repo.create_run("t1", "backtest", 0, "{}")
-    eng._start_day()
-    for t, close in zip(warmup_ts, (25000.0, 24990.0, 24980.0)):     # EMA3 seeds at 24990.0; state -> DOWN
-        eng.process_bar(t, {"NIFTY": Candle("NIFTY", t, close, close, close, close, 0)})
-    candle_a = Candle("A", ts, 100.0, 100.5, 99.8, 100.2, 1000)
-    bad_index = Candle("NIFTY", ts, 24000.0, 24000.0, 24000.0, float("nan"), 0)
-    eng.process_bar(ts, {"A": candle_a, "NIFTY": bad_index})
-    assert _decisions(repo, "t1") == [("A", "LONG", 0, "regime")]
-
-
-def test_an_index_only_bar_is_skipped_and_a_pending_entry_still_fills_next_bar(repo, tmp_path):
-    """Amendment A4: a timestamp whose only candle is the index must never reach the broker (which
-    would otherwise mark every pending entry unfilled as no_candle). The entry placed on the signal
-    bar must still fill at the next *tradable* bar's open."""
-    cfg = make_config(tmp_path, data={"index_symbol": "NIFTY"})
-    t_sig = ist_epoch(MON, "10:00")
-    t_next = t_sig + 300
-    extra_ts = t_sig + 150   # between t_sig and t_next; NIFTY only, no candle for A
-    a_candles = synth_candles("A", [MON])
-    index = _index(MON, [25000.0] * 75) + [Candle("NIFTY", extra_ts, 25000.0, 25000.0, 25000.0, 25000.0, 0)]
-    _run_fixed(repo, cfg, a_candles + index, {("A", t_sig): ("LONG", 0.0)}, ["A", "NIFTY"])
-    rows = repo.list_positions("t1")
-    assert len(rows) == 1 and rows[0]["opened_at"] == t_next
-    statuses = [r["status"] for r in repo.conn.execute("SELECT status FROM orders WHERE run_id='t1'").fetchall()]
-    assert statuses == ["FILLED"]
-
-
-def test_a_blocked_signal_does_not_hold_its_slot_for_the_next_one(repo, tmp_path):
-    """Job A review item 1: the regime gate must `continue` before the signal ever touches
-    `state` (pending_symbols / entries_today), so a slot it did not use stays free for the very
-    next signal on the same bar."""
-    cfg = make_config(tmp_path, risk={"max_open_positions": 1}, **REGIME)
-    ts = ist_epoch(MON, "10:00")
-    candles = (synth_candles("A", [MON]) + synth_candles("B", [MON], phase=4.0, seed=99)
-              + _index(MON, [25000.0 - 10 * i for i in range(75)]))
-    _run_fixed(repo, cfg, candles, {("B", ts): ("LONG", 2.5), ("A", ts): ("SHORT", 1.0)}, ["A", "B", "NIFTY"])
-    assert _decisions(repo) == [("B", "LONG", 0, "regime"), ("A", "SHORT", 1, "ok")]
-
-
-def test_regime_state_carries_over_a_day_boundary_without_resetting(repo, tmp_path):
-    """Job A review item 2: nothing re-creates the filter (or otherwise resets its state) at the
-    start of a day, so a LONG on day 2's very first bar is rejected `regime`, never
-    `regime_not_ready` - the EMA warmed on day 1 and stays warm."""
-    cfg = make_config(tmp_path, **REGIME)
-    day2 = date(2026, 9, 15)
-    closes = [25000.0 - 10 * i for i in range(150)]     # falls straight through both days
-    index = _index(MON, closes[:75]) + _index(day2, closes[75:])
-    ts2 = ist_epoch(day2, "09:15")
-    _run_fixed(repo, cfg, synth_candles("A", [MON, day2]) + index, {("A", ts2): ("LONG", 0.0)}, ["A", "NIFTY"])
-    assert _decisions(repo) == [("A", "LONG", 0, "regime")]
-
-
-def test_an_index_only_tail_does_not_open_a_second_trading_day(repo, tmp_path):
-    """Job A review item 3: a day whose only candle is the index (here day 2, once the stocks stop
-    trading after day 1) must never reach day bookkeeping: one daily_pnl row, the run ends cleanly,
-    and nothing closes after day 1's last tradable bar."""
-    cfg = make_config(tmp_path, data={"index_symbol": "NIFTY"})
-    day2 = date(2026, 9, 15)
-    ts_sig = ist_epoch(MON, "10:00")
-    a_candles = synth_candles("A", [MON])
-    last_mon_bar = a_candles[-1].ts
-    candles = a_candles + _index(MON, [25000.0] * 75) + _index(day2, [25000.0] * 75)
-    _run_fixed(repo, cfg, candles, {("A", ts_sig): ("LONG", 0.0)}, ["A", "NIFTY"])
-    assert repo.get_run("t1")["ended_at"] is not None
-    assert [d["date"] for d in repo.daily_pnl("t1")] == [MON.isoformat()]
-    for r in repo.list_positions("t1"):
-        assert r["closed_at"] is None or r["closed_at"] <= last_mon_bar

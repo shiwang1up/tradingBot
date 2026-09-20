@@ -5,10 +5,16 @@ from datetime import date
 
 import yaml
 
+from tradebot.ai.filter import StubFilter
 from tradebot.config import Config, load_config
-from tradebot.engine.clock import ist_epoch
+from tradebot.data.historical import HistoricalSource
+from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.engine.loop import BacktestEngine
+from tradebot.execution.backtest import BacktestBroker
 from tradebot.strategy.base import Strategy
 from tradebot.types import Candle, Signal, round_tick_down, round_tick_up
+
+MON = date(2026, 9, 14)  # a Monday; shared by test_engine.py and test_engine_regime.py
 
 BASE_CONFIG = {
     "capital": 100000,
@@ -101,6 +107,26 @@ class FixedStrategy(Strategy):
 
     def reset(self, symbol: str) -> None:
         pass
+
+
+def run_fixed(repo, cfg, candles, fires, symbols, run_id="t1"):
+    """Run a FixedStrategy over `candles` through a real BacktestEngine and return the strategy
+    (so a caller can inspect what it was shown). Shared by test_engine.py and test_engine_regime.py."""
+    repo.insert_candles(candles, interval=5)
+    src = HistoricalSource.from_repo(repo, symbols, 5, 0, 2_000_000_000)
+    strat = FixedStrategy(fires)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    BacktestEngine(cfg, repo, src, [strat], broker, StubFilter(), SessionClock(cfg.session, 5),
+                   {s: 1 for s in symbols}, run_id).run()
+    return strat
+
+
+def decisions(repo, run_id="t1"):
+    rows = repo.conn.execute(
+        "SELECT s.symbol, s.direction, d.approved, d.reason FROM signals s JOIN risk_decisions d ON d.signal_id = s.id "
+        "WHERE s.run_id=? ORDER BY s.id", (run_id,)).fetchall()
+    return [(r["symbol"], r["direction"], r["approved"], r["reason"]) for r in rows]
 
 
 class FakeTime:

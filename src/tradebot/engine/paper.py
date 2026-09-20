@@ -73,13 +73,14 @@ class PaperEngine(Engine):
             by_ts.setdefault(c.ts, {})[c.symbol] = c
         last = None
         for ts in sorted(by_ts):
-            bar = self._split_index(self._usable(by_ts[ts]))
+            bar, index_candle = self._strip_index(self._usable(by_ts[ts]))
+            self._feed_regime(index_candle, bar)  # before _observe: composite reads last closes it is about to overwrite
             self._observe(bar)
             self._run_strategies(bar)  # signals discarded: warm-up never places
             last = ts
         if self._regime is not None and self._regime.state == NOT_READY:
             log.warning("regime filter not warm after warm-up; every entry will be rejected as "
-                       "regime_not_ready until the index has %d bar(s)", self.cfg.regime.ema_period)
+                       "regime_not_ready until the regime filter has seen %d bar(s)", self.cfg.regime.ema_period)
         return last
 
     def resume(self, today: date) -> bool:

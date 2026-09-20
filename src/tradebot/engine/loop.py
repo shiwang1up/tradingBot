@@ -80,6 +80,7 @@ class Engine:
         self._day = DayCounters()
         self._index_symbol = cfg.data.index_symbol
         self._regime = RegimeFilter(cfg.regime.ema_period) if cfg.regime.enabled else None
+        self._composite_level = 100.0  # regime.source == "composite": chained from 100, unused otherwise
 
     def _reenable_strategies(self) -> None:
         """A strategy disabled earlier missed bars; its incremental indicators would silently carry
@@ -133,17 +134,59 @@ class Engine:
                            sym, iso_ist(c.ts), extra={"symbol": sym})
         return out
 
-    def _split_index(self, candles: dict[str, Candle]) -> dict[str, Candle]:
-        """The tradable candles of a bar. The index candle is fed to the regime filter and removed, so
-        no strategy, indicator, broker call or AI prompt ever sees it. With no index bar at this
-        timestamp the filter keeps its last state. Must run after _usable (a bad index candle is
-        dropped, not fed to the filter) and before _observe."""
+    def _strip_index(self, candles: dict[str, Candle]) -> tuple[dict[str, Candle], Optional[Candle]]:
+        """The tradable candles of a bar, and the index candle if this bar carries one - so no
+        strategy, indicator, broker call or AI prompt ever sees the index. Pure: it neither reads
+        nor writes the regime filter, unlike the old _split_index this replaces; _feed_regime does
+        that separately. Must run after _usable (a bad index candle is dropped, not fed to the
+        filter) and before _observe."""
         idx = self._index_symbol
         index_candle = candles.get(idx) if idx else None
         tradable = {s: c for s, c in candles.items() if s != idx} if index_candle is not None else candles
-        if self._regime is not None and index_candle is not None:
-            self._regime.update(index_candle.close)
-        return tradable
+        return tradable, index_candle
+
+    def _feed_regime(self, index_candle: Optional[Candle], tradable: dict[str, Candle]) -> None:
+        """Update the regime filter for this bar, if enabled. Must run before _observe - already
+        the order in process_bar and PaperEngine.warm - because with source 'composite' this reads
+        the previous closes that _observe is about to overwrite. With no index bar at this
+        timestamp (source 'index') the filter simply keeps its last state.
+
+        The `composite` source is the equal-weight mean of the universe's close-to-close bar
+        returns, chained from 100, for when index history is unavailable; the index candle, if
+        present, is stripped but not fed to it. It only ever sees this bar's own tradable candles
+        (`tradable`), so the first bar of a day carries the overnight gap exactly as the real index
+        does, a symbol returning after a missing bar contributes a multi-bar return, and an
+        unadjusted split moves the level by about 1/N in one bar - all accepted, same as the index
+        source's own EMA would react to an unadjusted split.
+
+        Average only over symbols with both a previous close and a usable candle this bar; below
+        is a no-op (state and level unchanged) when that set is empty, when it is too small to
+        trust (see `_composite_return`), or when the resulting level would be non-finite or <= 0."""
+        if self._regime is None:
+            return
+        if self.cfg.regime.source == "index":
+            if index_candle is not None:
+                self._regime.update(index_candle.close)
+            return
+        ret = self._composite_return(tradable)
+        if ret is None:
+            return
+        level = self._composite_level * (1.0 + ret)
+        if math.isfinite(level) and level > 0:
+            self._composite_level = level
+            self._regime.update(level)
+
+    def _composite_return(self, tradable: dict[str, Candle]) -> Optional[float]:
+        """Equal-weight mean close-to-close return of this bar, over symbols that have both a
+        previous close in `_last_close` and a usable candle this bar. None (no update) when that
+        set is empty, or when it is too small to trust: a bar carrying returns for only a few of
+        the symbols _last_close knows about (fetch failures in paper mode, the partial first bar
+        of a data set) would let two or three names drive the "index", so at least half of
+        `_last_close` (never fewer than one) must be present."""
+        returns = [c.close / self._last_close[s] - 1.0 for s, c in tradable.items() if self._last_close.get(s)]
+        if not returns or len(returns) < max(1, len(self._last_close) // 2):
+            return None
+        return sum(returns) / len(returns)
 
     def _observe(self, candles: dict[str, Candle]) -> None:
         """Update last closes, the AI context history and the shared indicators. Also used by the
@@ -157,7 +200,8 @@ class Engine:
 
     def process_bar(self, ts: int, candles: dict[str, Candle], now_ts: Optional[int] = None) -> None:
         """`now_ts` is the wall clock when the bar is handed in (paper); None means the bar is on time."""
-        candles = self._split_index(self._usable(candles))
+        candles, index_candle = self._strip_index(self._usable(candles))
+        self._feed_regime(index_candle, candles)  # before _observe: composite reads last closes it is about to overwrite
         self._observe(candles)
 
         self._record(self.broker.on_bar(ts, candles))
@@ -351,7 +395,9 @@ class BacktestEngine(Engine):
                     # which would otherwise mark every pending entry unfilled (no_candle) for a bar
                     # with no real trading activity. Checked after is_trading_day so a holiday's
                     # index bars are not fed either, the same as a holiday's mixed bars are skipped.
-                    self._split_index(self._usable(candles))
+                    # No tradable candles here, so composite source has no returns and is a no-op.
+                    _, index_candle = self._strip_index(self._usable(candles))
+                    self._feed_regime(index_candle, {})
                     continue
                 if d != current:
                     if current is not None:
