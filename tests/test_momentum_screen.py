@@ -115,3 +115,56 @@ def test_basket_return_is_none_when_a_name_lacks_an_exit_close():
     closes = {"A": {date(2021, 2, 1): 100.0, date(2021, 3, 1): 110.0},
               "B": {date(2021, 2, 1): 50.0}}
     assert ms.basket_return(closes, ["A", "B"], date(2021, 2, 1), date(2021, 3, 1)) is None
+
+
+def _toy_closes():
+    """Four symbols, 26 month ends from 2020-01-28. WINNER compounds up, LOSER down, FLAT1 and
+    FLAT2 do nothing. Month ends are the 28th so every month has one, and the next trading day is
+    the 1st of the following month, which is where entries and exits land."""
+    out = {}
+    ends, nexts = [], []
+    for k in range(26):
+        y, mth = 2020 + (k // 12), (k % 12) + 1
+        ends.append(date(y, mth, 28))
+        ny, nm = (y + 1, 1) if mth == 12 else (y, mth + 1)
+        nexts.append(date(ny, nm, 1))
+    for sym, path in (("WINNER", lambda i: 100.0 * (1 + 0.06) ** i),
+                      ("LOSER", lambda i: 100.0 * (1 - 0.05) ** i),
+                      ("FLAT1", lambda i: 100.0),
+                      ("FLAT2", lambda i: 100.0)):
+        by = {}
+        for i, (e, n) in enumerate(zip(ends, nexts)):
+            by[e] = path(i)
+            by[n] = path(i)          # the entry day carries the same level; returns come from the path
+        out[sym] = by
+    return out
+
+
+def _toy_masked():
+    return {s: set() for s in ("WINNER", "LOSER", "FLAT1", "FLAT2")}
+
+
+def test_t_of_a_monthly_series_is_the_sample_t():
+    """Three months of spread +2%, -1%, +2%: mean 1%, sample sd 1.7320508%, se 1%, t 1.0."""
+    t = ms.series_t([0.02, -0.01, 0.02])
+    assert t == pytest.approx(1.0, abs=1e-9)
+    assert ms.series_t([0.01]) is None                  # one month says nothing
+    assert ms.series_t([0.01, 0.01, 0.01]) is None      # no variance
+
+
+def test_run_months_ranks_holds_and_charges():
+    """Four symbols over enough months to rank once. WINNER compounded up over the lookback and
+    LOSER down; with TOP_N forced to 1 the portfolio is WINNER alone and the baseline is all four."""
+    months = ms.run_months(_toy_closes(), _toy_masked(), top_n=1, cost=0.0,
+                            lookback=12, skip=1)
+    assert months, "the toy data must produce at least one rebalance"
+    m = months[0]
+    assert m["held"] == ["WINNER"]
+    assert m["port"] == pytest.approx(m["port_gross"])          # cost 0 -> gross == net
+    assert m["base"] is not None and m["n_eligible"] == 4
+
+
+def test_run_months_charges_the_first_month_a_full_round_trip():
+    months = ms.run_months(_toy_closes(), _toy_masked(), top_n=1, cost=0.006,
+                            lookback=12, skip=1)
+    assert months[0]["port"] == pytest.approx(months[0]["port_gross"] - 0.006)

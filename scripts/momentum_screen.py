@@ -29,6 +29,7 @@ This reads the database read-only and writes nothing to it.
 """
 import argparse
 import importlib.util
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -130,6 +131,62 @@ def basket_return(closes, names, entry_date, exit_date):
             return None
         rs.append(b / a - 1.0)
     return sum(rs) / len(rs)
+
+
+def series_t(values):
+    """t of the mean of a monthly series (sample variance, n-1). None for fewer than two months or
+    no variance: either says nothing about whether the mean differs from zero."""
+    n = len(values)
+    if n < 2:
+        return None
+    mean = sum(values) / n
+    var = sum((v - mean) ** 2 for v in values) / (n - 1)
+    if var <= 0:
+        return None
+    return mean / math.sqrt(var / n)
+
+
+def run_months(closes, masked, top_n=TOP_N, cost=None, lookback=LOOKBACK_MONTHS, skip=SKIP_MONTHS):
+    """One dict per rebalance: the names held, the portfolio's gross and net return, the
+    equal-weight baseline's, and the spread.
+
+    A rank date m needs a close at m, at m-skip and at m-(lookback+skip); the portfolio is entered
+    at the first trading day AFTER m and exited at the first trading day after the NEXT rank date,
+    so no position is bought at a price used to rank it. The baseline holds every eligible name for
+    exactly the same dates, and is charged on its own turnover, which is near zero -- momentum's
+    cost disadvantage against buy-and-hold is part of what is being measured, not an artefact to
+    remove."""
+    if cost is None:
+        cost = portfolio_cost(top_n)
+    all_dates = sorted({d for by in closes.values() for d in by})
+    ends = month_ends(all_dates)
+    out, held, base_held = [], [], []
+    for i, rank_date in enumerate(ends):
+        j_skip, j_start = i - skip, i - (lookback + skip)
+        if j_start < 0 or i + 1 >= len(ends):
+            continue
+        entry = next_trading_day(all_dates, rank_date)
+        exit_ = next_trading_day(all_dates, ends[i + 1])
+        if entry is None or exit_ is None:
+            continue
+        names = eligible(closes, masked, rank_date, ends[j_skip], ends[j_start])
+        if len(names) < top_n:
+            continue
+        ranked = sorted(names, key=lambda s: momentum_score(
+            closes[s], rank_date, ends[j_skip], ends[j_start]), reverse=True)
+        target = ranked[:top_n]
+        port_gross = basket_return(closes, target, entry, exit_)
+        base_gross = basket_return(closes, names, entry, exit_)
+        if port_gross is None or base_gross is None:
+            continue
+        port = port_gross - turnover_cost(held, target, cost)
+        base = base_gross - turnover_cost(base_held, names, cost)
+        out.append(dict(rank_date=rank_date, entry=entry, exit=exit_, held=target,
+                        n_eligible=len(names), port_gross=port_gross, port=port,
+                        base_gross=base_gross, base=base, spread=port - base,
+                        turnover=len(set(target) - set(held))))
+        held, base_held = target, names
+    return out
 
 
 def main():
