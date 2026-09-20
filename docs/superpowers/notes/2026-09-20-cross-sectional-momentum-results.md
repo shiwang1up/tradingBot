@@ -121,6 +121,46 @@ the monotonic staircase is a much lower bar than statistical significance, becau
 the sign of four comparisons rather than a magnitude. This ranking does not order the groups at all,
 and it puts the worst-ranked group on top. That is the stronger evidence, and it agrees with the t.
 
+### Where the loss comes from: absent signal plus real costs
+
+The primary spread is net of costs, and it is worth separating the two components, because the
+answer locates the failure rather than just confirming it.
+
+Turnover is 2.6 of 10 names a month at a 0.712% round trip, so the portfolio pays
+
+    2.6 / 10 x 0.712% = 0.185%/mo
+
+in cost drag. The baseline pays on its own turnover, which is near zero but not exactly zero — the
+eligible set changes a little month to month as symbols enter and leave the lookback — so 0.185%/mo
+is an upper bound on the cost difference between the two, not an exact figure.
+
+Adding it back to the net spread:
+
+    -0.093%/mo + 0.185%/mo = +0.09%/mo gross
+
+So before costs the ranked portfolio was very slightly ahead of the baseline, and the cost of
+rebalancing into that ranking is what turned it negative.
+
+This does not rescue the result. A gross edge of +0.09%/mo on 55 monthly observations is
+indistinguishable from zero. The net t is -0.21, which implies a standard error of about
+0.44%/mo (0.093 / 0.21); shifting the mean by the cost drag and leaving the standard error alone
+gives a gross t of roughly +0.2 (0.092 / 0.443). That is the same verdict as the net figure with the
+sign flipped by noise, and it is an order of magnitude short of the t >= 2 bar.
+
+It also has to be read next to the quintiles, which are already gross and point the other way at
+-0.088%/mo. The two do not disagree, because they are different cuts. The +0.09%/mo is the top 10 of
+roughly 45 names measured against the equal-weight average of all 45. The -0.088%/mo is the top
+quintile, about 9 names, measured against the bottom quintile, about 9 names. Both sit within about
+0.1%/mo of zero. The honest reading is that gross, every cut of this ranking lands in a band around
+zero roughly 0.1%/mo wide, and which side of zero any particular cut falls on is not stable.
+
+Why it matters anyway: it says what kind of failure this is. Momentum over this universe is not
+strongly wrong — a signal that were reliably backwards would be as useful as one that were right,
+inverted. It is absent. Costs then turn absent into negative. That is the same shape as the five
+intraday families, where the signal was worth about ±0.1R against costs of about 0.34R: a real cost
+charged against a signal worth approximately nothing. Nine families in, that is the recurring
+pattern, and it is a more precise finding than "it lost money".
+
 ### The defect in the first version
 
 The first `quintiles` implementation appended each group's return independently, so a month in which
