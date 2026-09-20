@@ -177,12 +177,13 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
                 time.sleep(pause)
 
     clock = SessionClock(cfg.session, cfg.execution.interval_minutes)
-    total = 0
+    inserted = {"universe": 0, "index": 0}  # counted apart: only universe candles can be traded
     for sym in fetch_order:
         try:
-            total += fetch_incremental(repo, throttled, [sym], exchange, cfg.execution.interval_minutes,
-                                       days, int(time.time()), full=full, log=click.echo,
-                                       keep=lambda cd: clock.in_session(cd.ts))[sym]
+            n = fetch_incremental(repo, throttled, [sym], exchange, cfg.execution.interval_minutes,
+                                  days, int(time.time()), full=full, log=click.echo,
+                                  keep=lambda cd: clock.in_session(cd.ts))[sym]
+            inserted["index" if sym == idx else "universe"] += n
         except Exception as e:  # noqa: BLE001 - isolate per symbol; auth errors are fatal for the universe
             if sym == idx:
                 # Login already succeeded (_resolve_and_login, above), so nothing left an index fetch
@@ -201,12 +202,17 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
                 click.echo(f"failed: {sym} ({type(e).__name__}: {e})")
                 continue
             raise
-    click.echo(f"inserted {total} candles across {len(fetch_order) - len(failures)} symbols")
+    failed = {s for s, _ in failures}
+    summary = (f"inserted {inserted['universe']} candles across "
+               f"{len([s for s in symbols if s not in failed])} universe symbols")
+    if idx in fetch_order and idx not in failed:
+        summary += f", and {inserted['index']} for the regime index {idx}"
+    click.echo(summary)
     if failures:
         if len(failures) == 1 and failures[0][0] == idx:
             raise click.ClickException(f"1 symbol(s) failed: {idx} (regime index; universe candles were stored)")
         raise click.ClickException(f"{len(failures)} symbol(s) failed: " + ", ".join(s for s, _ in failures))
-    if total == 0 and not had_data:
+    if inserted["universe"] == 0 and not had_data:
         raise click.ClickException("no candles were returned for any symbol on a first fetch; "
                                    "check the date range, the universe, and the Groww response format")
 

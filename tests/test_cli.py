@@ -736,6 +736,40 @@ def test_had_data_check_ignores_pre_existing_index_candles(tmp_path, monkeypatch
     assert res.exit_code == 1 and "no candles were returned" in res.output
 
 
+def test_first_fetch_guard_counts_universe_candles_only(tmp_path, monkeypatch):
+    """The other half of the check above: on a first-ever fetch the index returns candles and the
+    only universe symbol returns none. The index's inserted rows must not satisfy the first-fetch
+    guard - there is still nothing to trade on."""
+    make_config(tmp_path, data={"index_symbol": "NIFTY"})
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [RELIANCE]\n")
+    (tmp_path / "instruments.csv").write_text(_INSTRUMENTS)
+
+    class IndexOnly:
+        flow = "fake"
+        client = object()
+
+        def __init__(self, key, secret, api_secret=""):
+            pass
+
+        def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
+            if symbol == "NIFTY":
+                return [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 0)]
+            return []
+
+    monkeypatch.setattr(cli, "GrowwAdapter", IndexOnly)
+    monkeypatch.setattr(cli, "download_instruments", lambda p: p)
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+    res = _invoke(tmp_path, "fetch-data", "--days", "5", "--sleep", "0")
+    assert res.exit_code == 1, res.output
+    assert "no candles were returned for any symbol on a first fetch" in res.output
+    assert "Traceback" not in res.output
+    # the summary line says what it counts: nothing for the universe, the index's rows apart
+    assert "inserted 0 candles across 1 universe symbols" in res.output
+    assert "regime index NIFTY" in res.output
+    repo = Repo(connect(str(tmp_path / "tradebot.db")))
+    assert repo.latest_candle_ts("NIFTY", 5) is not None  # the index rows were stored all the same
+
+
 def test_with_index_refuses_an_index_that_is_also_in_the_universe(tmp_path):
     """Amendment C2: an index that is also a universe symbol would be stripped from every bar by
     the engine, mistaking a tradable symbol for the index - refused early, as a clean error."""
