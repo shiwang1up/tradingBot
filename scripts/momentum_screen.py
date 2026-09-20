@@ -79,6 +79,59 @@ def momentum_score(closes_for_symbol, rank_date, skip_date, start_date):
     return b / a - 1.0
 
 
+def eligible(closes, masked, rank_date, skip_date, start_date):
+    """Symbols that may be ranked at `rank_date`, sorted for determinism. A symbol qualifies only
+    if it has closes at all three legs and no corporate action anywhere in [start_date, rank_date]:
+    an unadjusted split inside the lookback makes the score meaningless, and one at the rank date
+    makes the entry price meaningless. The same list feeds BOTH the ranked portfolio and the
+    baseline, so the two always compare the same candidate set."""
+    out = []
+    for sym, by_date in closes.items():
+        if momentum_score(by_date, rank_date, skip_date, start_date) is None:
+            continue
+        if any(start_date <= d <= rank_date for d in masked.get(sym, ())):
+            continue
+        out.append(sym)
+    return sorted(out)
+
+
+def next_trading_day(all_dates, after):
+    """The first trading day strictly after `after`, or None. Entering on the rank date itself
+    would buy at a price that was used to rank the name. `all_dates` must be sorted ascending; the
+    first date past `after` is returned, so an unsorted list would give the wrong day."""
+    for d in all_dates:
+        if d > after:
+            return d
+    return None
+
+
+def turnover_cost(held, target, cost):
+    """The month's cost as a fraction of the portfolio: the share of names replaced, times a round
+    trip. Selling one name and buying another is one round trip between them, so the share that
+    changed is the right multiplier. An unchanged basket costs nothing; the first month costs a
+    full round trip because everything is bought."""
+    if not target:
+        return 0.0
+    changed = len(set(target) - set(held))
+    return cost * changed / float(len(target))
+
+
+def basket_return(closes, names, entry_date, exit_date):
+    """Equal-weight return of `names` from `entry_date`'s close to `exit_date`'s close, before
+    costs. None if any name lacks either close, because a silently smaller basket would not be the
+    portfolio the ranking chose."""
+    if not names:
+        return None
+    rs = []
+    for sym in names:
+        a = closes[sym].get(entry_date)
+        b = closes[sym].get(exit_date)
+        if a is None or b is None or a <= 0:
+            return None
+        rs.append(b / a - 1.0)
+    return sum(rs) / len(rs)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -65,3 +65,53 @@ def test_load_closes_reads_daily_candles_only(tmp_path):
     assert list(closes) == ["A"] and len(closes["A"]) == 2
     assert closes["A"][date(2020, 1, 1)] == 1.5
     assert len(bars["A"]) == 2 and bars["A"][0].open == 1      # bars kept for the gap mask only
+
+
+def test_eligibility_needs_all_three_closes_and_a_clean_lookback():
+    """A symbol qualifies for a rank date only if it has closes at m-13, m-1 and m, and no
+    corporate action anywhere in [m-13, m]: a split inside the lookback makes the score garbage."""
+    rank, skip, start = date(2021, 2, 26), date(2021, 1, 29), date(2020, 1, 31)
+    closes = {"OK": {start: 100.0, skip: 150.0, rank: 160.0},
+              "SHORT": {skip: 150.0, rank: 160.0},                    # no m-13 close
+              "SPLIT": {start: 100.0, skip: 150.0, rank: 160.0}}
+    masked = {"OK": set(), "SHORT": set(), "SPLIT": {date(2020, 6, 15)}}   # inside the lookback
+    got = ms.eligible(closes, masked, rank, skip, start)
+    assert sorted(got) == ["OK"]
+
+
+def test_eligibility_ignores_a_corporate_action_outside_the_lookback():
+    rank, skip, start = date(2021, 2, 26), date(2021, 1, 29), date(2020, 1, 31)
+    closes = {"A": {start: 100.0, skip: 150.0, rank: 160.0}}
+    assert ms.eligible(closes, {"A": {date(2019, 6, 15)}}, rank, skip, start) == ["A"]
+    assert ms.eligible(closes, {"A": {date(2021, 6, 15)}}, rank, skip, start) == ["A"]
+
+
+def test_next_trading_day_is_strictly_after_the_rank_date():
+    """Entering on the rank date itself would buy at a price used to rank the name."""
+    days = [date(2021, 1, 29), date(2021, 2, 1), date(2021, 2, 26)]
+    assert ms.next_trading_day(days, date(2021, 1, 29)) == date(2021, 2, 1)
+    assert ms.next_trading_day(days, date(2021, 2, 26)) is None
+
+
+def test_turnover_cost_is_charged_only_on_the_names_that_changed():
+    """Ten names held, four replaced: 40% of a round trip, not a whole one. Holding the identical
+    basket costs nothing; replacing every name costs a full round trip."""
+    cost = 0.006
+    assert ms.turnover_cost(set("ABCDEFGHIJ"), set("ABCDEFGHIJ"), cost) == pytest.approx(0.0)
+    assert ms.turnover_cost(set("ABCDEFGHIJ"), set("ABCDEFWXYZ"), cost) == pytest.approx(0.4 * cost)
+    assert ms.turnover_cost(set("ABCDEFGHIJ"), set("KLMNOPQRST"), cost) == pytest.approx(cost)
+    assert ms.turnover_cost(set(), set("ABCDEFGHIJ"), cost) == pytest.approx(cost)  # first month
+
+
+def test_basket_return_is_the_equal_weight_mean_of_its_names():
+    """A 10% and a 30% name held equally return 20% before costs."""
+    closes = {"A": {date(2021, 2, 1): 100.0, date(2021, 3, 1): 110.0},
+              "B": {date(2021, 2, 1): 50.0, date(2021, 3, 1): 65.0}}
+    r = ms.basket_return(closes, ["A", "B"], date(2021, 2, 1), date(2021, 3, 1))
+    assert r == pytest.approx(0.20)
+
+
+def test_basket_return_is_none_when_a_name_lacks_an_exit_close():
+    closes = {"A": {date(2021, 2, 1): 100.0, date(2021, 3, 1): 110.0},
+              "B": {date(2021, 2, 1): 50.0}}
+    assert ms.basket_return(closes, ["A", "B"], date(2021, 2, 1), date(2021, 3, 1)) is None
