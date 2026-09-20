@@ -273,9 +273,14 @@ def simulate(symbol, name, bars, ind, masked, window, cost, system=None, warmup=
     return trades, excluded
 
 
-def baseline_return(bars, window, h, cost):
+def baseline_return(bars, window, h, cost, masked):
     """Mean net return of simply holding this symbol for h trading days, entered at the open of
     every date in the window whose exit also lands in it. None when no such hold fits.
+
+    A candidate hold is skipped if ANY date from its entry bar to its exit bar inclusive is in
+    `masked` -- the same corporate-action mask, and the same inclusive check, that `simulate`
+    applies to a trade -- so the baseline is not polluted by an unadjusted split any more than a
+    trade is allowed to be.
 
     Subtracts the same `cost` a trade's net return does, so that difference cancels out of the
     excess computed against this baseline and leaves excess measuring entry timing, not cost.
@@ -289,18 +294,20 @@ def baseline_return(bars, window, h, cost):
             continue
         j = i + h
         if j < len(bars) and bars[j].date <= hi:
+            if any(bars[k].date in masked for k in range(i, j + 1)):
+                continue
             rs.append(bars[j].open / bars[i].open - 1.0 - cost)
     return (sum(rs) / len(rs)) if rs else None
 
 
-def attach_excess(trades, bars, window, cost):
+def attach_excess(trades, bars, window, cost, masked):
     """Each trade's net return less what holding the same symbol the same number of days paid on
     average. The baseline is cached per holding length: a system's trades repeat a few lengths."""
     cache = {}
     out = []
     for t in trades:
         if t.days not in cache:
-            cache[t.days] = baseline_return(bars, window, t.days, cost)
+            cache[t.days] = baseline_return(bars, window, t.days, cost, masked)
         base = cache[t.days]
         out.append(t._replace(excess=t.net - (base if base is not None else 0.0)))
     return out
@@ -336,14 +343,14 @@ def describe(trades):
     would need to break even, plus the excess over the baseline and its t."""
     n = len(trades)
     if n == 0:
-        return dict(trades=0, win_rate=0.0, avg_win=0.0, avg_loss=0.0, payoff=0.0, expectancy=0.0,
-                    breakeven=0.0, median_days=0, excess_per_trade=0.0, excess_per_date=0.0,
+        return dict(trades=0, win_rate=0.0, avg_win=0.0, avg_loss=0.0, payoff=None, expectancy=0.0,
+                    breakeven=None, median_days=0, excess_per_trade=0.0, excess_per_date=0.0,
                     t=None, dates=0, exits={})
     wins = [t.net for t in trades if t.net > 0]
     losses = [t.net for t in trades if t.net <= 0]
     avg_win = sum(wins) / len(wins) if wins else 0.0
     avg_loss = sum(losses) / len(losses) if losses else 0.0
-    payoff = avg_win / abs(avg_loss) if avg_loss < 0 and avg_win > 0 else 0.0
+    payoff = avg_win / abs(avg_loss) if avg_loss < 0 and avg_win > 0 else None
     days = sorted(t.days for t in trades)
     # Trades cluster on entry dates (one market-wide dip fires mean reversion across many
     # symbols), so the trade-weighted mean and the date-weighted mean can disagree, even in
@@ -357,7 +364,7 @@ def describe(trades):
         avg_loss=avg_loss,
         payoff=payoff,
         expectancy=sum(t.net for t in trades) / n,
-        breakeven=(1.0 / (1.0 + payoff)) if payoff > 0 else 0.0,
+        breakeven=(1.0 / (1.0 + payoff)) if payoff is not None else None,
         median_days=days[n // 2],
         excess_per_trade=sum(t.excess for t in trades) / n,
         excess_per_date=(sum(dm) / len(dm)) if dm else 0.0,
@@ -369,13 +376,15 @@ def describe(trades):
 
 def format_system(name, label, window, s, excluded, cost):
     t = "n/a" if s["t"] is None else "%.2f" % s["t"]
+    payoff = "n/a" if s["payoff"] is None else "%.2f" % s["payoff"]
+    breakeven = "n/a" if s["breakeven"] is None else "%.1f%%" % (s["breakeven"] * 100)
     return "\n".join([
         "%s   %s %s..%s" % (SYSTEM_TITLES[name], label, window[0], window[1]),
-        "  trades %-6d win %5.1f%%   avg win %+.2f%%   avg loss %+.2f%%   payoff %.2f   median hold %dd"
+        "  trades %-6d win %5.1f%%   avg win %+.2f%%   avg loss %+.2f%%   payoff %s   median hold %dd"
         % (s["trades"], s["win_rate"] * 100, s["avg_win"] * 100, s["avg_loss"] * 100,
-           s["payoff"], s["median_days"]),
-        "  expectancy %+.3f%% per trade (net of %.3f%% round trip)   breakeven win %.1f%%"
-        % (s["expectancy"] * 100, cost * 100, s["breakeven"] * 100),
+           payoff, s["median_days"]),
+        "  expectancy %+.3f%% per trade (net of %.3f%% round trip)   breakeven win %s"
+        % (s["expectancy"] * 100, cost * 100, breakeven),
         "  excess over baseline %+.3f%% per entry date   t %s across %d entry dates   (%+.3f%% per trade)"
         % (s["excess_per_date"] * 100, t, s["dates"], s["excess_per_trade"] * 100),
         "  exits %s   excluded by the gap mask %d"
@@ -393,6 +402,7 @@ CAVEATS = (
 
 def run_phase(conn, symbols, window, label, out=sys.stdout):
     cost = round_trip_cost()
+    lo, hi = window
     series = load_series(conn, symbols)
     missing = [s for s in symbols if s not in series]
     print("%d symbols with daily candles%s"
@@ -400,10 +410,13 @@ def run_phase(conn, symbols, window, label, out=sys.stdout):
     prepared = {}
     gaps = {}
     for sym, bars in series.items():
+        # Full-history mask: the simulation itself must still catch a trade near the window edge
+        # that reaches just outside it, so this is not restricted to the window.
         masked = gap_mask(bars)
         prepared[sym] = (bars, Indicators(bars), masked)
-        if masked:
-            gaps[sym] = len(masked)
+        in_window = sum(1 for d in masked if lo <= d <= hi)
+        if in_window:
+            gaps[sym] = in_window
     print("corporate-action gaps masked: %s"
           % (", ".join("%s %d dates" % kv for kv in sorted(gaps.items())) if gaps else "none"), file=out)
     print("", file=out)
@@ -412,7 +425,7 @@ def run_phase(conn, symbols, window, label, out=sys.stdout):
         for sym in sorted(prepared):
             bars, ind, masked = prepared[sym]
             got, ex = simulate(sym, name, bars, ind, masked, window, cost)
-            trades.extend(attach_excess(got, bars, window, cost))
+            trades.extend(attach_excess(got, bars, window, cost, masked))
             excluded += ex
         print(format_system(name, label, window, describe(trades), excluded, cost), file=out)
         print("", file=out)

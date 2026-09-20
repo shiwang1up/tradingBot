@@ -237,15 +237,37 @@ def test_baseline_is_the_average_hold_of_the_same_length():
     that minus cost, whichever date you start on."""
     closes = [100.0 * (1.01 ** k) for k in range(30)]
     bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), c, c, c, c) for k, c in enumerate(closes)]
-    b = ds.baseline_return(bars, (bars[0].date, bars[-1].date), 3, cost=0.0)
+    b = ds.baseline_return(bars, (bars[0].date, bars[-1].date), 3, cost=0.0, masked=set())
     assert b == pytest.approx(1.01 ** 3 - 1.0)
-    assert ds.baseline_return(bars, (bars[0].date, bars[-1].date), 3, cost=0.005) == pytest.approx(
+    assert ds.baseline_return(bars, (bars[0].date, bars[-1].date), 3, cost=0.005, masked=set()) == pytest.approx(
         1.01 ** 3 - 1.0 - 0.005)
 
 
 def test_baseline_is_none_when_no_hold_of_that_length_fits():
     bars = _flat(4)
-    assert ds.baseline_return(bars, (bars[0].date, bars[-1].date), 10, cost=0.0) is None
+    assert ds.baseline_return(bars, (bars[0].date, bars[-1].date), 10, cost=0.0, masked=set()) is None
+
+
+def test_baseline_skips_a_candidate_hold_that_touches_a_masked_date():
+    """10 days, prices 100+i (i = 0..9), h=3, cost=0. A candidate starting at i holds through j=i+3
+    (both bars 0..9 fit the window). masked = {day4, day5}: any candidate whose entry-to-exit span
+    (inclusive, same rule `simulate` applies to trades) touches day4 or day5 is dropped.
+
+    i=0: span 0..3, clear -> return 103/100 - 1 = 0.03
+    i=1: span 1..4, touches day4 -> dropped
+    i=2: span 2..5, touches day4,5 -> dropped
+    i=3: span 3..6, touches day4,5 -> dropped
+    i=4: entry day4 itself masked -> dropped
+    i=5: entry day5 itself masked -> dropped
+    i=6: span 6..9, clear -> return 109/106 - 1 = 3/106
+
+    Only i=0 and i=6 survive; baseline is their mean, not the mean over all 7 candidates."""
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), 100.0 + k, 100.0 + k, 100.0 + k, 100.0 + k)
+            for k in range(10)]
+    masked = {bars[4].date, bars[5].date}
+    b = ds.baseline_return(bars, (bars[0].date, bars[-1].date), 3, cost=0.0, masked=masked)
+    expected = (0.03 + (109.0 / 106.0 - 1.0)) / 2.0
+    assert b == pytest.approx(expected)
 
 
 def test_a_system_that_only_matches_the_drift_has_zero_excess():
@@ -256,7 +278,7 @@ def test_a_system_that_only_matches_the_drift_has_zero_excess():
     trades, _ = ds.simulate("A", "mr", bars, _ind(bars), set(), window, cost=0.0,
                             system=(lambda ind, i: i == 5, lambda ind, i, e, h: "x" if i - e >= 3 else None),
                             warmup=0)
-    scored = ds.attach_excess(trades, bars, window, cost=0.0)
+    scored = ds.attach_excess(trades, bars, window, cost=0.0, masked=set())
     assert len(scored) == 1 and scored[0].excess == pytest.approx(0.0, abs=1e-12)
 
 
@@ -318,6 +340,50 @@ def test_holdout_refuses_when_its_file_already_exists(tmp_path, monkeypatch, cap
 def test_holdout_guard_passes_when_the_file_is_absent(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "HOLDOUT_FILE", str(tmp_path / "nope.txt"))
     ds.guard_holdout()                                   # must not raise
+
+
+def test_describe_all_winners_leaves_payoff_and_breakeven_undefined():
+    """No losing trade means payoff (avg_win / |avg_loss|) has nothing to divide by: it and
+    breakeven must be None, not 0.0, so a flawless run does not print as the worst possible one."""
+    d = date(2020, 1, 1)
+    trades = [ds.Trade("A", "mr", d + timedelta(days=k), d, 1.0, 1.0, 2, 0.0, net, "x", net)
+              for k, net in enumerate([0.03, 0.01, 0.02])]
+    s = ds.describe(trades)
+    assert s["payoff"] is None and s["breakeven"] is None
+    text = ds.format_system("mr", "test", (d, d), s, 0, cost=0.0)
+    assert "payoff n/a" in text and "breakeven win n/a" in text
+
+
+def test_gaps_masked_line_is_scoped_to_the_window(tmp_path):
+    """A's gap event lands OUTSIDE the reported window (2024, after an in-sample-shaped window that
+    ends 2023-12-31); B's lands INSIDE it. The full-history mask still exists for both (so a trade
+    near the edge can still be caught), but the printed "corporate-action gaps masked" line must
+    only name B, with a count of dates that actually fall inside the window."""
+    import io
+    base = 1577836800  # 2020-01-01 00:00 UTC
+    trend = [(100.0 + k * 0.1) for k in range(1600)]
+    # A permanent halving (as an unadjusted split actually behaves: every later close is on the new,
+    # halved basis too) so there is exactly one gap event, not a second one on the rebound.
+    rows_a = trend[:1500] + [c * 0.5 for c in trend[1500:]]      # gap at index 1500: ~2024-02-09
+    rows_b = trend[:10] + [c * 0.5 for c in trend[10:]]          # gap at index 10: 2020-01-11
+
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE candles (symbol TEXT, ts INTEGER, interval INTEGER, o REAL, h REAL,"
+                 " l REAL, c REAL, v INTEGER, source TEXT)")
+    for sym, closes in (("A", rows_a), ("B", rows_b)):
+        for k, c in enumerate(closes):
+            conn.execute("INSERT INTO candles VALUES (?,?,?,?,?,?,?,0,'official')",
+                         (sym, base + k * 86400, 1440, c, c + 1, c - 1, c))
+    conn.commit(); conn.close()
+    ro = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    buf = io.StringIO()
+    window = (date(2020, 1, 1), date(2023, 12, 31))
+    ds.run_phase(ro, ["A", "B"], window, "test", out=buf)
+    text = buf.getvalue()
+    line = next(l for l in text.splitlines() if l.startswith("corporate-action gaps masked"))
+    assert "A" not in line
+    assert "B 201 dates" in line       # the gap day itself plus 200 trading days after it
 
 
 def test_run_phase_prints_a_block_per_system(tmp_path):

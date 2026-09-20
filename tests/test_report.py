@@ -433,6 +433,20 @@ def test_evidence_line_flags_a_borderline_negative_t_as_some_evidence_of_a_loss(
     assert "consistently losing" not in text
 
 
+def test_tier_is_chosen_from_the_same_rounded_t_that_is_displayed():
+    """-3.9797 rounds for display to -4.0, which is at the "consistently losing" boundary
+    (t <= -4); picking the tier from the unrounded -3.9797 (which is NOT <= -4) would print
+    "-4.0   some evidence of a loss" -- a number sitting right on a boundary that reads as
+    the wrong side of it. The tier must be chosen from the same rounded value that is shown."""
+    text = format_summary(_summary_with_t(-3.9797))
+    assert "t -4.0" in text and "consistently losing" in text
+    assert "some evidence of a loss" not in text
+
+    text2 = format_summary(_summary_with_t(-3.94))
+    assert "t -3.9" in text2 and "some evidence of a loss" in text2
+    assert "consistently losing" not in text2
+
+
 def test_zero_trade_run_expectancy_lines_show_na_not_zero_percent(repo):
     """The four expectancy-block lines must degrade the same way Win rate already does when there
     are no trades: n/a, not zeros that would misleadingly read as a real (and terrible) result."""

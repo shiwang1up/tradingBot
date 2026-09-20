@@ -248,17 +248,22 @@ def format_summary(s: Summary) -> str:
         elif s.evidence_t is None:
             evidence = f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day, t n/a"
         else:
-            if s.evidence_t >= 4:
+            # Choose the tier from the SAME value that is displayed: t is rounded to 1dp first, so a
+            # value like -3.9797 (displayed "-4.0") is judged against the -4 boundary as "-4.0", not
+            # as the unrounded -3.9797 - which would print "-4.0   some evidence of a loss", a tier
+            # that reads as contradicting the number right next to it.
+            t_rounded = round(s.evidence_t, 1)
+            if t_rounded >= 4:
                 note = "   consistently profitable"
-            elif s.evidence_t >= 2:
+            elif t_rounded >= 2:
                 note = "   some evidence of an edge"
-            elif s.evidence_t <= -4:
+            elif t_rounded <= -4:
                 note = "   consistently losing"
-            elif s.evidence_t <= -2:
+            elif t_rounded <= -2:
                 note = "   some evidence of a loss"
             else:
                 note = "   not distinguishable from zero"
-            evidence = f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day, t {s.evidence_t:.1f}{note}"
+            evidence = f"{s.evidence_days} days traded, mean {s.evidence_mean:,.2f} per day, t {t_rounded:.1f}{note}"
     lines = [
         f"Run {s.run_id} ({s.mode})",
         "Survivorship note: universe.yaml is today's constituent list; past-period results are overstated.",
