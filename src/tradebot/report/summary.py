@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from tradebot.config import ChargesConfig
+from tradebot.engine.clock import date_of
 from tradebot.execution.charges import position_charges
 from tradebot.store.repo import Repo
 
@@ -84,11 +85,17 @@ def row_charges(r, schedule: Optional[ChargesConfig]) -> Tuple[float, bool, bool
         return 0.0, False, True
 
 
-def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = None) -> Summary:
+def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = None,
+                  since_ts: Optional[int] = None) -> Summary:
+    """`since_ts`, when given, scores only positions opened at or after it and only daily rows dated
+    on or after its IST date - so a filter-on run's warm-up days (rejected regime_not_ready, not on
+    the strategy's merit) do not cost a filter-off comparison run its own early days too (D3)."""
     run = repo.get_run(run_id)
     if run is None:
         raise ValueError(f"unknown run: {run_id}")
     rows = repo.list_positions(run_id)
+    if since_ts is not None:
+        rows = [r for r in rows if r["opened_at"] >= since_ts]
     closed = sorted((r for r in rows if r["closed_at"] is not None and not r["adopted"]), key=lambda r: r["closed_at"])
     adopted_closed = [r for r in rows if r["closed_at"] is not None and r["adopted"]]
     costs = [row_charges(r, schedule) for r in closed]
@@ -103,6 +110,9 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
             total_risk += risk
             total_risked_net += p
     days = [dict(d) for d in repo.daily_pnl(run_id)]
+    if since_ts is not None:
+        since_date = date_of(since_ts).isoformat()
+        days = [d for d in days if d["date"] >= since_date]
     wins = sum(1 for p in pnls if p > 0)
     return Summary(
         run_id=run_id,

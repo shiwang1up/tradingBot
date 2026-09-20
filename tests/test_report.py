@@ -206,6 +206,33 @@ def test_row_charges_exit_price_none_is_not_unknown(repo):
     assert row_charges(row, ChargesConfig()) == (0.0, False, False)
 
 
+def test_since_ts_filters_positions_by_opened_at(repo):
+    """D3: `since_ts` keeps only positions opened at or after it, so a filter-on run's warm-up days
+    (all rejected regime_not_ready) can be scored against a filter-off run over the same days."""
+    _seed(repo)
+    s = build_summary(repo, "r1", since_ts=15)
+    assert s.trades == 3 and s.wins == 1 and s.losses == 2      # the first trade (opened_at=5) drops out
+    assert s.total_pnl == pytest.approx(-10 - 10 + 5)
+    assert s.open_positions == 1                                # OPEN's opened_at=60 >= 15: still counted
+    assert s.adopted_trades == 0                                # ADO's opened_at=1 < 15: excluded now
+    unfiltered = build_summary(repo, "r1")
+    assert unfiltered.trades == 4                                # sanity: since_ts=None is unchanged
+
+
+def test_since_ts_filters_daily_pnl_rows_by_ist_date(repo):
+    """D3: daily rows dated before the IST date of since_ts must not enter the summary."""
+    from datetime import date
+
+    from tradebot.engine.clock import ist_epoch
+    repo.create_run("sd1", "backtest", 0, "{}")
+    repo.upsert_daily_pnl("sd1", "2026-09-14", realised=10.0, unrealised=0.0, fills=1, entries_placed=1)
+    repo.upsert_daily_pnl("sd1", "2026-09-15", realised=20.0, unrealised=0.0, fills=1, entries_placed=1)
+    since = ist_epoch(date(2026, 9, 15), "00:00")
+    s = build_summary(repo, "sd1", since_ts=since)
+    assert [d["date"] for d in s.days] == ["2026-09-15"]
+    assert build_summary(repo, "sd1") is not None and len(build_summary(repo, "sd1").days) == 2
+
+
 def test_r_on_risk_pools_all_trades_instead_of_averaging_per_trade(repo):
     """Avg R is an unweighted mean over trades, so a scrap-sized position with a razor-thin stop can
     dominate it once the per-order brokerage floor eats most of its tiny risk. R on risk pools net
