@@ -13,10 +13,19 @@ Conventions:
   planned entry. "R on risk" pools net PnL and rupees at risk over every trade before dividing, so
   a scrap-sized position with a razor-thin stop cannot dominate it the way it can dominate an
   unweighted mean of per-trade R; its sign is the sign of net PnL over those trades.
+- Expectancy is the net PnL per trade; the printed decomposition
+  `win_rate x avg_win - loss_rate x |avg_loss|` is the same number by identity, shown because it is
+  the form the trade-off between win rate and payoff is usually argued in. The breakeven win rate is
+  1 / (1 + payoff): the win rate this system's own payoff would need to break even.
+- Evidence (days, mean, t) is computed from the trades' NET PnL summed per IST close date, NOT from
+  the daily_pnl rows: those are gross for runs whose charges were estimated after the fact, and one
+  source keeps the block internally consistent. The day is the unit because same-day trades are
+  correlated.
 """
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
@@ -54,6 +63,14 @@ class Summary:
     charges_estimated_trades: int = 0  # how many of `trades` those were
     charges_unknown: int = 0         # closed rows whose charges could not be computed at all
     r_on_risk: float = 0.0           # net PnL / rupees at risk, pooled over the trades that entered avg_r
+    avg_win: float = 0.0             # mean net PnL of winning trades
+    avg_loss: float = 0.0            # mean net PnL of the rest, negative; a scratch counts as a loss
+    payoff: float = 0.0              # avg_win / |avg_loss|
+    expectancy: float = 0.0          # net PnL per trade
+    breakeven_win_rate: float = 0.0  # 1 / (1 + payoff): what this payoff would need to break even
+    evidence_days: int = 0           # days with at least one closed trade
+    evidence_mean: float = 0.0       # mean net PnL per such day
+    evidence_t: Optional[float] = None  # None when fewer than 2 days or no variance
     days: list = field(default_factory=list)
 
 
@@ -83,6 +100,21 @@ def row_charges(r, schedule: Optional[ChargesConfig]) -> Tuple[float, bool, bool
     except ValueError as e:
         log.warning("position %s: could not estimate charges: %s: %s", r["id"], type(e).__name__, e)
         return 0.0, False, True
+
+
+def _day_t(day_pnls: list) -> Tuple[float, Optional[float]]:
+    """(mean, t) of a per-day PnL series. t is None with fewer than two days or no variance: a
+    single day, or a run of identical days, says nothing about whether the mean differs from zero."""
+    n = len(day_pnls)
+    if n == 0:
+        return 0.0, None
+    mean = sum(day_pnls) / n
+    if n < 2:
+        return mean, None
+    var = sum((p - mean) ** 2 for p in day_pnls) / (n - 1)
+    if var <= 0:
+        return mean, None
+    return mean, mean / math.sqrt(var / n)
 
 
 def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = None,
@@ -117,6 +149,15 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
         since_date = date_of(since_ts).isoformat()
         days = [d for d in days if d["date"] >= since_date]
     wins = sum(1 for p in pnls if p > 0)
+    win_pnls = [p for p in pnls if p > 0]
+    loss_pnls = [p for p in pnls if p <= 0]
+    avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0.0
+    avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0.0
+    payoff = avg_win / abs(avg_loss) if avg_loss < 0 and avg_win > 0 else 0.0
+    by_day: dict = {}
+    for r, p in zip(closed, pnls):
+        by_day[date_of(r["closed_at"])] = by_day.get(date_of(r["closed_at"]), 0.0) + p
+    evidence_mean, evidence_t = _day_t([by_day[d] for d in sorted(by_day)])
     return Summary(
         run_id=run_id,
         mode=run["mode"],
@@ -141,6 +182,14 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
         charges_estimated_trades=sum(1 for _, e, _ in costs if e),
         charges_unknown=sum(1 for _, _, u in costs if u),
         r_on_risk=(total_risked_net / total_risk) if total_risk > 0 else 0.0,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
+        payoff=payoff,
+        expectancy=(sum(pnls) / len(pnls)) if pnls else 0.0,
+        breakeven_win_rate=(1 / (1 + payoff)) if payoff > 0 else 0.0,
+        evidence_days=len(by_day),
+        evidence_mean=evidence_mean,
+        evidence_t=evidence_t,
         days=days,
     )
 

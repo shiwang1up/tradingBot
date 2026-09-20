@@ -255,3 +255,64 @@ def test_r_on_risk_pools_all_trades_instead_of_averaging_per_trade(repo):
     assert s.r_on_risk == pytest.approx(9.9 / 10.1)
     text = format_summary(s)
     assert "R on risk" in text
+
+
+def test_expectancy_identity_payoff_and_breakeven(repo):
+    """Four closed trades with stored charges: two wins of +20 and +10 net, two losses of -30 and -10 net.
+    avg_win 15, avg_loss -20, payoff 0.75, expectancy (2/4)*15 - (2/4)*20 = -2.5 = total/trades = -10/4."""
+    repo.create_run("e1", "backtest", 0, "{}")
+    for i, (exit_price, pnl, ch) in enumerate([(102.0, 25.0, 5.0), (101.0, 15.0, 5.0),
+                                               (97.0, -25.0, 5.0), (99.0, -5.0, 5.0)]):
+        p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, i, "c%d" % i, "ema_rsi")
+        repo.close_position(repo.insert_position("e1", p), 10 + i, exit_price, "TARGET", pnl, charges=ch)
+    s = build_summary(repo, "e1")
+    assert (s.trades, s.wins, s.losses) == (4, 2, 2)
+    assert s.avg_win == pytest.approx(15.0)
+    assert s.avg_loss == pytest.approx(-20.0)
+    assert s.payoff == pytest.approx(0.75)
+    assert s.expectancy == pytest.approx(-2.5)
+    # the identity the printed line claims
+    assert s.expectancy == pytest.approx(s.win_rate * s.avg_win - (1 - s.win_rate) * abs(s.avg_loss))
+    assert s.expectancy == pytest.approx(s.total_pnl / s.trades)
+    assert s.breakeven_win_rate == pytest.approx(1 / (1 + 0.75))
+
+
+def test_expectancy_is_zero_and_payoff_zero_without_trades(repo):
+    repo.create_run("e2", "backtest", 0, "{}")
+    s = build_summary(repo, "e2")
+    assert (s.avg_win, s.avg_loss, s.payoff, s.expectancy, s.breakeven_win_rate) == (0.0, 0.0, 0.0, 0.0, 0.0)
+    assert (s.evidence_days, s.evidence_t) == (0, None)
+
+
+def test_evidence_is_computed_across_close_dates_not_trades(repo):
+    """Six trades on three IST dates: day sums +100, -50, +10. mean 20; deviations +80, -70, -10,
+    so var = (6400 + 4900 + 100) / 2 = 5700, sd 75.498344, se 43.588989, t 0.458831. Trades on one
+    day are correlated, so the day is the unit."""
+    from tradebot.engine.clock import ist_epoch
+    from datetime import date
+    repo.create_run("e3", "backtest", 0, "{}")
+    per_day = {date(2026, 9, 14): [60.0, 40.0], date(2026, 9, 15): [-20.0, -30.0], date(2026, 9, 16): [30.0, -20.0]}
+    i = 0
+    for d, pnls in per_day.items():
+        for pnl in pnls:
+            p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, ist_epoch(d, "09:20"), "c%d" % i, "ema_rsi")
+            repo.close_position(repo.insert_position("e3", p), ist_epoch(d, "10:00"), 100.0 + pnl / 10,
+                                "TARGET", pnl, charges=0.0)
+            i += 1
+    s = build_summary(repo, "e3")
+    assert s.evidence_days == 3
+    assert s.evidence_mean == pytest.approx(20.0)
+    assert s.evidence_t == pytest.approx(0.458831, abs=1e-5)
+
+
+def test_evidence_t_is_none_without_variance_or_enough_days(repo):
+    from tradebot.engine.clock import ist_epoch
+    from datetime import date
+    repo.create_run("e4", "backtest", 0, "{}")
+    for i in range(2):                      # two trades, one day: n=1, no t
+        p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, ist_epoch(date(2026, 9, 14), "09:20"),
+                     "c%d" % i, "ema_rsi")
+        repo.close_position(repo.insert_position("e4", p), ist_epoch(date(2026, 9, 14), "10:00"), 101.0,
+                            "TARGET", 10.0, charges=0.0)
+    s = build_summary(repo, "e4")
+    assert s.evidence_days == 1 and s.evidence_t is None
