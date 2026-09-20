@@ -196,3 +196,34 @@ def test_summarise_reports_the_spread_its_t_and_drawdown():
     assert s["max_dd_port"] == pytest.approx(0.01)          # +3% then -1%: a 1% drawdown from peak
     assert s["mean_turnover"] == pytest.approx(3.0)
     assert s["mean_eligible"] == pytest.approx(40.0)
+
+
+def test_portfolio_cost_rises_as_the_basket_concentrates_capital_into_fewer_names():
+    """1 lakh across 10 names is 10,000 a position; across 5 it is 20,000, which is cheaper per
+    rupee because the 20 rupee brokerage floor and the flat DP charge are spread wider. Charging
+    the daily screen's 25,000 position would understate every cell."""
+    assert ms.portfolio_cost(5) < ms.portfolio_cost(10) < ms.portfolio_cost(20)
+    assert ms.portfolio_cost(10) == pytest.approx(ms.round_trip_cost(10000.0))
+
+
+def test_run_phase_prints_the_primary_the_grid_and_the_caveats(tmp_path):
+    """Shape, not numbers: a tiny four-symbol database must still produce a primary block, the
+    secondary grid and the caveat text, and must never crash on a universe smaller than TOP_N."""
+    import io
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE candles (symbol TEXT, ts INTEGER, interval INTEGER, o REAL, h REAL,"
+                 " l REAL, c REAL, v INTEGER, source TEXT)")
+    base = 1577836800                                   # 2020-01-01 00:00 UTC
+    for si, sym in enumerate(("A", "B", "C", "D")):
+        for k in range(800):                            # ~2.2 years of consecutive days
+            c = 100.0 * (1.0 + 0.0005 * (si + 1)) ** k
+            conn.execute("INSERT INTO candles VALUES (?,?,?,?,?,?,?,0,'official')",
+                         (sym, base + k * 86400, 1440, c, c, c, c))
+    conn.commit(); conn.close()
+    ro = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    buf = io.StringIO()
+    ms.run_phase(ro, ["A", "B", "C", "D"], top_n=2, out=buf)
+    text = buf.getvalue()
+    assert "primary" in text and "spread" in text and "Caveats" in text
+    assert "12-1" in text

@@ -32,6 +32,7 @@ import importlib.util
 import math
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 
 DB = "data/tradebot.db"
@@ -264,13 +265,122 @@ def format_run(label, s, cost):
     ])
 
 
+SECONDARY_LOOKBACKS = (12, 6, 3)        # the primary is 12; 6 and 3 are descriptive only
+SECONDARY_TOP_NS = (5, 10, 15)          # the primary is 10
+CAPITAL = 100_000.0                     # the notional the portfolio is sized against
+
+
+def portfolio_cost(top_n):
+    """Round trip as a fraction, at the position value this portfolio actually trades. Splitting
+    1 lakh across ten names is 10,000 a position, where the 20 rupee brokerage floor and the flat
+    DP charge cost 71 bps a round trip against 57 at the daily screen's 25,000. Charging the
+    cheaper number would understate the one thing that has killed every strategy tried so far, and
+    it would let a more concentrated grid cell look cheaper than it is rather than dearer."""
+    return round_trip_cost(CAPITAL / float(top_n))
+
+
+def run_phase(conn, symbols, top_n=TOP_N, out=sys.stdout):
+    cost = portfolio_cost(top_n)
+    closes, bars = load_closes(conn, symbols)
+    masked = {s: gap_mask(b) for s, b in bars.items()}
+    missing = [s for s in symbols if s not in closes]
+    print("%d symbols with daily candles%s"
+          % (len(closes), ("; no candles for " + ", ".join(missing)) if missing else ""), file=out)
+    short = sorted((s, min(by), max(by)) for s, by in closes.items()
+                   if min(by) > date(2020, 2, 1) or max(by) < date(2025, 11, 1))
+    print("short or truncated histories: %s"
+          % ("; ".join("%s %s..%s" % x for x in short) if short else "none"), file=out)
+    print("", file=out)
+
+    months = run_months(closes, masked, top_n=top_n, cost=cost)
+    s = summarise(months)
+    label = "primary  12-1 momentum, top %d, monthly" % top_n
+    if months:
+        label += "   %s..%s" % (months[0]["rank_date"], months[-1]["rank_date"])
+    print(format_run(label, s, cost), file=out)
+    print("", file=out)
+
+    # Stability, not a holdout: the same primary split at the end of 2023.
+    early = [m for m in months if m["rank_date"] < date(2024, 1, 1)]
+    late = [m for m in months if m["rank_date"] >= date(2024, 1, 1)]
+    for sub, name in ((early, "  sub-period 2021-2023"), (late, "  sub-period 2024-2025")):
+        if sub:
+            t = summarise(sub)
+            tt = "n/a" if t["t"] is None else "%.2f" % t["t"]
+            print("%s   %d months   spread %+.3f%%/mo   t %s"
+                  % (name, t["months"], t["mean_spread"] * 100, tt), file=out)
+    print("", file=out)
+
+    print("secondary grid (descriptive only; the decision is the primary cell above)", file=out)
+    print("  %-10s%s" % ("", "".join("%14s" % ("top %d" % n) for n in SECONDARY_TOP_NS)), file=out)
+    for lb in SECONDARY_LOOKBACKS:
+        cells = []
+        for n in SECONDARY_TOP_NS:
+            g = summarise(run_months(closes, masked, top_n=n, cost=portfolio_cost(n),
+                                     lookback=lb))
+            gt = "n/a" if g["t"] is None else "%.1f" % g["t"]
+            cells.append("%14s" % ("%+.2f%% t%s" % (g["mean_spread"] * 100, gt)))
+        print("  %-10s%s" % ("%d-1" % lb, "".join(cells)), file=out)
+    print("", file=out)
+    print(CAVEATS, file=out)
+
+
+def quintiles_phase(conn, symbols, out=sys.stdout):
+    """Mean monthly return of each of the five ranked groups. Monotonic ordering from top to bottom
+    is far harder to produce by chance than one significant cell, and the bottom group is a
+    built-in control: if top and bottom perform alike, the ranking carries no information."""
+    closes, bars = load_closes(conn, symbols)
+    masked = {s: gap_mask(b) for s, b in bars.items()}
+    all_dates = sorted({d for by in closes.values() for d in by})
+    ends = month_ends(all_dates)
+    buckets = [[] for _ in range(QUINTILES)]
+    for i, rank_date in enumerate(ends):
+        j_skip, j_start = i - SKIP_MONTHS, i - (LOOKBACK_MONTHS + SKIP_MONTHS)
+        if j_start < 0 or i + 1 >= len(ends):
+            continue
+        entry = next_trading_day(all_dates, rank_date)
+        exit_ = next_trading_day(all_dates, ends[i + 1])
+        if entry is None or exit_ is None:
+            continue
+        names = eligible(closes, masked, rank_date, ends[j_skip], ends[j_start])
+        if len(names) < QUINTILES:
+            continue
+        ranked = sorted(names, key=lambda s: momentum_score(
+            closes[s], rank_date, ends[j_skip], ends[j_start]), reverse=True)
+        for g, group in enumerate(split_quintiles(ranked)):
+            r = basket_return(closes, group, entry, exit_)
+            if r is not None:
+                buckets[g].append(r)
+    print("quintiles by 12-1 momentum, gross of costs (group 1 = highest ranked)", file=out)
+    print("  %-8s%10s%10s" % ("group", "months", "mean/mo"), file=out)
+    for g, rs in enumerate(buckets, 1):
+        m = (sum(rs) / len(rs) * 100) if rs else 0.0
+        print("  %-8d%10d%9.3f%%" % (g, len(rs), m), file=out)
+    spread = ((sum(buckets[0]) / len(buckets[0])) - (sum(buckets[-1]) / len(buckets[-1]))) * 100 \
+        if buckets[0] and buckets[-1] else 0.0
+    print("  top minus bottom: %+.3f%%/mo (gross; a ranking that carries no information gives ~0)"
+          % spread, file=out)
+    print("", file=out)
+    print(CAVEATS, file=out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("phase", choices=["run", "quintiles"])
     ap.add_argument("--db", default=DB)
     a = ap.parse_args()
-    sys.exit("phase %s is not implemented yet" % a.phase)
+    from tradebot.config import load_config
+    from tradebot.data.universe import load_universe
+    symbols = list(load_universe(load_config("config.yaml").paths.universe).symbols)
+    conn = sqlite3.connect("file:%s?mode=ro" % a.db, uri=True)
+    try:
+        if a.phase == "run":
+            run_phase(conn, symbols)
+        else:
+            quintiles_phase(conn, symbols)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
