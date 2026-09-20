@@ -143,6 +143,20 @@ def test_duplicate_range_bar_is_not_double_counted():
     assert out == [None, None, None]
 
 
+def test_a_late_range_bar_after_completion_does_not_widen_the_range():
+    # A stray range-window bar (an off-grid timestamp, as from a data glitch) that arrives after the
+    # range was already declared complete must not retroactively widen it, even though its ts is
+    # newer than last_range_ts and would otherwise be accepted as a fresh range bar.
+    s = OrbStrategy(PARAMS)
+    for c in bars(RANGE + [INSIDE]):
+        s.on_candle(c)
+    before = s.snapshot("X")
+    stray_ts = ist_epoch(D1, "09:15") + 1000   # inside the range window, after last_range_ts (09:30)
+    stray = Candle("X", stray_ts, 200.0, 300.0, 50.0, 250.0, 1000)
+    assert s.on_candle(stray) is None
+    assert s.snapshot("X") == before
+
+
 def test_bars_before_the_open_are_ignored():
     pre = Candle("X", ist_epoch(D1, "09:00"), 90.0, 120.0, 80.0, 100.0, 1)
     s = OrbStrategy(PARAMS)

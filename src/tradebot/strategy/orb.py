@@ -98,8 +98,9 @@ class OrbStrategy(Strategy):
         if candle.ts < st.open_ts:
             return None
         if candle.ts < st.range_end:
-            if st.last_range_ts is not None and candle.ts <= st.last_range_ts:
-                return None  # a repeated or out-of-order bar; do not count it twice into the range
+            if st.complete or (st.last_range_ts is not None and candle.ts <= st.last_range_ts):
+                return None  # a repeated or out-of-order bar; do not count it twice into the range,
+                             # and a bar can't widen a range already declared complete
             st.last_range_ts = candle.ts
             st.high = candle.high if st.high is None else max(st.high, candle.high)
             st.low = candle.low if st.low is None else min(st.low, candle.low)

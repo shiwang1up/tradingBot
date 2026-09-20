@@ -228,8 +228,11 @@ def _validate(cfg: "Config") -> None:
     orb = cfg.strategy.get("orb")
     if isinstance(orb, dict):  # the strategy counts range bars itself, so its copy of these must not drift
         checks.append((orb.get("interval_minutes") == e.interval_minutes,
-                       "strategy.orb.interval_minutes must equal execution.interval_minutes"))
-        checks.append((orb.get("session_open") == s.open, "strategy.orb.session_open must equal session.open"))
+                       f"strategy.orb.interval_minutes must equal execution.interval_minutes ({e.interval_minutes}), "
+                       f"got {orb.get('interval_minutes')!r}"))
+        checks.append((orb.get("session_open") == s.open,
+                       f"strategy.orb.session_open must equal session.open ({s.open!r}), "
+                       f"got {orb.get('session_open')!r}"))
     for ok, msg in checks:
         if not ok:
             raise ValueError(f"config.yaml {msg}")

@@ -238,7 +238,7 @@ def test_charges_section_absent_key_means_groww_defaults(tmp_path):
 
 def test_shipped_configs_carry_the_charges_block(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    for name in ("config.yaml", "config-15m.yaml"):
+    for name in ("config.yaml", "config-15m.yaml", "config-orb.yaml"):
         cfg = load_config(root / name, tmp_path / "nonexistent.env")
         assert "charges" in cfg.raw, name
         assert cfg.charges.enabled is True, name
@@ -260,6 +260,7 @@ def test_config_orb_loads_and_builds_the_strategy(tmp_path):
     root = Path(__file__).resolve().parents[1]
     cfg = load_config(root / "config-orb.yaml", tmp_path / "nonexistent.env")
     assert cfg.execution.interval_minutes == 15 and cfg.strategy["orb"] == ORB
+    assert set(cfg.strategy) == {"orb", "indicators"}  # no default-strategy trap: a forgotten --strategy must fail
     assert (cfg.risk.max_entries_per_day, cfg.risk.max_open_positions) == (2, 2)
     assert cfg.session.no_new_entries_after == "13:00" and cfg.charges.enabled is True
     assert cfg.paths.db == load_config(root / "config.yaml", tmp_path / "nonexistent.env").paths.db

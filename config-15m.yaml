@@ -86,14 +86,14 @@ charges:                        # Groww intraday equity; check against groww.in/
 session:
   open: "09:15"
   close: "15:30"
-  square_off: "15:10"
-  no_new_entries_after: "14:45"
+  square_off: "15:10"          # on 15-minute bars the square-off bar is 14:45, so positions are flattened at its close, 15:00
+  no_new_entries_after: "14:45" # last signal bar opens 14:30; its order fills at the 14:45 open
   holidays: []                # ISO dates, e.g. "2026-10-02"
 
 data:
   official_fetch_concurrency: 5
   bar_grace_sec: 5              # paper: wait this long after the boundary before fetching the closed bar
-  warmup_bars: 300              # paper: stored bars replayed per symbol before the first live bar (~4 days)
+  warmup_bars: 300              # paper: stored bars replayed per symbol before the first live bar (~12 sessions of 15-minute bars)
 
 paths:
   db: data/tradebot.db
