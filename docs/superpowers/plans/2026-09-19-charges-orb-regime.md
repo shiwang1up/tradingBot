@@ -2142,3 +2142,69 @@ Expected: only the notes file and `README.md`.
 git add docs/superpowers/notes/2026-09-19-charges-orb-regime-results.md README.md
 git commit -m "notes: results net of charges, ORB tuning and holdout, regime on/off; README"
 ```
+
+---
+
+# Amendments after the phase 2 reviews
+
+The task texts for phase 3 were written before the engine gained `_usable` and before the ORB tuning results. These amendments override them.
+
+
+## AMENDMENTS TO TASK 13 (these OVERRIDE the text above where they conflict)
+
+The task text above was written before the engine gained `Engine._usable(candles)` (it drops candles with non-finite or non-positive OHLC and is today the FIRST statement of `process_bar`, and is called in `PaperEngine.warm`). Do not undo that.
+
+A1. **Order: `_usable` first, then `_split_index`.** In `process_bar` the first statement becomes `candles = self._split_index(self._usable(candles))` (replacing the existing `candles = self._usable(candles)`). In `PaperEngine.warm` the loop body becomes `bar = self._split_index(self._usable(by_ts[ts]))`, then `_observe(bar)` and `_run_strategies(bar)`: KEEP the `_usable` call there. A bad index candle is thereby dropped before the filter sees it, and the filter keeps its last state. Add a test: an index candle with NaN prices on the signal bar keeps the last regime state and the bar still processes (the FixedStrategy signal on that bar gets `regime`, not an exception).
+
+A2. **`RegimeFilter.rejection` is loud on a bad direction.** Any direction other than "LONG" or "SHORT" raises `ValueError`. Add a test. (File: `src/tradebot/risk/regime.py`, `tests/test_regime.py`.)
+
+A3. **`regime.ema_period` must be >= 2.** With period 1 the EMA equals the close, `close > ema` is never true, and longs are blocked forever without a message. Change the validation in `src/tradebot/config.py` and its message to `regime.ema_period must be >= 2`; update `tests/test_config.py` (the existing `ema_period: 0` case still raises; add `ema_period: 1`). The engine tests in this task use `ema_period: 3`, which stays valid.
+
+A4. **A bar whose only candle is the index must not reach the broker.** Adding the index to the historical source adds any index-only timestamp to `bar_timestamps()`; `process_bar` on such a bar would call `broker.on_bar(ts, {})`, which marks every pending entry unfilled (`no_candle`), even with the filter off. In `BacktestEngine.run`, after fetching `candles = self.source.candles_at(ts)` and before the day bookkeeping, skip a bar that has no tradable candle: if `self._index_symbol` and every symbol in `candles` is the index, call `self._split_index(self._usable(candles))` (so the filter still sees it) and `continue`. Add a test: a pending entry placed on bar t, an index-only timestamp between t and t+1, and the entry still fills at bar t+1's open.
+
+A5. **Paper: warn when the filter is not ready after warm-up.** At the end of `PaperEngine.warm`, if `self._regime is not None and self._regime.state == "NOT_READY"`, log one warning saying every entry will be rejected as `regime_not_ready` until the index has `ema_period` bars. No test needed beyond not breaking existing ones.
+
+A6. **Remove the copied comment.** In `tests/test_config.py`, the shipped-config regime test carries a comment about a "rate correction" copied from the charges test; delete or reword it so it is true for the regime section.
+
+Expected test count in the task text is stale; report the actual number.
+
+
+## AMENDMENTS TO TASK 14 (these OVERRIDE the text above where they conflict)
+
+B1. **The composite level must never become non-finite.** Compute the new level into a local variable and assign `self._composite_level` (and feed the filter) only if it is finite and > 0; otherwise keep the last level and state. (Candles are already filtered by `_usable` before `_split_index`, so this is a second line of defence.)
+
+B2. **Minimum breadth.** A bar on which only a few symbols have a return (fetch failures in paper mode, the partial first bar of a data set) would let two or three names drive the "index". Skip the update, keeping the last state, when `len(returns) < max(1, len(self._last_close) // 2)`: `_last_close` holds every symbol seen so far, which is the natural denominator. Add a test: with previous closes known for 4 symbols, a bar carrying only 1 of them does not change the regime state or the composite level.
+
+B3. Document in the method's docstring that a symbol returning after a missing bar contributes a two-bar return, and that an unadjusted split would move the level by about 1/N in one bar; both accepted.
+
+Expected test count in the task text is stale; report the actual number.
+
+
+## AMENDMENTS TO TASK 15 (these OVERRIDE the text above where they conflict)
+
+C1. **`_with_index` puts the index FIRST** (`[idx] + list(symbols)`): under the paper fetch budget the last symbols submitted are the likeliest to be cut off, and the index feeds a gate on every entry. Order does not matter to strategies because the index is stripped before they run.
+
+C2. **`_with_index` refuses an index that is also a universe symbol:** raise `click.ClickException(f"data.index_symbol {idx!r} is also in the universe; the engine would strip a tradable symbol from every bar")`. Add a test.
+
+C3. In `test_fetch_data_also_fetches_the_index`, the assertion `set(calls) == {"RELIANCE", "NIFTY"}` stays valid; additionally assert the index was fetched first (`calls[0] == "NIFTY"`).
+
+Expected test count in the task text is stale; report the actual number.
+
+
+## AMENDMENTS TO TASK 16 (these OVERRIDE the text above where they conflict)
+
+Status when this was written: the six ORB tuning runs are stored and all negative on `R on risk` (-0.29 to -0.35); the `orb-holdout` run has NOT been run and whether to run it is the user's decision. Groww login currently fails (approval-flow key not approved today), so Step 1 (fetching NIFTY) may be impossible; the composite source needs no index data and the universe is the Nifty 50, so it is a fair stand-in.
+
+D1. **The regime phase runs the TUNING window only.** `regime_phase` runs each (strategy, filter off/on) pair on `TUNE` alone: four runs, ids `rg-<strategy>-<off|on>-tune`. It must NOT touch the holdout window. A separate, explicit `--with-holdout` flag may add the holdout window, and must refuse unless a run named `orb-holdout` already exists (so the run-once discipline cannot be bypassed by this phase). Do NOT pass `--with-holdout` in this task.
+
+D2. **Same guards as the holdout phase:** the KILL-file refusal applies to EVERY phase (a `tune` or `regime` run under a KILL file burns run ids the same way); move it to the top of `main`.
+
+D3. **Score on/off on the same days.** The filter rejects everything as `regime_not_ready` until its EMA is warm (most of day 1 on 15-minute bars, more if index history starts late), so a filter-on run loses days for a reason unrelated to its merit. Add `since_ts: Optional[int] = None` to `build_summary` (`src/tradebot/report/summary.py`): when given, only positions with `opened_at >= since_ts` and only `daily_pnl` rows dated on or after that IST date enter the summary; test it in `tests/test_report.py`. In the script, for each strategy compute `since` = the open of the first trading day AFTER the last day on which the filter-on run recorded any `regime_not_ready` rejection (window start if there were none), and print BOTH rows of the pair scored from `since`, plus the filter-on run's `regime_not_ready` and `regime` rejection counts.
+
+D4. **Say what the comparison is.** A regime rejection happens before the risk check and takes no daily slot, so filter-on substitutes lower-ranked signals for the blocked ones; it is not "filter-off minus the blocked trades". Put this in the script's docstring.
+
+D5. **Decision rule** (tuning window only, since the holdout is not touched): the filter is "worth validating" for a strategy only if `R on risk` with the filter on is higher than off AND greater than zero. "Loses less" is recorded as: the filter trades less of a losing strategy.
+
+D6. **Source:** try Step 1 (fetch) once with each config; if login or the index fetch fails, do not retry and do not stop: run the regime phase with `--source composite` and say so in the report. With `--source composite` the script must set `regime.source` on the config it passes to the engine (the engine reads `cfg.regime.source`).
+
+D7. **Completeness check** fix in `check_holdout_data` (used only by the holdout phase): a symbol-day with ZERO bars is currently not counted as incomplete. Compute `incomplete = len(days) * len(symbols) - (number of symbol-days with exactly the expected bars)`, print the symbol total as the denominator, read the session open/close from `cfg.session` instead of hard-coding 09:15/15:30, close the connection it opens, and make the holdout phase EXIT when `incomplete > 0` unless `--accept-gaps` is passed. Add a unit test for the function in a new `tests/test_orb_experiment.py` by importing it from the script path (`importlib.util.spec_from_file_location`), using an in-memory database: symbol A complete on two days, B missing all of day 2, C absent entirely -> 2 days, 3 incomplete symbol-days of 6.

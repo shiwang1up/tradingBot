@@ -200,3 +200,24 @@ and warm-up. `test_report.py` and `test_compare.py`: gross/charges/net and the e
 
 Code and tests per phase, `config-orb.yaml`, and `docs/superpowers/notes/2026-09-19-charges-orb-regime-results.md`
 with the re-stated old runs net of charges, the six tuning runs, the holdout and the eight regime runs.
+
+## Amendments (2026-09-20, after the ORB tuning runs)
+
+- **ORB tuning result:** all six parameter sets are negative on R on risk (-0.29 to -0.35) over 41 days;
+  every position was re-derived independently from raw candles and matched. The holdout has not been run;
+  running it is the user's decision, since it can only confirm a rejection and would stop the window
+  being clean for other ORB variants.
+- **Regime experiment uses the tuning window only.** The filter is worth validating out of sample for a
+  strategy only if R on risk with the filter on is higher than off AND above zero. Filter-on and
+  filter-off runs are scored on the same days (from the first session after the filter's EMA is warm).
+- **Pre-registered alternative regime definition** (written down before any regime result was seen): UP
+  when the index's last close is above TODAY'S SESSION OPEN (the first bar's open), otherwise DOWN. Reason:
+  on 15-minute bars at 09:45 a 20-bar EMA is about 80% yesterday's prices, so "above the EMA" is mostly
+  the overnight gap, and it is blind to a gap up that fades from the open, the case that matters most for
+  ORB. The alternative needs no state across days and no warm-up and does not depend on the bar interval.
+  It is the ONLY alternative that may be evaluated, on the tuning window only, and only after the EMA
+  version has been measured. `ema_period` stays fixed at 20.
+- **Engine ordering:** `_usable` runs before `_split_index`; the composite level never becomes non-finite
+  and is not updated on a bar where fewer than half the known symbols have a return; a bar whose only
+  candle is the index does not reach the broker.
+- **Index fetch:** the index is fetched first; an `index_symbol` that is also a universe symbol is refused.
