@@ -91,6 +91,78 @@ def gap_mask(bars, threshold=GAP_THRESHOLD, mask_days=GAP_MASK_DAYS):
     return masked
 
 
+# -- indicators. Each returns a list aligned with the bars, None until warm; no lookahead: index i
+# uses only bars 0..i.
+def sma(values, n):
+    out, total = [None] * len(values), 0.0
+    for i, v in enumerate(values):
+        total += v
+        if i >= n:
+            total -= values[i - n]
+        if i >= n - 1:
+            out[i] = total / n
+    return out
+
+
+def rsi_wilder(closes, n):
+    out = [None] * len(closes)
+    if len(closes) <= n:
+        return out
+    gains = losses = 0.0
+    for i in range(1, n + 1):
+        d = closes[i] - closes[i - 1]
+        gains += max(d, 0.0)
+        losses += max(-d, 0.0)
+    avg_gain, avg_loss = gains / n, losses / n
+    out[n] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    for i in range(n + 1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        avg_gain = (avg_gain * (n - 1) + max(d, 0.0)) / n
+        avg_loss = (avg_loss * (n - 1) + max(-d, 0.0)) / n
+        out[i] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    return out
+
+
+def atr_wilder(bars, n):
+    out = [None] * len(bars)
+    if len(bars) <= n:
+        return out
+    trs = [0.0]
+    for i in range(1, len(bars)):
+        b, p = bars[i], bars[i - 1]
+        trs.append(max(b.high - b.low, abs(b.high - p.close), abs(b.low - p.close)))
+    atr = sum(trs[1:n + 1]) / n
+    out[n] = atr
+    for i in range(n + 1, len(bars)):
+        atr = (atr * (n - 1) + trs[i]) / n
+        out[i] = atr
+    return out
+
+
+def rolling_max_prev(values, n):
+    """max of the n values BEFORE i (i excluded), None until there are n of them."""
+    return [max(values[i - n:i]) if i >= n else None for i in range(len(values))]
+
+
+def rolling_min_prev(values, n):
+    return [min(values[i - n:i]) if i >= n else None for i in range(len(values))]
+
+
+class Indicators(object):
+    """Everything the three systems read, computed once per symbol."""
+
+    def __init__(self, bars):
+        self.bars = bars
+        self.closes = [b.close for b in bars]
+        self.sma5 = sma(self.closes, 5)
+        self.sma50 = sma(self.closes, 50)
+        self.sma200 = sma(self.closes, 200)
+        self.rsi2 = rsi_wilder(self.closes, 2)
+        self.atr20 = atr_wilder(bars, 20)
+        self.max100_prev = rolling_max_prev(self.closes, 100)
+        self.min50_prev = rolling_min_prev(self.closes, 50)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("phase", choices=["fetch", "insample", "holdout"])

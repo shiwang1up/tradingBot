@@ -61,3 +61,38 @@ def test_load_series_reads_daily_candles_only(tmp_path):
     assert list(series) == ["A"] and len(series["A"]) == 2
     assert series["A"][0].close == 1.5 and series["A"][1].open == 2
     assert series["A"][0].date < series["A"][1].date
+
+
+def test_sma_is_none_until_warm_then_the_mean_of_the_last_n():
+    assert ds.sma([1.0, 2.0, 3.0, 4.0], 3) == [None, None, 2.0, 3.0]
+
+
+def test_rsi_wilder_on_a_monotone_rise_is_100_and_on_a_fall_is_0():
+    up = ds.rsi_wilder([1.0, 2.0, 3.0, 4.0, 5.0], 2)
+    assert up[0] is None and up[1] is None and up[2] == pytest.approx(100.0)
+    down = ds.rsi_wilder([5.0, 4.0, 3.0, 2.0, 1.0], 2)
+    assert down[-1] == pytest.approx(0.0)
+
+
+def test_rsi_wilder_hand_worked():
+    """closes 10, 11, 10.5, 11.5 with n=2. Deltas +1, -0.5, +1.
+    Seed after 2 deltas: avg gain 0.5, avg loss 0.25 -> RS 2 -> RSI 66.6667.
+    Next: gain (0.5*1 + 1)/2 = 0.75, loss (0.25*1 + 0)/2 = 0.125 -> RS 6 -> RSI 85.7143."""
+    out = ds.rsi_wilder([10.0, 11.0, 10.5, 11.5], 2)
+    assert out[2] == pytest.approx(66.66667, abs=1e-4)
+    assert out[3] == pytest.approx(85.71429, abs=1e-4)
+
+
+def test_atr_wilder_hand_worked():
+    """Three bars of true range 2 each after the first: ATR(2) seeds at 2 and stays 2."""
+    bars = _bars([("2020-01-01", 10, 11, 9, 10), ("2020-01-02", 10, 11, 9, 10),
+                  ("2020-01-03", 10, 11, 9, 10), ("2020-01-04", 10, 11, 9, 10)])
+    out = ds.atr_wilder(bars, 2)
+    assert out[0] is None and out[1] is None
+    assert out[2] == pytest.approx(2.0) and out[3] == pytest.approx(2.0)
+
+
+def test_rolling_extremes_exclude_the_current_bar():
+    """A breakout must clear the PREVIOUS n closes; including today's would make it trivially true."""
+    assert ds.rolling_max_prev([1.0, 5.0, 3.0, 2.0], 2) == [None, None, 5.0, 5.0]
+    assert ds.rolling_min_prev([4.0, 1.0, 3.0, 2.0], 2) == [None, None, 1.0, 1.0]
