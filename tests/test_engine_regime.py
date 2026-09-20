@@ -169,6 +169,22 @@ def test_composite_regime_needs_no_index_candles(repo, tmp_path):
     assert decisions(repo) == [("A", "LONG", 0, "regime"), ("A", "SHORT", 1, "ok")]
 
 
+def test_composite_regime_rising_universe_blocks_shorts(repo, tmp_path):
+    """Job A review item 1: the feed-before-observe order is the one invariant the docstrings call
+    a must, and it was unpinned - a reviewer swapped it in both call sites and the whole suite still
+    passed, because with the order swapped every composite return is close/close - 1 == 0, the level
+    never moves, and both existing composite tests use a FALLING universe expecting DOWN, which a
+    permanently-flat, never-warmed filter also produces. A RISING universe is the only way to tell
+    the two apart: a correctly-fed composite goes UP and blocks the SHORT; a flat one stays
+    NOT_READY (never > or <= its own EMA in a way that resolves) and blocks nothing the same way
+    DOWN would have looked the same on a falling series."""
+    cfg = make_config(tmp_path, regime={"enabled": True, "source": "composite", "ema_period": 3})
+    candles = _drift("A", MON, 100.0, 0.1) + _drift("B", MON, 200.0, 0.2)
+    run_fixed(repo, cfg, candles, {("A", ist_epoch(MON, "10:00")): ("SHORT", 0.0),
+                                   ("A", ist_epoch(MON, "10:30")): ("LONG", 0.0)}, ["A", "B"])
+    assert decisions(repo) == [("A", "SHORT", 0, "regime"), ("A", "LONG", 1, "ok")]
+
+
 def test_composite_source_ignores_a_loaded_rising_index_when_the_universe_falls(repo, tmp_path):
     """The engine must honour cfg.regime.source: with 'composite' a present index candle is still
     stripped (no strategy sees it) but never fed to the filter - only the universe's own falling
@@ -194,10 +210,9 @@ def test_index_source_ignores_a_falling_universe_when_the_index_rises(repo, tmp_
 
 def test_composite_skips_a_bar_with_too_few_returns_for_minimum_breadth(repo, tmp_path):
     """Amendment B2: a bar carrying returns for only a few of the symbols `_last_close` knows
-    about (fetch failures in paper mode, the partial first bar of a data set) must not move the
-    composite level or the regime state - not even a hair - regardless of how extreme that one
-    return is. With 4 known symbols, a bar carrying only 1 of them is below the minimum breadth
-    of max(1, 4 // 2) = 2, so it is skipped."""
+    about (fetch failures in paper mode) must not move the composite level or the regime state -
+    not even a hair - regardless of how extreme that one return is. With 4 known symbols, a bar
+    carrying only 1 of them is below the minimum breadth of max(1, 4 // 2) = 2, so it is skipped."""
     cfg = make_config(tmp_path, regime={"enabled": True, "source": "composite", "ema_period": 3})
     eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage),
                          StubFilter(), SessionClock(cfg.session, 5), {}, "t1")
@@ -221,8 +236,10 @@ def test_composite_level_guards_against_a_non_finite_result(repo, tmp_path):
     eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage),
                          StubFilter(), SessionClock(cfg.session, 5), {}, "t1")
     eng._last_close = {"A": 1e-300}     # poisoned: no real candle ever leaves a last close this tiny
-    level_before, state_before = eng._composite_level, eng._regime.state
+    level_before = eng._composite_level
     huge = {"A": Candle("A", 1000, 1e308, 1e308, 1e308, 1e308, 1)}   # ratio overflows to inf
     eng._feed_regime(None, huge)
     assert eng._composite_level == level_before
-    assert eng._regime.state == state_before
+    # No state assertion here: the filter is NOT_READY before and after either way (never warmed
+    # in this test), so it would pass whether or not the guard worked. The level assertion above
+    # is what this test actually pins.

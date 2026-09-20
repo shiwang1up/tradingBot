@@ -159,9 +159,10 @@ class Engine:
         unadjusted split moves the level by about 1/N in one bar - all accepted, same as the index
         source's own EMA would react to an unadjusted split.
 
-        Average only over symbols with both a previous close and a usable candle this bar; below
-        is a no-op (state and level unchanged) when that set is empty, when it is too small to
-        trust (see `_composite_return`), or when the resulting level would be non-finite or <= 0."""
+        Average only over symbols with both a previous close and a usable candle this bar; the
+        update is skipped (state and level left unchanged) when that set is empty, when it is too
+        small to trust (see `_composite_return`), or when the resulting level would be non-finite
+        or <= 0."""
         if self._regime is None:
             return
         if self.cfg.regime.source == "index":
@@ -180,9 +181,14 @@ class Engine:
         """Equal-weight mean close-to-close return of this bar, over symbols that have both a
         previous close in `_last_close` and a usable candle this bar. None (no update) when that
         set is empty, or when it is too small to trust: a bar carrying returns for only a few of
-        the symbols _last_close knows about (fetch failures in paper mode, the partial first bar
-        of a data set) would let two or three names drive the "index", so at least half of
-        `_last_close` (never fewer than one) must be present."""
+        the symbols `_last_close` knows about (fetch failures in paper mode) would let two or
+        three names drive the "index", so at least half of `_last_close` (never fewer than one)
+        must be present. This guards against a bar where most known symbols are missing, not
+        against a thin start: the partial first bar of a data set is not covered by it (the
+        denominator is the symbols seen *so far*, so a thin first bar just sets a thin denominator
+        for the second) - a thin start only ever costs the one update it lands on. `PaperEngine.resume`
+        may also seed `_last_close` with an open position's entry price rather than a real close;
+        that contributes one 1/N-weighted odd return on the first bar after a restart, accepted."""
         returns = [c.close / self._last_close[s] - 1.0 for s, c in tradable.items() if self._last_close.get(s)]
         if not returns or len(returns) < max(1, len(self._last_close) // 2):
             return None

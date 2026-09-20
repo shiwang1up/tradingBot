@@ -58,6 +58,20 @@ class Compare:
     rows: list = field(default_factory=list)
 
 
+def _effective_regime(cfg: dict):
+    """The regime section as it actually behaves, not as stored: disabled reads as absent (an
+    older run with no 'regime' key at all must not warn against a newer run that stores the
+    (disabled, default) section explicitly), and a 'source: index' run also carries the index
+    symbol it gates on - two runs can store the identical 'regime' section yet trade against
+    different indices via data.index_symbol, which is not itself a COMPARABLE_KEYS entry."""
+    regime = cfg.get("regime") or {}
+    if not regime.get("enabled"):
+        return None
+    if regime.get("source", "index") == "index":
+        return regime, (cfg.get("data") or {}).get("index_symbol")
+    return regime, None
+
+
 def _compat_warnings(repo: Repo, run_a: str, run_b: str, a: Summary, b: Summary) -> list:
     out = []
     if a.mode != "backtest" or b.mode != "backtest":
@@ -70,11 +84,7 @@ def _compat_warnings(repo: Repo, run_a: str, run_b: str, a: Summary, b: Summary)
     for key in COMPARABLE_KEYS:
         if ca.get(key) != cb.get(key):
             out.append(f"runs differ in '{key}': the comparison may not be like-for-like")
-    # The effective regime, not the raw section: an older run with no 'regime' key at all must not
-    # warn against a newer run that stores the (disabled, default) section explicitly.
-    ra = ca["regime"] if (ca.get("regime") or {}).get("enabled") else None
-    rb = cb["regime"] if (cb.get("regime") or {}).get("enabled") else None
-    if ra != rb:
+    if _effective_regime(ca) != _effective_regime(cb):
         out.append("runs differ in 'regime': the comparison may not be like-for-like")
     return out
 

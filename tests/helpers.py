@@ -1,5 +1,7 @@
 # tests/helpers.py
-"""Shared test builders: a config on disk and deterministic synthetic candles."""
+"""Shared test builders: a config on disk, deterministic synthetic candles, and the engine runners
+(FixedStrategy, run_fixed, decisions, MON, FakeTime) test_engine.py and test_engine_regime.py both
+drive a real BacktestEngine through."""
 import math
 from datetime import date
 

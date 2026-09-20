@@ -156,6 +156,20 @@ def test_compare_does_not_warn_on_regime_when_both_sides_are_absent(repo):
     assert not any("'regime'" in w for w in c.warnings)
 
 
+def test_compare_warns_when_source_index_runs_gate_on_different_index_symbols(repo):
+    """Two runs can store the identical 'regime' section (source: index, same ema_period) and still
+    not be like-for-like if data.index_symbol differs - the effective value must fold the index
+    symbol in, read from the stored config's 'data' section (absent -> None)."""
+    a_cfg = json.dumps({**json.loads(CFG), "regime": {"enabled": True, "source": "index", "ema_period": 20},
+                        "data": {"index_symbol": "NIFTY"}})
+    b_cfg = json.dumps({**json.loads(CFG), "regime": {"enabled": True, "source": "index", "ema_period": 20},
+                        "data": {"index_symbol": "BANKNIFTY"}})
+    repo.create_run("A", "backtest", 0, a_cfg)
+    repo.create_run("B", "backtest", 0, b_cfg)
+    c = build_compare(repo, "A", "B", P)
+    assert any("'regime'" in w for w in c.warnings)
+
+
 def test_compare_does_not_warn_when_the_other_side_has_regime_disabled(repo):
     """An explicit, disabled regime section must compare equal to no section at all: both mean
     the filter played no part in the run."""

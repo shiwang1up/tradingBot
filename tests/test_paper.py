@@ -80,6 +80,21 @@ def test_warm_up_feeds_the_regime_filter_and_hides_the_index(repo, tmp_path):
     assert "NIFTY" not in eng._last_close and "NIFTY" not in eng._history
 
 
+def test_warm_up_feeds_the_composite_regime_filter(repo, tmp_path):
+    """Job A review item 2: the composite counterpart of the test above. `_market()` is wavy, so a
+    rising universe is built by hand here - two symbols, every bar closing above the previous - the
+    only shape that tells a correctly-fed composite (state UP) apart from the swapped-order bug
+    (every return 0, level flat, state stuck)."""
+    cfg = make_config(tmp_path, regime={"enabled": True, "source": "composite", "ema_period": 3})
+    t0 = OPEN - 4 * 300
+    rising_a = [Candle("A", t0 + i * 300, 100.0 + i, 100.5 + i, 99.8 + i, 100.2 + i, 1000) for i in range(4)]
+    rising_b = [Candle("B", t0 + i * 300, 200.0 + i, 200.5 + i, 199.8 + i, 200.2 + i, 1000) for i in range(4)]
+    market = {"A": rising_a, "B": rising_b}
+    eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")))
+    eng.warm(rising_a + rising_b)
+    assert eng._regime.state == "UP"
+
+
 def test_full_day_matches_the_backtester_bar_for_bar(repo, tmp_path):
     cfg = make_config(tmp_path, risk={"cooldown_bars": 0})
     market = _market()
