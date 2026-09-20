@@ -1,6 +1,7 @@
 """The per-bar cycle (spec sections 4-8). Mode-independent given a broker and clock; subclasses supply the loop.
 
 Order inside a bar:
+  0. split off the index   the regime filter sees it; nothing else does
   1. broker.on_bar        fills pending entries at this bar's open, simulates exits
   2. square-off           once per day, from the square-off bar onward (latched)
   3. daily loss cap       flatten once per day if breached and configured to
@@ -35,6 +36,7 @@ from tradebot.engine.clock import SessionClock, date_of, iso_ist
 from tradebot.execution.broker import Broker, BrokerEvent, Closed, Filled, Unfilled
 from tradebot.risk.engine import PortfolioState, evaluate
 from tradebot.risk.killswitch import KillState, read_kill_switch
+from tradebot.risk.regime import RegimeFilter
 from tradebot.store.repo import Repo
 from tradebot.strategy.base import Strategy
 from tradebot.strategy.ta import IndicatorSet, validate_indicator_params
@@ -76,6 +78,8 @@ class Engine:
         self._cooldown_until: dict[str, int] = {}
         self.disabled_strategies: set[str] = set()
         self._day = DayCounters()
+        self._index_symbol = cfg.data.index_symbol
+        self._regime = RegimeFilter(cfg.regime.ema_period) if cfg.regime.enabled else None
 
     def _reenable_strategies(self) -> None:
         """A strategy disabled earlier missed bars; its incremental indicators would silently carry
@@ -129,6 +133,18 @@ class Engine:
                            sym, iso_ist(c.ts), extra={"symbol": sym})
         return out
 
+    def _split_index(self, candles: dict[str, Candle]) -> dict[str, Candle]:
+        """The tradable candles of a bar. The index candle is fed to the regime filter and removed, so
+        no strategy, indicator, broker call or AI prompt ever sees it. With no index bar at this
+        timestamp the filter keeps its last state. Must run after _usable (a bad index candle is
+        dropped, not fed to the filter) and before _observe."""
+        idx = self._index_symbol
+        index_candle = candles.get(idx) if idx else None
+        tradable = {s: c for s, c in candles.items() if s != idx} if index_candle is not None else candles
+        if self._regime is not None and index_candle is not None:
+            self._regime.update(index_candle.close)
+        return tradable
+
     def _observe(self, candles: dict[str, Candle]) -> None:
         """Update last closes, the AI context history and the shared indicators. Also used by the
         paper warm-up, which must not touch the broker."""
@@ -141,7 +157,7 @@ class Engine:
 
     def process_bar(self, ts: int, candles: dict[str, Candle], now_ts: Optional[int] = None) -> None:
         """`now_ts` is the wall clock when the bar is handed in (paper); None means the bar is on time."""
-        candles = self._usable(candles)
+        candles = self._split_index(self._usable(candles))
         self._observe(candles)
 
         self._record(self.broker.on_bar(ts, candles))
@@ -222,6 +238,11 @@ class Engine:
         batch: list[tuple[int, ApprovedOrder, Candidate]] = []
         for strat, sig in signals:
             sid = self.repo.insert_signal(self.run_id, sig)
+            blocked = self._regime.rejection(sig.direction) if self._regime is not None else None
+            if blocked is not None:
+                self.repo.insert_risk_decision(self.run_id, sid, False, blocked, 0)
+                log.info("signal %s %s rejected: %s", sig.direction, sig.symbol, blocked, extra={"symbol": sig.symbol})
+                continue
             margin = self.broker.available_margin(sig.product) - reserved_cash * self._lev(sig.product)
             res = evaluate(sig, state, self.cfg.risk, self.lot_sizes.get(sig.symbol, 1), margin, kill)
             if isinstance(res, Rejection):
@@ -315,6 +336,14 @@ class BacktestEngine(Engine):
                  [s.name for s in self.strategies])
         try:
             for ts in bars:
+                candles = self.source.candles_at(ts)
+                if self._index_symbol and candles and all(sym == self._index_symbol for sym in candles):
+                    # Nothing tradable this instant: feed the filter and skip everything else (day
+                    # bookkeeping and last_ts included) so this timestamp never reaches broker.on_bar,
+                    # which would otherwise mark every pending entry unfilled (no_candle) for a bar
+                    # with no real trading activity.
+                    self._split_index(self._usable(candles))
+                    continue
                 d = date_of(ts)
                 if not self.clock.is_trading_day(d):
                     continue
@@ -324,7 +353,7 @@ class BacktestEngine(Engine):
                     self._start_day()
                     current = d
                 last_ts = ts  # set before processing so a failure mid-bar still stamps this bar
-                self.process_bar(ts, self.source.candles_at(ts))
+                self.process_bar(ts, candles)
         finally:
             # A mid-run exception still leaves a closed run and, where possible, the last day's row.
             # Cleanup must never mask the original exception or skip end_run.

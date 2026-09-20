@@ -26,6 +26,7 @@ from tradebot.config import resolved_config
 from tradebot.data.live import LiveBarSource
 from tradebot.engine.clock import date_of, iso_ist
 from tradebot.engine.loop import DayCounters, Engine
+from tradebot.risk.regime import NOT_READY
 from tradebot.types import ApprovedOrder, Candle, Position, Signal
 
 log = logging.getLogger("tradebot.paper")
@@ -72,10 +73,13 @@ class PaperEngine(Engine):
             by_ts.setdefault(c.ts, {})[c.symbol] = c
         last = None
         for ts in sorted(by_ts):
-            usable = self._usable(by_ts[ts])
-            self._observe(usable)
-            self._run_strategies(usable)  # signals discarded: warm-up never places
+            bar = self._split_index(self._usable(by_ts[ts]))
+            self._observe(bar)
+            self._run_strategies(bar)  # signals discarded: warm-up never places
             last = ts
+        if self._regime is not None and self._regime.state == NOT_READY:
+            log.warning("regime filter not warm after warm-up; every entry will be rejected as "
+                       "regime_not_ready until the index has %d bar(s)", self.cfg.regime.ema_period)
         return last
 
     def resume(self, today: date) -> bool:

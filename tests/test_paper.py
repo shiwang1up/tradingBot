@@ -12,6 +12,7 @@ from tradebot.engine.loop import BacktestEngine
 from tradebot.engine.paper import PaperEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.strategy.ema_rsi import EmaRsiStrategy
+from tradebot.types import Candle
 
 PRIOR = [date(2026, 9, 10), date(2026, 9, 11)]   # Thu, Fri: warm-up days
 TODAY = date(2026, 9, 14)                         # Monday
@@ -54,7 +55,6 @@ def test_warm_drops_an_unusable_candle_and_keeps_the_last_good_close(repo, tmp_p
     """warm() feeds candles through the same _usable gate as process_bar (spec: unusable candles are
     dropped before anything sees them); an all-zero candle later in the same symbol's warm-up must
     not become its last close."""
-    from tradebot.types import Candle
     cfg = make_config(tmp_path)
     clock = SessionClock(cfg.session, 5)
     src = LiveBarSource(_fetcher({"A": []}), repo, ["A"], "NSE", 5, 2, clock)
@@ -67,6 +67,17 @@ def test_warm_drops_an_unusable_candle_and_keeps_the_last_good_close(repo, tmp_p
     zero = Candle("A", t0 + 300, 0.0, 0.0, 0.0, 0.0, 1)
     eng.warm([good, zero])
     assert eng._last_close["A"] == 100.2
+
+
+def test_warm_up_feeds_the_regime_filter_and_hides_the_index(repo, tmp_path):
+    cfg = make_config(tmp_path, regime={"enabled": True, "ema_period": 3}, data={"index_symbol": "NIFTY"})
+    market = _market()
+    eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")))
+    index = [Candle("NIFTY", c.ts, 25000.0 + i, 25000.0 + i, 25000.0 + i, 25000.0 + i, 0)
+             for i, c in enumerate(market["A"]) if c.ts < OPEN]
+    eng.warm(_warm(market) + index)
+    assert eng._regime.state == "UP"
+    assert "NIFTY" not in eng._last_close and "NIFTY" not in eng._history
 
 
 def test_full_day_matches_the_backtester_bar_for_bar(repo, tmp_path):

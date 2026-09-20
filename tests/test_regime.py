@@ -32,3 +32,8 @@ def test_bad_input_is_loud():
         RegimeFilter(0)
     with pytest.raises(ValueError):
         RegimeFilter(3).update(float("nan"))
+
+
+def test_rejection_rejects_an_unknown_direction_loudly():
+    with pytest.raises(ValueError):
+        RegimeFilter(3).rejection("BUY")

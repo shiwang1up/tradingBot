@@ -284,6 +284,8 @@ def test_regime_defaults_off_and_is_validated(tmp_path):
         make_config(tmp_path, regime={"source": "vix"})
     with pytest.raises(ValueError, match="regime.ema_period"):
         make_config(tmp_path, regime={"ema_period": 0})
+    with pytest.raises(ValueError, match="regime.ema_period"):
+        make_config(tmp_path, regime={"ema_period": 1})     # EMA1 == close: longs would be blocked forever, silently
     with pytest.raises(ValueError, match="data.index_symbol"):
         make_config(tmp_path, regime={"enabled": True})                  # the index source needs a symbol
     assert make_config(tmp_path, regime={"enabled": True, "source": "composite"}).regime.enabled
@@ -297,5 +299,5 @@ def test_shipped_configs_name_the_index_and_keep_the_filter_off(tmp_path):
         assert cfg.data.index_symbol == "NIFTY", name
         assert cfg.regime.enabled is False, name
         assert "regime" in cfg.raw, name
-        # the shipped block names every field so a rate correction can't silently drop a key
+        # the shipped block names every field so a new one can't silently take its default unnoticed
         assert set(cfg.raw["regime"]) == {f.name for f in dataclasses.fields(RegimeConfig)}, name

@@ -249,7 +249,7 @@ def _validate(cfg: "Config") -> None:
     g = cfg.regime
     checks += [
         (g.source in REGIME_SOURCES, f"regime.source must be one of {REGIME_SOURCES}"),
-        (g.ema_period >= 1, "regime.ema_period must be >= 1"),
+        (g.ema_period >= 2, "regime.ema_period must be >= 2"),
         (not (g.enabled and g.source == "index") or bool(d.index_symbol),
          "data.index_symbol must be set when regime.enabled uses source: index"),
     ]

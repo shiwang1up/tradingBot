@@ -22,6 +22,8 @@ class RegimeFilter:
 
     def rejection(self, direction: str) -> Optional[str]:
         """The risk-decision reason that blocks `direction` right now, or None when it may trade."""
+        if direction not in ("LONG", "SHORT"):
+            raise ValueError(f"unknown direction: {direction!r}")
         if self.state == NOT_READY:
             return "regime_not_ready"
         if (direction == "LONG") != (self.state == UP):
