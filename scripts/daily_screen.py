@@ -15,6 +15,11 @@ condition met on day u's close exits at day u+1's OPEN. Trade-level expectancy o
 no portfolio, no overlap limit, so these numbers say whether an edge exists, not what an account
 would have made.
 
+The round-trip cost cancels out of the reported "excess": it is subtracted from both the trade's
+return and the baseline's, so excess = trade gross - baseline gross. Excess therefore measures
+entry timing against a random entry of the same holding length, not profitability; the profitability
+figure, net of costs, is the expectancy line.
+
 This reads the database read-only and writes nothing to it.
 """
 import argparse
@@ -272,6 +277,9 @@ def baseline_return(bars, window, h, cost):
     """Mean net return of simply holding this symbol for h trading days, entered at the open of
     every date in the window whose exit also lands in it. None when no such hold fits.
 
+    Subtracts the same `cost` a trade's net return does, so that difference cancels out of the
+    excess computed against this baseline and leaves excess measuring entry timing, not cost.
+
     Indian large caps rose over this period, so any rule that buys shows a positive return from the
     drift alone; only the excess over this baseline is evidence of an edge."""
     lo, hi = window
@@ -298,14 +306,21 @@ def attach_excess(trades, bars, window, cost):
     return out
 
 
-def t_across_dates(trades, attr="excess"):
-    """t of the mean, averaging trades entered on the same date first. Signals cluster: one
-    market-wide dip fires mean reversion across forty names at once, and counting those as forty
-    independent observations would inflate t by roughly the square root of the cluster size."""
+def date_means(trades, attr="excess"):
+    """Per-entry-date means of `attr`, sorted by date for determinism. Trades entered on the same
+    date are averaged into one observation before any further statistic sees them, because signals
+    cluster: one market-wide dip fires mean reversion across forty names at once, and counting
+    those as forty independent observations would inflate t by roughly the square root of the
+    cluster size."""
     by_date = defaultdict(list)
     for tr in trades:
         by_date[tr.entry_date].append(getattr(tr, attr))
-    means = [sum(v) / len(v) for v in by_date.values()]
+    return [sum(by_date[d]) / len(by_date[d]) for d in sorted(by_date)]
+
+
+def t_across_dates(trades, attr="excess"):
+    """t of the mean of `date_means`. None for fewer than 2 dates or zero variance."""
+    means = date_means(trades, attr)
     n = len(means)
     if n < 2:
         return None
@@ -322,13 +337,19 @@ def describe(trades):
     n = len(trades)
     if n == 0:
         return dict(trades=0, win_rate=0.0, avg_win=0.0, avg_loss=0.0, payoff=0.0, expectancy=0.0,
-                    breakeven=0.0, median_days=0, excess=0.0, t=None, dates=0, exits={})
+                    breakeven=0.0, median_days=0, excess_per_trade=0.0, excess_per_date=0.0,
+                    t=None, dates=0, exits={})
     wins = [t.net for t in trades if t.net > 0]
     losses = [t.net for t in trades if t.net <= 0]
     avg_win = sum(wins) / len(wins) if wins else 0.0
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     payoff = avg_win / abs(avg_loss) if avg_loss < 0 and avg_win > 0 else 0.0
     days = sorted(t.days for t in trades)
+    # Trades cluster on entry dates (one market-wide dip fires mean reversion across many
+    # symbols), so the trade-weighted mean and the date-weighted mean can disagree, even in
+    # sign. `t` tests the date means, and the pass bar ("excess > 0 with t >= 2") is judged on
+    # excess_per_date; a large gap between the two means the result is driven by a few busy dates.
+    dm = date_means(trades)
     return dict(
         trades=n,
         win_rate=len(wins) / n,
@@ -338,7 +359,8 @@ def describe(trades):
         expectancy=sum(t.net for t in trades) / n,
         breakeven=(1.0 / (1.0 + payoff)) if payoff > 0 else 0.0,
         median_days=days[n // 2],
-        excess=sum(t.excess for t in trades) / n,
+        excess_per_trade=sum(t.excess for t in trades) / n,
+        excess_per_date=(sum(dm) / len(dm)) if dm else 0.0,
         t=t_across_dates(trades),
         dates=len(set(t.entry_date for t in trades)),
         exits=dict(Counter(t.reason for t in trades)),
@@ -354,8 +376,8 @@ def format_system(name, label, window, s, excluded, cost):
            s["payoff"], s["median_days"]),
         "  expectancy %+.3f%% per trade (net of %.3f%% round trip)   breakeven win %.1f%%"
         % (s["expectancy"] * 100, cost * 100, s["breakeven"] * 100),
-        "  excess over baseline %+.3f%% per trade   t %s across %d entry dates"
-        % (s["excess"] * 100, t, s["dates"]),
+        "  excess over baseline %+.3f%% per entry date   t %s across %d entry dates   (%+.3f%% per trade)"
+        % (s["excess_per_date"] * 100, t, s["dates"], s["excess_per_trade"] * 100),
         "  exits %s   excluded by the gap mask %d"
         % (", ".join("%s %d" % kv for kv in sorted(s["exits"].items())) or "none", excluded),
     ])

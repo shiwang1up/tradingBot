@@ -284,6 +284,25 @@ def test_describe_reports_expectancy_payoff_and_breakeven():
     assert s["payoff"] == pytest.approx(1.0) and s["breakeven"] == pytest.approx(0.5)
     assert s["expectancy"] == pytest.approx(0.0)
     assert s["median_days"] == 2
+    # each trade is its own entry date here, so per-trade and per-date means coincide
+    assert s["excess_per_trade"] == pytest.approx(0.0) and s["excess_per_date"] == pytest.approx(0.0)
+
+
+def test_describe_reports_opposite_signs_when_dates_are_clustered():
+    """One date with 10 trades at +1.0% excess, and three dates with 1 trade each at -1.0%.
+    Per-trade mean: (10*0.01 + 3*(-0.01)) / 13 = 0.07 / 13 = +0.005385 (positive: the busy date
+    dominates the trade count). Per-date means: [0.01, -0.01, -0.01, -0.01]; their mean is
+    (0.01 - 0.03) / 4 = -0.005 (negative: one date is one vote, same as the other three combined).
+    t is computed on those same date means, so it must share excess_per_date's sign."""
+    d0 = date(2020, 1, 1)
+    trades = ([ds.Trade("A%d" % k, "mr", d0, d0, 1.0, 1.0, 1, 0.0, 0.0, "x", 0.01) for k in range(10)]
+              + [ds.Trade("B", "mr", d0 + timedelta(days=1), d0, 1.0, 1.0, 1, 0.0, 0.0, "x", -0.01),
+                 ds.Trade("C", "mr", d0 + timedelta(days=2), d0, 1.0, 1.0, 1, 0.0, 0.0, "x", -0.01),
+                 ds.Trade("D", "mr", d0 + timedelta(days=3), d0, 1.0, 1.0, 1, 0.0, 0.0, "x", -0.01)])
+    s = ds.describe(trades)
+    assert s["excess_per_trade"] > 0
+    assert s["excess_per_date"] < 0
+    assert (s["t"] < 0) == (s["excess_per_date"] < 0)
 
 
 def test_holdout_refuses_when_its_file_already_exists(tmp_path, monkeypatch, capsys):
