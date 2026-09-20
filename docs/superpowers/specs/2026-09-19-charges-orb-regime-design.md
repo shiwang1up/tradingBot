@@ -220,4 +220,9 @@ with the re-stated old runs net of charges, the six tuning runs, the holdout and
 - **Engine ordering:** `_usable` runs before `_split_index`; the composite level never becomes non-finite
   and is not updated on a bar where fewer than half the known symbols have a return; a bar whose only
   candle is the index does not reach the broker.
-- **Index fetch:** the index is fetched first; an `index_symbol` that is also a universe symbol is refused.
+- **Index fetch:** `fetch-data` fetches the index LAST and an index failure never blocks the universe; the
+  paper live feed carries the index, first in its list, only when the filter is on with `source: index`;
+  the warm-up fetch always includes it. An `index_symbol` that is also a universe symbol is refused.
+- **Results:** `docs/superpowers/notes/2026-09-19-charges-orb-regime-results.md`. The regime filter improved
+  R on risk slightly for ORB and confluence on the tuning window and left both clearly negative, so by the
+  rule above it is not carried to the holdout. The ORB holdout remains unspent.
