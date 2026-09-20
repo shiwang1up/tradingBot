@@ -1,6 +1,6 @@
 import pytest
 
-from tradebot.report.summary import build_summary, format_summary
+from tradebot.report.summary import Summary, build_summary, format_summary
 from tradebot.types import Position, Signal
 
 
@@ -164,6 +164,30 @@ def test_equity_drawdown_says_partly_gross_for_a_mixed_run(repo):
     assert "partly gross: some daily rows have no recorded charges" in line
 
 
+def test_day_table_header_is_marked_gross_when_charges_are_estimated(repo):
+    """The day table's Realised column comes from daily_pnl rows, which are gross when charges
+    were estimated after the fact, unlike everything above them in the report which is net. The
+    header must say so at the point of use, not just in the Evidence line above."""
+    from tradebot.config import ChargesConfig
+    repo.create_run("gt1", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("gt1", p), 9, 102.0, "TARGET", 20.0, charges=None)
+    repo.upsert_daily_pnl("gt1", "2026-09-14", realised=20.0, unrealised=0.0, fills=1, entries_placed=1)
+    s = build_summary(repo, "gt1", ChargesConfig())
+    line = next(ln for ln in format_summary(s).splitlines() if ln.startswith("Date"))
+    assert "(gross: no recorded charges)" in line
+
+
+def test_day_table_header_is_unmarked_when_charges_are_recorded(repo):
+    repo.create_run("gt2", "backtest", 0, "{}")
+    p = Position("A", "MIS", "LONG", 10, 100.0, 99.0, None, 1, "c1", "ema_rsi")
+    repo.close_position(repo.insert_position("gt2", p), 9, 102.0, "TARGET", 20.0, charges=5.0)
+    repo.upsert_daily_pnl("gt2", "2026-09-14", realised=15.0, unrealised=0.0, fills=1, entries_placed=1)
+    s = build_summary(repo, "gt2")
+    line = next(ln for ln in format_summary(s).splitlines() if ln.startswith("Date"))
+    assert "gross" not in line
+
+
 def test_adopted_line_says_gross_pnl(repo):
     _seed(repo)
     text = format_summary(build_summary(repo, "r1"))
@@ -255,3 +279,181 @@ def test_r_on_risk_pools_all_trades_instead_of_averaging_per_trade(repo):
     assert s.r_on_risk == pytest.approx(9.9 / 10.1)
     text = format_summary(s)
     assert "R on risk" in text
+
+
+def test_expectancy_identity_payoff_and_breakeven(repo):
+    """Four closed trades with stored charges: two wins of +20 and +10 net, two losses of -30 and -10 net.
+    avg_win 15, avg_loss -20, payoff 0.75, expectancy (2/4)*15 - (2/4)*20 = -2.5 = total/trades = -10/4."""
+    repo.create_run("e1", "backtest", 0, "{}")
+    for i, (exit_price, pnl, ch) in enumerate([(102.0, 25.0, 5.0), (101.0, 15.0, 5.0),
+                                               (97.0, -25.0, 5.0), (99.0, -5.0, 5.0)]):
+        p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, i, "c%d" % i, "ema_rsi")
+        repo.close_position(repo.insert_position("e1", p), 10 + i, exit_price, "TARGET", pnl, charges=ch)
+    s = build_summary(repo, "e1")
+    assert (s.trades, s.wins, s.losses) == (4, 2, 2)
+    assert s.avg_win == pytest.approx(15.0)
+    assert s.avg_loss == pytest.approx(-20.0)
+    assert s.payoff == pytest.approx(0.75)
+    assert s.expectancy == pytest.approx(-2.5)
+    # the identity the printed line claims
+    assert s.expectancy == pytest.approx(s.win_rate * s.avg_win - (1 - s.win_rate) * abs(s.avg_loss))
+    assert s.expectancy == pytest.approx(s.total_pnl / s.trades)
+    assert s.breakeven_win_rate == pytest.approx(1 / (1 + 0.75))
+
+
+def test_expectancy_is_zero_and_payoff_undefined_without_trades(repo):
+    repo.create_run("e2", "backtest", 0, "{}")
+    s = build_summary(repo, "e2")
+    assert (s.avg_win, s.avg_loss, s.expectancy) == (0.0, 0.0, 0.0)
+    assert s.payoff is None and s.breakeven_win_rate is None
+    assert (s.evidence_days, s.evidence_t) == (0, None)
+
+
+def test_all_wins_run_has_no_payoff_or_breakeven(repo):
+    """With no losing trades avg_loss is 0.0, not negative, so payoff (avg_win / |avg_loss|) has
+    nothing to divide by: it and breakeven_win_rate must be None, not the misleadingly worst-looking
+    0.0, and the formatted report must say so rather than print zeros."""
+    repo.create_run("aw1", "backtest", 0, "{}")
+    for i, (exit_price, pnl) in enumerate([(105.0, 50.0), (110.0, 100.0)]):
+        p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, i, "c%d" % i, "ema_rsi")
+        repo.close_position(repo.insert_position("aw1", p), 10 + i, exit_price, "TARGET", pnl, charges=0.0)
+    s = build_summary(repo, "aw1")
+    assert s.payoff is None and s.breakeven_win_rate is None
+    text = format_summary(s)
+    assert "n/a" in text
+
+
+def test_evidence_is_computed_across_close_dates_not_trades(repo):
+    """Six trades on three IST dates: day sums +100, -50, +10. mean 20; deviations +80, -70, -10,
+    so var = (6400 + 4900 + 100) / 2 = 5700, sd 75.498344, se 43.588989, t 0.458831. Trades on one
+    day are correlated, so the day is the unit."""
+    from tradebot.engine.clock import ist_epoch
+    from datetime import date
+    repo.create_run("e3", "backtest", 0, "{}")
+    per_day = {date(2026, 9, 14): [60.0, 40.0], date(2026, 9, 15): [-20.0, -30.0], date(2026, 9, 16): [30.0, -20.0]}
+    i = 0
+    for d, pnls in per_day.items():
+        for pnl in pnls:
+            p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, ist_epoch(d, "09:20"), "c%d" % i, "ema_rsi")
+            repo.close_position(repo.insert_position("e3", p), ist_epoch(d, "10:00"), 100.0 + pnl / 10,
+                                "TARGET", pnl, charges=0.0)
+            i += 1
+    s = build_summary(repo, "e3")
+    assert s.evidence_days == 3
+    assert s.evidence_mean == pytest.approx(20.0)
+    assert s.evidence_t == pytest.approx(0.458831, abs=1e-5)
+
+
+def test_evidence_t_is_none_without_variance_or_enough_days(repo):
+    from tradebot.engine.clock import ist_epoch
+    from datetime import date
+    repo.create_run("e4", "backtest", 0, "{}")
+    for i in range(2):                      # two trades, one day: n=1, no t
+        p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, ist_epoch(date(2026, 9, 14), "09:20"),
+                     "c%d" % i, "ema_rsi")
+        repo.close_position(repo.insert_position("e4", p), ist_epoch(date(2026, 9, 14), "10:00"), 101.0,
+                            "TARGET", 10.0, charges=0.0)
+    s = build_summary(repo, "e4")
+    assert s.evidence_days == 1 and s.evidence_t is None
+
+
+def test_format_summary_prints_the_expectancy_block(repo):
+    """4 trades, 2 wins (+20, +5) 2 losses (-10, -10): avg_win 12.5, avg_loss -10, payoff 1.25,
+    expectancy total/trades = 5/4 = 1.25, breakeven 1/(1+1.25) = 44.4%."""
+    _seed(repo)                     # 4 trades, 2 wins, from the existing helper
+    text = format_summary(build_summary(repo, "r1"))
+    assert "Avg win / avg loss" in text and "payoff 1.25" in text
+    assert "1.25 per trade" in text
+    assert "44.4%" in text and "Evidence" in text
+    # the decomposition is shown, not asserted as an equality
+    assert " = " not in next(l for l in text.splitlines() if l.startswith("Expectancy"))
+
+
+def test_evidence_line_says_too_few_below_the_thresholds(repo):
+    _seed(repo)                     # 4 trades on few days
+    text = format_summary(build_summary(repo, "r1"))
+    assert "too few to judge" in text
+
+
+def test_evidence_line_flags_a_weak_t(repo):
+    """25 days x 2 trades, day sums alternating +4 and -4: 50 trades and 25 days clear the
+    thresholds, but the mean (0.16) is tiny against the spread (t about 0.2), so the line must say
+    so rather than let a reader take the sign seriously. The days must differ: identical days have
+    no variance and t would be n/a instead."""
+    from tradebot.engine.clock import ist_epoch
+    from datetime import date, timedelta
+    repo.create_run("w1", "backtest", 0, "{}")
+    i = 0
+    for k in range(25):
+        d = date(2026, 6, 1) + timedelta(days=k)
+        for pnl in ((100.0, -96.0) if k % 2 == 0 else (100.0, -104.0)):
+            p = Position("S%d" % i, "MIS", "LONG", 10, 100.0, 99.0, None, ist_epoch(d, "09:20"), "c%d" % i, "ema_rsi")
+            repo.close_position(repo.insert_position("w1", p), ist_epoch(d, "10:00"), 100.0 + pnl / 10,
+                                "TARGET", pnl, charges=0.0)
+            i += 1
+    s = build_summary(repo, "w1")
+    assert s.trades == 50 and s.evidence_days == 25
+    assert "not distinguishable from zero" in format_summary(s)
+
+
+def _summary_with_t(evidence_t):
+    """A Summary built directly (not via a seeded repo) with enough trades/days to clear the
+    too-few-to-judge thresholds, varying only evidence_t - for exercising the sign-aware note."""
+    return Summary(
+        run_id="t1", mode="backtest", trades=50, wins=25, losses=25, win_rate=0.5, total_pnl=-500.0,
+        avg_r=0.0, r_trades=50, max_drawdown=0.0, max_drawdown_equity=0.0, exit_reasons={},
+        risk_rejections={}, ai_rejections=0, open_positions=0, adopted_trades=0, adopted_pnl=0.0,
+        avg_win=100.0, avg_loss=-120.0, payoff=100.0 / 120.0, expectancy=-10.0,
+        breakeven_win_rate=1 / (1 + 100.0 / 120.0), evidence_days=25, evidence_mean=-20.0,
+        evidence_t=evidence_t,
+    )
+
+
+def test_evidence_line_flags_a_strongly_negative_t_as_consistently_losing():
+    text = format_summary(_summary_with_t(-8.6))
+    assert "t -8.6" in text and "consistently losing" in text
+
+
+def test_evidence_line_flags_a_strongly_positive_t_as_consistently_profitable():
+    text = format_summary(_summary_with_t(8.6))
+    assert "t 8.6" in text and "consistently profitable" in text
+
+
+def test_evidence_line_flags_a_borderline_positive_t_as_some_evidence_of_an_edge():
+    """t just past the too-few-to-judge gate (2 <= t < 4) is real but far weaker than a run with
+    hundreds of days at t 8.6, and must not be called "consistently profitable"."""
+    text = format_summary(_summary_with_t(2.01))
+    assert "t 2.0" in text and "some evidence of an edge" in text
+    assert "consistently profitable" not in text
+
+
+def test_evidence_line_flags_a_borderline_negative_t_as_some_evidence_of_a_loss():
+    text = format_summary(_summary_with_t(-2.01))
+    assert "t -2.0" in text and "some evidence of a loss" in text
+    assert "consistently losing" not in text
+
+
+def test_tier_is_chosen_from_the_same_rounded_t_that_is_displayed():
+    """-3.9797 rounds for display to -4.0, which is at the "consistently losing" boundary
+    (t <= -4); picking the tier from the unrounded -3.9797 (which is NOT <= -4) would print
+    "-4.0   some evidence of a loss" -- a number sitting right on a boundary that reads as
+    the wrong side of it. The tier must be chosen from the same rounded value that is shown."""
+    text = format_summary(_summary_with_t(-3.9797))
+    assert "t -4.0" in text and "consistently losing" in text
+    assert "some evidence of a loss" not in text
+
+    text2 = format_summary(_summary_with_t(-3.94))
+    assert "t -3.9" in text2 and "some evidence of a loss" in text2
+    assert "consistently losing" not in text2
+
+
+def test_zero_trade_run_expectancy_lines_show_na_not_zero_percent(repo):
+    """The four expectancy-block lines must degrade the same way Win rate already does when there
+    are no trades: n/a, not zeros that would misleadingly read as a real (and terrible) result."""
+    repo.create_run("z1", "backtest", 0, "{}")
+    s = build_summary(repo, "z1")
+    text = format_summary(s)
+    for label in ("Avg win / avg loss", "Expectancy", "Breakeven win rate", "Evidence"):
+        line = next(l for l in text.splitlines() if l.startswith(label))
+        assert "0.0%" not in line
+        assert line.rstrip().endswith("n/a")

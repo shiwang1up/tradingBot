@@ -8,7 +8,7 @@ from tradebot.types import ApprovedOrder, Rejection, Signal
 
 CFG = RiskConfig(per_trade_pct=1.0, daily_loss_cap_pct=3.0, flatten_on_daily_cap=False,
                  max_entries_per_day=5, max_open_positions=2, cooldown_bars=3, mis_leverage=5.0,
-                 adopted_stop_pct=1.5)
+                 adopted_stop_pct=1.5, min_risk_fraction=0.0)
 OFF = KillState(active=False, flatten=False)
 
 
@@ -153,3 +153,40 @@ def test_evaluate_does_not_mutate_state():
 def test_open_count_does_not_double_count_overlap():
     st = _state(open_symbols={"A"}, pending_symbols={"A"})
     assert st.open_count == 1
+
+
+def _cfg(**kw):
+    """CFG with overrides; keeps the module's other tests untouched."""
+    import dataclasses
+    return dataclasses.replace(CFG, **kw)
+
+
+def test_risk_too_small_when_margin_shrinks_the_position(_=None):
+    """100,000 capital, 1% = 1,000 planned risk, stop 1 rupee away -> 1,000 shares wanted.
+    Margin for only 300 shares means 300 rupees of risk, 30% of plan: below the 50% floor."""
+    cfg = _cfg(min_risk_fraction=0.5)
+    res = evaluate(_sig(entry=100.0, stop=99.0), _state(), cfg, 1, 30_000.0, OFF)
+    assert isinstance(res, Rejection) and res.reason == "risk_too_small"
+
+
+def test_risk_at_or_above_the_floor_is_approved(_=None):
+    cfg = _cfg(min_risk_fraction=0.5)
+    # margin for 600 shares -> 600 rupees of risk, 60% of plan
+    res = evaluate(_sig(entry=100.0, stop=99.0), _state(), cfg, 1, 60_000.0, OFF)
+    assert isinstance(res, ApprovedOrder) and res.quantity == 600
+    # exactly at the floor: 500 shares, 500 rupees, 50% -> approved (the check is <, not <=)
+    res = evaluate(_sig(entry=100.0, stop=99.0), _state(), cfg, 1, 50_000.0, OFF)
+    assert isinstance(res, ApprovedOrder) and res.quantity == 500
+
+
+def test_min_risk_fraction_zero_disables_the_check(_=None):
+    cfg = _cfg(min_risk_fraction=0.0)
+    res = evaluate(_sig(entry=100.0, stop=99.0), _state(), cfg, 1, 3_000.0, OFF)
+    assert isinstance(res, ApprovedOrder) and res.quantity == 30
+
+
+def test_insufficient_size_still_wins_over_risk_too_small(_=None):
+    """A quantity below one lot keeps its own reason: the two would otherwise both fire."""
+    cfg = _cfg(min_risk_fraction=0.5)
+    res = evaluate(_sig(entry=100.0, stop=99.0), _state(), cfg, 1, 50.0, OFF)
+    assert isinstance(res, Rejection) and res.reason == "insufficient_size"

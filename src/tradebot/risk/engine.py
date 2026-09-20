@@ -54,4 +54,13 @@ def evaluate(signal: Signal, state: PortfolioState, cfg: RiskConfig, lot_size: i
                            available_margin, lot_size)
     if qty < max(lot_size, 1):
         return Rejection(signal, "insufficient_size")
+    # Fixed-fractional sizing only works if every trade really risks the planned amount. When margin
+    # is short, compute_quantity silently returns a smaller position, so the trade goes ahead risking
+    # a fraction of the plan; a handful of rupees at risk cannot pay for its own brokerage, and a mix
+    # of full-size and scrap-size losses makes a run's average R meaningless. Skip it instead.
+    if cfg.min_risk_fraction > 0:
+        planned_risk = state.capital * cfg.per_trade_pct / 100.0
+        actual_risk = qty * abs(signal.entry_price - signal.stop_price)
+        if actual_risk < cfg.min_risk_fraction * planned_risk:
+            return Rejection(signal, "risk_too_small")
     return ApprovedOrder(signal, qty, make_client_id(signal.strategy, signal.symbol, signal.bar_ts))

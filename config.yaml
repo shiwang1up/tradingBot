@@ -2,6 +2,7 @@ capital: 100000
 
 risk:
   per_trade_pct: 1.0          # max loss per trade as % of capital
+  min_risk_fraction: 0.5      # skip a trade margin has shrunk below half its planned risk; 0 disables
   daily_loss_cap_pct: 3.0     # realised + unrealised; stop new entries when breached
   flatten_on_daily_cap: false
   max_entries_per_day: 20     # entry orders only; exits are never blocked

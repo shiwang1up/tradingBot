@@ -74,6 +74,29 @@ appear under "Risk rejects" as `regime` or `regime_not_ready`. `regime.source: c
 index from the universe's own returns when Groww serves no index history. The live paper feed carries
 the index only when the filter is on.
 
+## Expectancy and risk consistency
+
+Reports print the expectancy block: average win and loss, payoff, expectancy per trade, the win rate
+that payoff would need to break even, and how many days of evidence the number rests on. `R on risk`
+(net PnL over rupees at risk, pooled) stays the decision metric.
+
+`risk.min_risk_fraction` (default 0.5) skips a trade whose size margin has cut below half its planned
+risk, instead of taking it at a fraction of the intended stake, and counts it under "Risk rejects" as
+`risk_too_small`. Set it to 0 to reproduce older runs.
+
+## Daily systems screen
+
+    .venv/bin/python scripts/daily_screen.py fetch      # daily candles from 2020 (Groww key must be approved)
+    .venv/bin/python scripts/daily_screen.py insample   # 2020-01-01..2023-12-31
+    .venv/bin/python scripts/daily_screen.py holdout    # 2024-01-01..2025-11-21, refuses a second run
+
+Three classic daily systems (mean reversion, trend following, breakout), long only, entered at the
+next day's open, net of delivery charges, scored on expectancy in excess of holding the same stock for
+the same number of days (printed per entry date, with the per-trade figure beside it, since same-day
+trades are correlated). Rules are fixed in
+`docs/superpowers/specs/2026-09-20-expectancy-risk-daily-screen-design.md`. No system has passed the
+spec's bar so far. Results: `docs/superpowers/notes/2026-09-20-expectancy-risk-daily-screen-results.md`.
+
 ## Paper trading
 
     .venv/bin/tradebot paper --strategy ema_rsi --ai stub

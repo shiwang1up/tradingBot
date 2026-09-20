@@ -22,7 +22,8 @@ BASE_CONFIG = {
     "capital": 100000,
     "risk": {"per_trade_pct": 1.0, "daily_loss_cap_pct": 3.0, "flatten_on_daily_cap": False,
              "max_entries_per_day": 20, "max_open_positions": 5, "cooldown_bars": 3,
-             "mis_leverage": 5.0, "adopted_stop_pct": 1.5},
+             "mis_leverage": 5.0, "adopted_stop_pct": 1.5,
+             "min_risk_fraction": 0.0},  # off by default in tests: existing expectations and the golden-trades fixture predate the rule
     "strategy": {"ema_rsi": {"fast": 9, "slow": 21, "rsi_period": 14, "rsi_long_min": 55,
                              "rsi_short_max": 45, "atr_period": 14, "atr_stop_mult": 1.5,
                              "reward_risk": 2.0, "min_stop_pct": 0.1, "product": "MIS"},

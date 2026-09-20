@@ -66,6 +66,7 @@ def test_format_compare_reads_sensibly(repo):
     assert "Estimated cost" in text and "$0.0" in text
     assert "Verdict: mixed: the rejected signals were net winners" not in text  # delta negative, net positive
     assert "Verdict: filter did not help on this window" in text
+    assert "Expectancy and the two averages are in rupees" not in text  # both sides share CFG's risk
 
 
 def test_verdict_positive_branches(repo):
@@ -177,3 +178,25 @@ def test_compare_does_not_warn_when_the_other_side_has_regime_disabled(repo):
     _seed_pair(repo, cfg_b=other)
     c = build_compare(repo, "A", "B", P)
     assert not any("'regime'" in w for w in c.warnings)
+
+
+def test_side_by_side_carries_the_expectancy_rows(repo):
+    """A closed X (+50), Y (-30), Z (+20): avg_win 35, avg_loss -30, payoff 35/30 = 1.17.
+    B closed only Z (+20): no losing trade, so its payoff is undefined -> n/a, not 0.00."""
+    _seed_pair(repo)
+    text = format_compare(build_compare(repo, "A", "B", P))
+    assert "Expectancy" in text and "t (daily PnL)" in text
+    payoff_line = next(l for l in text.splitlines() if l.startswith("Payoff"))
+    assert "1.17" in payoff_line and payoff_line.rstrip().endswith("n/a")
+
+
+def test_side_by_side_notes_when_risk_sizing_differs(repo):
+    """Rupee expectancy and the two averages move with position sizing; when the runs' stored
+    'risk' config differs (already detected by _compat_warnings as a comparability warning), the
+    table must say so explicitly rather than let a reader compare rupee figures across sizing."""
+    other = json.dumps({**json.loads(CFG), "risk": {"per_trade_pct": 2.0}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert any("'risk'" in w for w in c.warnings)
+    text = format_compare(c)
+    assert "Expectancy and the two averages are in rupees" in text

@@ -31,6 +31,7 @@ class RiskConfig:
     cooldown_bars: int
     mis_leverage: float
     adopted_stop_pct: float
+    min_risk_fraction: float = 0.5   # reject a trade margin has shrunk below this fraction of the planned risk; 0 disables
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,7 @@ def _validate(cfg: "Config") -> None:
         (r.max_open_positions >= 1, "risk.max_open_positions must be >= 1"),
         (r.max_entries_per_day >= 1, "risk.max_entries_per_day must be >= 1"),
         (r.cooldown_bars >= 0, "risk.cooldown_bars must be >= 0"),
+        (0.0 <= r.min_risk_fraction <= 1.0, "risk.min_risk_fraction must be between 0 and 1"),
         (e.slippage_pct >= 0, "execution.slippage_pct must be >= 0"),
         (e.entry_buffer_pct >= 0, "execution.entry_buffer_pct must be >= 0"),
         (e.bar_deadline_sec > 0, "execution.bar_deadline_sec must be > 0"),

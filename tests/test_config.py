@@ -301,3 +301,14 @@ def test_shipped_configs_name_the_index_and_keep_the_filter_off(tmp_path):
         assert "regime" in cfg.raw, name
         # the shipped block names every field so a new one can't silently take its default unnoticed
         assert set(cfg.raw["regime"]) == {f.name for f in dataclasses.fields(RegimeConfig)}, name
+
+
+def test_min_risk_fraction_defaults_and_is_validated(tmp_path):
+    assert make_config(tmp_path, risk={"min_risk_fraction": 0.5}).risk.min_risk_fraction == 0.5
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError, match="min_risk_fraction"):
+            make_config(tmp_path, risk={"min_risk_fraction": bad})
+    root = Path(__file__).resolve().parents[1]
+    for name in ("config.yaml", "config-15m.yaml", "config-orb.yaml"):
+        cfg = load_config(root / name, tmp_path / "nonexistent.env")
+        assert cfg.risk.min_risk_fraction == 0.5, name
