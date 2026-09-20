@@ -23,8 +23,8 @@ def test_round_trip_cost_is_hand_worked():
     """25,000 position, Groww delivery: brokerage 20 x 2 = 40; STT 0.1% x 2 = 50; exchange
     0.00297% x 2 = 1.485; SEBI 0.0001% x 2 = 0.05; stamp 0.015% buy = 3.75;
     GST 18% x (40 + 1.485 + 0.05) = 7.4763; DP 15.34. Charges 118.1013 = 0.472405% of 25,000.
-    Plus 0.05% slippage each side = 0.1%. Total 0.572405%."""
-    assert ds.round_trip_cost() == pytest.approx(0.00572405, abs=1e-9)
+    Plus 0.05% slippage each side = 0.1%. Total 0.5724052% exactly."""
+    assert ds.round_trip_cost() == pytest.approx(0.005724052, abs=1e-9)
 
 
 def test_gap_mask_covers_the_gap_day_and_the_days_after_it():
