@@ -111,6 +111,24 @@ def _symbols_and_lots(cfg: Config, require_instruments: bool) -> tuple:
     return list(resolved), {s: i.lot_size for s, i in resolved.items()}, uni.exchange
 
 
+def _with_index(cfg: Config, symbols: list) -> list:
+    """The symbols to fetch and load: the regime index first, then the universe. First because a
+    paper fetch under budget pressure is likeliest to cut the LAST symbols submitted, and the index
+    feeds a gate on every entry - losing it costs more than losing one tradable symbol for a bar.
+    Order does not matter to strategies: the index is stripped before any of them run.
+
+    The index skips instrument resolution (it is not a tradable EQ row in the instrument master)
+    and gets no lot size: it is never traded. Refuses an index that is also a universe symbol -
+    the engine would then strip a real tradable symbol from every bar, mistaking it for the index."""
+    idx = cfg.data.index_symbol
+    if not idx:
+        return list(symbols)
+    if idx in symbols:
+        raise click.ClickException(f"data.index_symbol {idx!r} is also in the universe; the engine "
+                                   f"would strip a tradable symbol from every bar")
+    return [idx] + list(symbols)
+
+
 def _resolve_and_login(cfg: Config, adapter, note: str = "") -> tuple:
     """Instrument master (refreshed when stale), universe resolution, then one Groww login so a
     credential problem aborts before any symbol loop. Returns (symbols, lots, exchange)."""
@@ -139,6 +157,7 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
                            cfg.secrets.groww_api_secret)  # fails fast on malformed credentials
     setup_logging(cfg.paths.logs, run_id=f"fetch-{datetime.now():%Y%m%d-%H%M%S}")
     symbols, _, exchange = _resolve_and_login(cfg, adapter)
+    symbols = _with_index(cfg, symbols)
     repo = Repo(connect(cfg.paths.db))
     had_data = any(repo.latest_candle_ts(s, cfg.execution.interval_minutes) is not None for s in symbols)
     failures: list = []
@@ -163,6 +182,9 @@ def fetch_data(cfg: Config, days: int, full: bool, pause: float) -> None:
             if is_non_retryable(e) or isinstance(e, _FRIENDLY):
                 failures.append((sym, f"{type(e).__name__}: {e}"))
                 click.echo(f"failed: {sym} ({type(e).__name__}: {e})")
+                if sym == cfg.data.index_symbol:
+                    click.echo(f"hint: without {sym} history the regime filter can still run on the universe "
+                               f"itself: set regime.source: composite", err=True)
                 continue
             raise
     click.echo(f"inserted {total} candles across {len(symbols) - len(failures)} symbols")
@@ -189,10 +211,16 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     symbols, lots, _ = _symbols_and_lots(cfg, require_instruments=False)
     repo = Repo(connect(cfg.paths.db))
     interval = cfg.execution.interval_minutes
-    source = HistoricalSource.from_repo(repo, symbols, interval,
-                                        ist_epoch(start.date(), "00:00"), ist_epoch(end.date(), "23:59"))
+    window_start, window_end = ist_epoch(start.date(), "00:00"), ist_epoch(end.date(), "23:59")
+    source = HistoricalSource.from_repo(repo, _with_index(cfg, symbols), interval, window_start, window_end)
     if not source.bar_timestamps():
         raise click.ClickException("no candles in range; run `tradebot fetch-data` first")
+    idx = cfg.data.index_symbol
+    # Before repo.create_run (below, inside engine.run()): a failed start here must not burn a run id.
+    if cfg.regime.enabled and cfg.regime.source == "index" and not repo.load_candles(
+            [idx], interval, window_start, window_end):
+        raise click.ClickException(f"regime.enabled needs {interval}-minute candles for {idx} in this window; run "
+                                   f"`tradebot fetch-data` with this config, or set regime.source: composite")
     if strategy_name not in cfg.strategy:
         raise click.ClickException(f"no config for strategy '{strategy_name}'")
     run_id = run_id or f"bt-{datetime.now():%Y%m%d-%H%M%S}"
@@ -319,11 +347,12 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
         return
     log_path = setup_logging(cfg.paths.logs, run_id=run_id)
     symbols, lots, exchange = _resolve_and_login(cfg, adapter, note="; paper mode places no orders")
-    failed = _warm_fetch(cfg, adapter, repo, symbols, exchange, clock, now)
+    feed = _with_index(cfg, symbols)  # symbols plus the regime index; lots stays universe-only
+    failed = _warm_fetch(cfg, adapter, repo, feed, exchange, clock, now)
     if failed:
         click.echo(f"warm-up fetch failed for {len(failed)} symbol(s); they warm up live", err=True)
-    warm = _warm_candles(repo, symbols, interval, now, cfg.data.warmup_bars)
-    source = LiveBarSource(adapter.fetch_candles, repo, symbols, exchange, interval,
+    warm = _warm_candles(repo, feed, interval, now, cfg.data.warmup_bars)
+    source = LiveBarSource(adapter.fetch_candles, repo, feed, exchange, interval,
                            cfg.data.official_fetch_concurrency, clock,
                            # a fetch that outlives the deadline yields a stale bar anyway, so stop it earlier
                            budget_sec=max(1.0, cfg.execution.bar_deadline_sec - cfg.data.bar_grace_sec))

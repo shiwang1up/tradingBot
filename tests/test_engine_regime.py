@@ -2,12 +2,13 @@
 filter, and gates entries by direction. Split out of test_engine.py once that file passed 700
 lines; see tests/helpers.py for the shared run_fixed/decisions/MON this file and test_engine.py
 both use."""
+import logging
 from datetime import date
 
 from tests.helpers import MON, FixedStrategy, decisions, make_config, run_fixed, synth_candles
 from tradebot.ai.filter import StubFilter
 from tradebot.data.historical import HistoricalSource
-from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.engine.clock import SessionClock, ist_epoch, iso_ist
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.types import Candle
@@ -243,3 +244,76 @@ def test_composite_level_guards_against_a_non_finite_result(repo, tmp_path):
     # No state assertion here: the filter is NOT_READY before and after either way (never warmed
     # in this test), so it would pass whether or not the guard worked. The level assertion above
     # is what this test actually pins.
+
+
+# -- Task 15 amendments: the stale-filter log and the never-ready safety net --------------------
+
+def test_a_missing_index_bar_with_tradable_candles_logs_once_per_trading_day(repo, tmp_path, caplog):
+    """With the filter on and source 'index', a bar with tradable candles but no index candle used
+    to keep the last state silently - in paper mode that could last all day with nothing in the log
+    to say so. Two consecutive such bars on the same day must log exactly one warning; a later bar
+    that does carry an index candle must log none."""
+    cfg = make_config(tmp_path, **REGIME)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    eng = BacktestEngine(cfg, repo, HistoricalSource([]), [FixedStrategy({})], broker, StubFilter(),
+                         SessionClock(cfg.session, 5), {"A": 1}, "t1")
+    repo.create_run("t1", "backtest", 0, "{}")
+    eng._start_day()
+    for t, close in zip((ist_epoch(MON, tt) for tt in ("09:15", "09:20", "09:25")), (25000.0, 24990.0, 24980.0)):
+        eng.process_bar(t, {"NIFTY": Candle("NIFTY", t, close, close, close, close, 0)})   # warm the EMA
+
+    def a(ts, close=100.0):
+        return Candle("A", ts, close, close + 0.5, close - 0.2, close, 1000)
+
+    t1, t2 = ist_epoch(MON, "09:30"), ist_epoch(MON, "09:35")
+    with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
+        eng.process_bar(t1, {"A": a(t1)})      # no NIFTY candle this bar
+        eng.process_bar(t2, {"A": a(t2)})      # still none, same trading day: rate-limited
+    stale = [r for r in caplog.records if "no index candle" in r.getMessage()]
+    assert len(stale) == 1 and iso_ist(t1) in stale[0].getMessage()
+
+    caplog.clear()
+    t3 = ist_epoch(MON, "09:40")
+    with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
+        eng.process_bar(t3, {"A": a(t3), "NIFTY": Candle("NIFTY", t3, 25000.0, 25000.0, 25000.0, 25000.0, 0)})
+    assert not any("no index candle" in r.getMessage() for r in caplog.records)
+
+
+def test_no_stale_regime_warning_with_the_filter_off_or_on_composite(repo, tmp_path, caplog):
+    """The stale-filter warning is specific to an enabled filter on source 'index': neither a
+    disabled filter nor the composite source (which never looks at an index candle at all) may
+    ever log it, no matter how many bars in a row carry no index candle."""
+    candle = Candle("A", 1000, 100.0, 100.5, 99.8, 100.2, 1000)
+    for cfg in (make_config(tmp_path, data={"index_symbol": "NIFTY"}),
+               make_config(tmp_path, regime={"enabled": True, "source": "composite", "ema_period": 3})):
+        eng = BacktestEngine(cfg, repo, HistoricalSource([]), [], BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage),
+                             StubFilter(), SessionClock(cfg.session, 5), {}, "t1")
+        with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
+            eng._feed_regime(None, {"A": candle})
+        assert not any("no index candle" in r.getMessage() for r in caplog.records)
+        caplog.clear()
+
+
+def test_a_run_that_ends_still_not_ready_warns_that_every_entry_was_rejected(repo, tmp_path, caplog):
+    """Amendment: BacktestEngine.run's own safety net for callers that bypass the CLI's start-up
+    check (scripts/orb_experiment.py does) - an index that never sends a single usable candle leaves
+    the filter NOT_READY for the whole run, so every entry was silently rejected regime_not_ready;
+    the run must say so once, at the end."""
+    cfg = make_config(tmp_path, **REGIME)
+    with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
+        run_fixed(repo, cfg, synth_candles("A", [MON]), {("A", ist_epoch(MON, "10:00")): ("LONG", 0.0)}, ["A"])
+    assert decisions(repo) == [("A", "LONG", 0, "regime_not_ready")]
+    # Search on the run-end phrasing specifically: with no NIFTY candle ever loaded, every bar also
+    # trips the once-a-day stale-index warning, whose own message happens to quote the state
+    # (NOT_READY) too - not what this assertion is pinning.
+    warnings = [r for r in caplog.records if "ended with the regime filter still NOT_READY" in r.getMessage()]
+    assert len(warnings) == 1 and "t1" in warnings[0].getMessage() and "no usable index candles" in warnings[0].getMessage()
+
+
+def test_a_run_that_warms_up_the_regime_does_not_get_the_not_ready_warning(repo, tmp_path, caplog):
+    cfg = make_config(tmp_path, **REGIME)
+    candles = synth_candles("A", [MON]) + _index(MON, [25000.0 + 10 * i for i in range(75)])
+    with caplog.at_level(logging.WARNING, logger="tradebot.engine"):
+        run_fixed(repo, cfg, candles, {("A", ist_epoch(MON, "10:00")): ("LONG", 0.0)}, ["A", "NIFTY"])
+    assert not any("ended with the regime filter still NOT_READY" in r.getMessage() for r in caplog.records)

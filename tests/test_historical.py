@@ -275,3 +275,11 @@ def test_historical_source_groups_by_bar(repo):
     assert set(src.candles_at(100)) == {"A", "B"}
     assert set(src.candles_at(400)) == {"A"}
     assert src.candles_at(999) == {}
+
+
+def test_index_rows_with_zero_or_null_volume_parse():
+    """A guard, not a driver: the parser already accepts a zero or null volume row (an index has no
+    traded quantity), so this pins existing behaviour before Task 15 starts fetching NSE-NIFTY."""
+    out = parse_candles("NIFTY", {"candles": [[1789450000, 25000.0, 25010.0, 24990.0, 25005.0, 0],
+                                              [1789450300, 25005.0, 25020.0, 25000.0, 25015.0, None]]})
+    assert [c.volume for c in out] == [0, 0] and out[0].symbol == "NIFTY"

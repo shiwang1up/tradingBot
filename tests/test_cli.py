@@ -1,5 +1,5 @@
 import logging
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from pathlib import Path
 
 import yaml
@@ -604,3 +604,146 @@ def test_paper_refuses_foreign_and_already_ended_runs_before_logging_in(tmp_path
     res = _invoke(tmp_path, "paper", "--run-id", "done")
     assert res.exit_code != 0 and "already ended today" in res.output
     assert calls == [], "a refusal must not cost a login or a warm-up fetch"
+
+
+# -- Task 15: the CLI fetches, loads and checks the regime index --------------------------------
+
+_INSTRUMENTS = (
+    "exchange,exchange_token,trading_symbol,groww_symbol,name,instrument_type,segment,series,isin,"
+    "underlying_symbol,underlying_exchange_token,expiry_date,strike_price,lot_size,tick_size,"
+    "freeze_quantity,is_reserved,buy_allowed,sell_allowed,feed_key\n"
+    "NSE,2885,RELIANCE,NSE-RELIANCE,Reliance,EQ,CASH,EQ,INE002A01018,,,,,1,0.05,,0,1,1,NSE_CASH_2885\n")
+
+
+def _fetch_with_index(tmp_path, monkeypatch, fail_index=False, index_extra_bar=None):
+    """`index_extra_bar(end_ts) -> Candle` lets a caller tack an extra row onto the index's response,
+    same shape as the 15:30 bar Groww actually returns."""
+    make_config(tmp_path, data={"index_symbol": "NIFTY"})
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [RELIANCE]\n")
+    (tmp_path / "instruments.csv").write_text(_INSTRUMENTS)
+    calls = []
+
+    class FakeAdapter:
+        flow = "fake"
+        client = object()
+
+        def __init__(self, key, secret, api_secret=""):
+            pass
+
+        def fetch_candles(self, symbol, exchange, start_ts, end_ts, interval):
+            calls.append(symbol)
+            if fail_index and symbol == "NIFTY":
+                raise ValueError("index history not served")
+            rows = [Candle(symbol, _bar_ts(end_ts), 1, 2, 0.5, 1.5, 0 if symbol == "NIFTY" else 10)]
+            if index_extra_bar is not None and symbol == "NIFTY":
+                rows.append(index_extra_bar(end_ts))
+            return rows
+
+    monkeypatch.setattr(cli, "GrowwAdapter", FakeAdapter)
+    monkeypatch.setattr(cli, "download_instruments", lambda p: p)
+    monkeypatch.setattr(cli, "_instruments_fresh", lambda p: True)
+    return _invoke(tmp_path, "fetch-data", "--days", "20", "--sleep", "0"), calls
+
+
+def test_fetch_data_also_fetches_the_index(tmp_path, monkeypatch):
+    res, calls = _fetch_with_index(tmp_path, monkeypatch)
+    assert res.exit_code == 0, res.output
+    assert set(calls) == {"RELIANCE", "NIFTY"}           # the index is not in the instrument master's EQ rows
+    assert calls[0] == "NIFTY"                            # amendment C1: the index goes first
+    repo = Repo(connect(str(tmp_path / "tradebot.db")))
+    assert repo.latest_candle_ts("NIFTY", 5) is not None
+
+
+def test_fetch_data_drops_the_index_15_30_bar_outside_the_session(tmp_path, monkeypatch):
+    """A live check against Groww found it serves the index through the same cash-segment candles
+    call as any EQ symbol, with zero volume, and one extra bar at 15:30 IST every day. fetch-data
+    already keeps only `clock.in_session(ts)` bars via its `keep=` argument (the session closes at
+    15:30 and in_session is a strict '<'), so that bar must never reach storage."""
+    def extra_at_close(end_ts):
+        d = to_ist(_bar_ts(end_ts)).date()
+        return Candle("NIFTY", ist_epoch(d, "15:30"), 1, 2, 0.5, 1.5, 0)
+
+    res, _ = _fetch_with_index(tmp_path, monkeypatch, index_extra_bar=extra_at_close)
+    assert res.exit_code == 0, res.output
+    repo = Repo(connect(str(tmp_path / "tradebot.db")))
+    stored = repo.load_candles(["NIFTY"], 5, 0, 2_000_000_000)
+    assert stored and all(to_ist(c.ts).time() != time(15, 30) for c in stored)
+
+
+def test_a_failed_index_fetch_points_at_the_composite_source(tmp_path, monkeypatch):
+    res, _ = _fetch_with_index(tmp_path, monkeypatch, fail_index=True)
+    assert res.exit_code == 1 and "NIFTY" in res.output and "composite" in res.output
+
+
+def test_with_index_refuses_an_index_that_is_also_in_the_universe(tmp_path):
+    """Amendment C2: an index that is also a universe symbol would be stripped from every bar by
+    the engine, mistaking a tradable symbol for the index - refused early, as a clean error."""
+    make_config(tmp_path, data={"index_symbol": "RELIANCE"})
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [RELIANCE]\n")
+    (tmp_path / "instruments.csv").write_text(_INSTRUMENTS)
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15")
+    assert res.exit_code == 1 and "also in the universe" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_backtest_with_the_regime_on_needs_index_candles(tmp_path):
+    """The CLI's start-up check runs before the run is created at all: a failed start here must
+    not burn a run id (`repo.create_run` lives inside `engine.run()`, called much later)."""
+    _setup(tmp_path)
+    make_config(tmp_path, regime={"enabled": True}, data={"index_symbol": "NIFTY"})
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "rg0")
+    assert res.exit_code == 1 and "NIFTY" in res.output and "fetch-data" in res.output
+    assert "Traceback" not in res.output
+    repo = Repo(connect(make_config(tmp_path).paths.db))
+    assert repo.get_run("rg0") is None
+
+
+def test_backtest_with_the_regime_on_runs_when_the_index_is_stored(tmp_path):
+    cfg = _setup(tmp_path)
+    make_config(tmp_path, regime={"enabled": True, "ema_period": 3}, data={"index_symbol": "NIFTY"})
+    repo = Repo(connect(cfg.paths.db))
+    t0 = ist_epoch(date(2026, 9, 14), "09:15")
+    repo.insert_candles([Candle("NIFTY", t0 + i * 300, 25000.0, 25000.0, 25000.0, 25000.0, 0) for i in range(75)], interval=5)
+    repo.conn.close()
+    res = _invoke(tmp_path, "backtest", "--start", "2026-09-14", "--end", "2026-09-15", "--run-id", "rg1")
+    assert res.exit_code == 0, res.output
+    import json
+    repo = Repo(connect(cfg.paths.db))
+    assert json.loads(repo.get_run("rg1")["config_json"])["regime"]["enabled"] is True
+    assert all(r["symbol"] != "NIFTY" for r in repo.list_positions("rg1"))     # gating itself is covered in test_engine
+
+
+def test_paper_feeds_the_index_to_warm_up_and_the_live_source(tmp_path, monkeypatch):
+    """Task 15: the index rides along with the universe into the warm-up fetch and the live bar
+    source, first (amendment C1), but `lot_sizes` stays universe-only - the index has no lot size
+    and is never traded."""
+    market = {"A": synth_candles("A", PRIOR + [TODAY]), "B": synth_candles("B", PRIOR + [TODAY], phase=4.0, seed=99),
+             "NIFTY": [Candle("NIFTY", c.ts, 25000.0, 25000.0, 25000.0, 25000.0, 0)
+                      for c in synth_candles("A", PRIOR + [TODAY])]}
+    _paper_setup(tmp_path, monkeypatch, lambda sym, ex, s, e, i: [c for c in market[sym] if s <= c.ts <= e])
+    p = tmp_path / "config.yaml"
+    raw = yaml.safe_load(p.read_text())
+    raw["data"] = {**(raw.get("data") or {}), "index_symbol": "NIFTY"}
+    p.write_text(yaml.safe_dump(raw))
+    seen = {}
+    real_source, real_engine = cli.LiveBarSource, cli.PaperEngine
+
+    def spy_source(fetcher, repo, symbols, *a, **k):
+        seen["source_symbols"] = list(symbols)
+        return real_source(fetcher, repo, symbols, *a, **k)
+
+    def spy_engine(cfg, repo, source, strategies, broker, ai, clock, lot_sizes, run_id, **k):
+        seen["lot_sizes"] = dict(lot_sizes)
+        return real_engine(cfg, repo, source, strategies, broker, ai, clock, lot_sizes, run_id, **k)
+
+    monkeypatch.setattr(cli, "LiveBarSource", spy_source)
+    monkeypatch.setattr(cli, "PaperEngine", spy_engine)
+    t = FakeTime(ist_epoch(TODAY, "09:00"))
+    monkeypatch.setattr(cli.time, "time", t.now)
+    monkeypatch.setattr(cli.time, "sleep", t.sleep)
+    res = _invoke(tmp_path, "paper", "--run-id", "p4", "--ai", "stub")
+    assert res.exit_code == 0, res.output
+    assert seen["source_symbols"][0] == "NIFTY" and set(seen["source_symbols"]) == {"NIFTY", "A", "B"}
+    assert seen["lot_sizes"] == {"A": 1, "B": 1}          # never NIFTY: it has no lot size and is never traded
+    repo = Repo(connect(make_config(tmp_path).paths.db))
+    assert repo.latest_candle_ts("NIFTY", 5) is not None, "the warm-up fetch must have pulled the index too"
