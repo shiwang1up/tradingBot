@@ -131,12 +131,18 @@ def _hhmm_minutes(hhmm: str) -> int:
 
 def check_holdout_data(conn, symbols: list, interval: int, window, session) -> int:
     """Count-only completeness check of a window: only `symbol` and `ts` are read, never a price
-    column. Closes `conn` -- the caller passes a connection just for this. A symbol-day with ZERO
-    bars counts as incomplete too: `bars_per_symbol_day` only ever holds keys for rows actually
-    seen, so the incomplete count is taken against the full `len(days) * len(symbols)` grid rather
-    than by tallying only the symbol-days present in it (amendment D7 -- the earlier version missed
-    exactly this: a symbol absent from the window for a whole day was invisible to it). Returns the
-    incomplete count so the caller can decide whether to refuse to run on gappy data."""
+    column. Closes `conn` -- the caller passes a connection just for this.
+
+    The grid is (symbol, EXPECTED trading day): the expected days come from the calendar
+    (`SessionClock.is_trading_day` over every date of the window: weekdays that are not configured
+    holidays), never from the rows seen. A pair is incomplete unless it holds exactly the expected
+    number of bars, so a symbol with no rows on a day counts (amendment D7), and so does a trading
+    day with no rows for ANY symbol -- a day the rows themselves could never reveal. This guards a
+    run-once window, so a hole must not be able to hide. An exchange holiday missing from
+    `session.holidays` shows up here as a whole day of incomplete symbol-days: add it to the config
+    rather than passing --accept-gaps. Rows on a day that is not an expected trading day are
+    reported and left out of the count. Returns the incomplete count so the caller can decide
+    whether to refuse to run on gappy data."""
     try:
         marks = ",".join("?" * len(symbols))
         start, end = ist_epoch(window[0], "00:00"), ist_epoch(window[1], "23:59")
@@ -151,12 +157,34 @@ def check_holdout_data(conn, symbols: list, interval: int, window, session) -> i
         key = (r["symbol"], date_of(r["ts"]))
         bars_per_symbol_day[key] = bars_per_symbol_day.get(key, 0) + 1
     expected = (_hhmm_minutes(session.close) - _hhmm_minutes(session.open)) // interval
-    days = {d for _, d in bars_per_symbol_day}
-    complete = sum(1 for n in bars_per_symbol_day.values() if n == expected)
+    clock = SessionClock(session, interval)
+    span = (window[1] - window[0]).days + 1
+    days = [d for d in (window[0] + timedelta(days=i) for i in range(span)) if clock.is_trading_day(d)]
     total = len(days) * len(symbols)
-    incomplete = total - complete
-    print(f"holdout data: {len(days)} days, {len(symbols)} symbols, {incomplete} incomplete symbol-days of {total}")
+    incomplete = sum(1 for d in days for s in symbols if bars_per_symbol_day.get((s, d), 0) != expected)
+    print(f"holdout data: {len(days)} expected trading days, {len(symbols)} symbols, "
+          f"{incomplete} incomplete symbol-days of {total}")
+    stray = sorted({d for _, d in bars_per_symbol_day} - set(days))
+    if stray:
+        print(f"holdout data: rows on {len(stray)} day(s) that are not expected trading days, not counted: "
+              f"{', '.join(d.isoformat() for d in stray)}")
     return incomplete
+
+
+def regime_run_ids(strategy_name: str, tags: list) -> list:
+    """Every run id the regime phase creates for one strategy, in the order it creates them."""
+    return [f"rg-{strategy_name}-{'on' if enabled else 'off'}-{tag}" for tag in tags for enabled in (False, True)]
+
+
+def existing_run_ids(db_path: str, run_ids: list) -> list:
+    """Those of `run_ids` already stored in the database at `db_path`. Opens and closes its own
+    connection."""
+    conn = connect(db_path)
+    try:
+        repo = Repo(conn)
+        return [r for r in run_ids if repo.get_run(r) is not None]
+    finally:
+        conn.close()
 
 
 def _since_after_last_not_ready(repo: Repo, run_id: str, window) -> int:
@@ -182,29 +210,40 @@ def regime_phase(a) -> None:
     if a.with_holdout:
         # The run-once discipline applies to this phase too: `--with-holdout` cannot be used to burn
         # the holdout run id under a different name before the tuning window has earned a look at it.
-        gate = Repo(connect(variants[0][1].paths.db))
-        if gate.get_run("orb-holdout") is None:
+        if not existing_run_ids(variants[0][1].paths.db, ["orb-holdout"]):
             sys.exit("--with-holdout needs an existing 'orb-holdout' run first (run-once discipline)")
         windows.append(("hold", HOLDOUT))
+    # Every pre-check below runs before any run is created: a failure must leave no partial set of
+    # run rows behind. Run ids first -- `run` refuses an existing id too, but only when its turn
+    # comes, so after a crash part-way a second invocation would otherwise add some rows and then
+    # stop, or (had the first ids been cleaned up by hand) mix rows from two invocations.
+    taken = [r for strategy_name, base in variants
+             for r in existing_run_ids(base.paths.db, regime_run_ids(strategy_name, [tag for tag, _ in windows]))]
+    if taken:
+        sys.exit(f"run(s) already exist: {', '.join(taken)}. The regime phase creates all of its runs or "
+                 f"none: report them with `tradebot report --run <id>`; to repeat the phase, every "
+                 f"rg-* run of this set has to be removed from the database first")
     if a.source == "index":
-        # Checked once, before any run is created, for every (strategy, window) this invocation will
-        # touch: a failure here must leave no partial set of run rows behind.
+        # Checked once for every (strategy, window) this invocation will touch.
         for strategy_name, base in variants:
             idx = base.data.index_symbol
-            for tag, window in windows:
-                start, end = ist_epoch(window[0], "00:00"), ist_epoch(window[1], "23:59")
-                if not idx:
-                    sys.exit(f"--source index needs {strategy_name}'s data.index_symbol set; run "
-                             f"`tradebot fetch-data`, or pass --source composite")
-                repo = Repo(connect(base.paths.db))
-                if not repo.load_candles([idx], base.execution.interval_minutes, start, end):
-                    sys.exit(f"no {idx} candles for {strategy_name} in {window[0]}..{window[1]}; run "
-                             f"`tradebot fetch-data` for this config, or pass --source composite")
+            if not idx:
+                sys.exit(f"--source index needs {strategy_name}'s data.index_symbol set; run "
+                         f"`tradebot fetch-data`, or pass --source composite")
+            conn = connect(base.paths.db)
+            try:
+                repo = Repo(conn)
+                for tag, window in windows:
+                    start, end = ist_epoch(window[0], "00:00"), ist_epoch(window[1], "23:59")
+                    if not repo.load_candles([idx], base.execution.interval_minutes, start, end):
+                        sys.exit(f"no {idx} candles for {strategy_name} in {window[0]}..{window[1]}; run "
+                                 f"`tradebot fetch-data` for this config, or pass --source composite")
+            finally:
+                conn.close()
     summaries: dict = {}
     for strategy_name, base in variants:
         for tag, window in windows:
-            for enabled in (False, True):
-                run_id = f"rg-{strategy_name}-{'on' if enabled else 'off'}-{tag}"
+            for enabled, run_id in zip((False, True), regime_run_ids(strategy_name, [tag])):
                 s = run(with_regime(base, enabled, a.source), strategy_name, run_id, window, with_index=True)
                 summaries[(strategy_name, tag, enabled)] = s
                 print(row(s), flush=True)   # unscored, whole window: the raw run as stored
@@ -229,7 +268,8 @@ def regime_phase(a) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("phase", choices=["tune", "holdout", "regime"])
-    ap.add_argument("--config", default="config-orb.yaml")
+    ap.add_argument("--config", default="config-orb.yaml",
+                    help="used by tune and holdout; regime always uses config-orb.yaml and config.yaml")
     ap.add_argument("--range", dest="range_minutes", type=int, choices=[30, 60])
     ap.add_argument("--rr", choices=["1.5", "2.0", "none"], help="1.5, 2.0 or none")
     ap.add_argument("--source", default="index", choices=["index", "composite"],

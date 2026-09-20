@@ -1,7 +1,8 @@
 """The per-bar cycle (spec sections 4-8). Mode-independent given a broker and clock; subclasses supply the loop.
 
 Order inside a bar:
-  0. usable -> split      drop unusable candles, then split off the index; the regime filter sees it, nothing else does
+  0. usable -> strip the index -> feed the regime filter
+                          drop unusable candles, then strip the index; the regime filter sees it, nothing else does
   1. broker.on_bar        fills pending entries at this bar's open, simulates exits
   2. square-off           once per day, from the square-off bar onward (latched)
   3. daily loss cap       flatten once per day if breached and configured to
@@ -139,9 +140,8 @@ class Engine:
     def _strip_index(self, candles: dict[str, Candle]) -> tuple[dict[str, Candle], Optional[Candle]]:
         """The tradable candles of a bar, and the index candle if this bar carries one - so no
         strategy, indicator, broker call or AI prompt ever sees the index. Pure: it neither reads
-        nor writes the regime filter, unlike the old _split_index this replaces; _feed_regime does
-        that separately. Must run after _usable (a bad index candle is dropped, not fed to the
-        filter) and before _observe."""
+        nor writes the regime filter; _feed_regime does that separately. Must run after _usable (a
+        bad index candle is dropped, not fed to the filter) and before _observe."""
         idx = self._index_symbol
         index_candle = candles.get(idx) if idx else None
         tradable = {s: c for s, c in candles.items() if s != idx} if index_candle is not None else candles
@@ -454,10 +454,11 @@ class BacktestEngine(Engine):
                 log.exception("end-of-day bookkeeping failed for run %s", self.run_id)
             finally:
                 if current is not None and self._regime is not None and self._regime.state == NOT_READY:
-                    # Safety net for callers that bypass the CLI's start-up check (scripts/orb_experiment.py
-                    # does): the filter never warmed up, so every entry of this run was silently
-                    # rejected as regime_not_ready. Skipped when the run processed no trading day at
-                    # all (current is None): there were no entries to have silently rejected.
+                    # This warning protects callers that bypass the CLI (scripts/orb_experiment.py does
+                    # its own index check, but not the coverage check): the filter never warmed up,
+                    # so every entry of this run was silently rejected as regime_not_ready. Skipped
+                    # when the run processed no trading day at all (current is None): there were no
+                    # entries to have silently rejected.
                     why = ("fewer than ema_period usable index candles reached the filter" if self.cfg.regime.source == "index"
                           else "the universe never gave the composite enough breadth to warm up")
                     log.warning("run %s ended with the regime filter still NOT_READY (%s); every entry "

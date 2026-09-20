@@ -89,7 +89,10 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
                   since_ts: Optional[int] = None) -> Summary:
     """`since_ts`, when given, scores only positions opened at or after it and only daily rows dated
     on or after its IST date - so a filter-on run's warm-up days (rejected regime_not_ready, not on
-    the strategy's merit) do not cost a filter-off comparison run its own early days too (D3)."""
+    the strategy's merit) do not cost a filter-off comparison run its own early days too (D3). Only
+    the trade statistics and the daily rows (`days`, and the equity drawdown taken from them) are
+    filtered. `risk_rejections` and `ai_rejections` remain whole-run figures; `open_positions` counts
+    only the still-open positions opened at or after `since_ts`, like the trade statistics."""
     run = repo.get_run(run_id)
     if run is None:
         raise ValueError(f"unknown run: {run_id}")
