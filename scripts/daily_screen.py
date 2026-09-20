@@ -40,6 +40,7 @@ HOLDOUT_FILE = "docs/superpowers/notes/daily-screen-holdout.txt"
 WARMUP_BARS = 200                       # SMA(200) plus a bar to cross on
 GAP_THRESHOLD = 0.20                    # an overnight move this large is an unadjusted corporate action
 GAP_MASK_DAYS = 200                     # ... and the 200-day average is unusable for this long after it
+INTRABAR_THRESHOLD = 0.35               # see gap_mask: only applied when the open is synthetic
 
 # Groww DELIVERY (CNC) schedule on an assumed position value, plus slippage. CHECK THESE against
 # groww.in/pricing before trusting any figure computed from them.
@@ -84,15 +85,41 @@ def load_series(conn, symbols):
     return out
 
 
-def gap_mask(bars, threshold=GAP_THRESHOLD, mask_days=GAP_MASK_DAYS):
-    """Dates unusable because of an unadjusted corporate action: any bar whose open is more than
-    `threshold` away from the previous close, and the `mask_days` trading days after it. An
-    unadjusted split reads as a crash, which would manufacture mean-reversion entries, and it
-    poisons every long average for as long as it stays in the window."""
+def gap_mask(bars, threshold=GAP_THRESHOLD, mask_days=GAP_MASK_DAYS,
+             intrabar=INTRABAR_THRESHOLD):
+    """Dates unusable because of an unadjusted corporate action, plus the `mask_days` trading days
+    after each. An unadjusted split reads as a crash, which would manufacture mean-reversion
+    entries and poison every long average while it sits in the window.
+
+    Two detectors, because the data has two shapes.
+
+    1. Overnight: the open jumps more than `threshold` from the previous close. This is how a split
+       looks whenever the open is real, which is all of 2020-2024.
+    2. Inside the bar: the close is more than `intrabar` from the open, AND the open is exactly the
+       previous close. Groww's daily open is synthetic for 2025 (98.6% of bars carry the previous
+       close forward), so a split there moves the close away from an open that never moved, and
+       detector 1 sees nothing.
+
+    Detector 2 is deliberately conditioned on the synthetic open rather than applied everywhere.
+    The inside-the-bar shape only exists BECAUSE the open is fake; where the open is real, a split
+    is an overnight gap and detector 1 has it. Conditioning also buys a much wider safety margin.
+    Measured over this universe, among bars moving more than 20% from open to close: those with a
+    real open top out at +37.8% (INDUSINDBK, 2020-03-26, a COVID-crash rebound) and are all genuine;
+    those with a synthetic open are the five splits, from -40.2% to -89.9%, plus one genuine crash
+    at -27.2% (INDUSINDBK, 2025-03-11). So the threshold has to separate 27.2% from 40.2%, and 0.35
+    sits in the middle of that gap. Applied unconditionally it would instead have to separate 37.8%
+    from 40.2%, a window too narrow to trust.
+
+    Over-masking costs data; under-masking manufactures a -90% return, which is far worse."""
     masked = set()
-    for i in range(1, len(bars)):
-        prev_close = bars[i - 1].close
-        if prev_close > 0 and abs(bars[i].open / prev_close - 1.0) > threshold:
+    for i, bar in enumerate(bars):
+        hit = False
+        if i > 0 and bars[i - 1].close > 0:
+            prev_close = bars[i - 1].close
+            hit = abs(bar.open / prev_close - 1.0) > threshold
+            if not hit and bar.open > 0 and abs(bar.open - prev_close) < 1e-9:
+                hit = abs(bar.close / bar.open - 1.0) > intrabar
+        if hit:
             for k in range(i, min(i + mask_days + 1, len(bars))):
                 masked.add(bars[k].date)
     return masked
