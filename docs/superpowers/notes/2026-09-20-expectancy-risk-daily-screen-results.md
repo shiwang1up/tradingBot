@@ -101,9 +101,9 @@ unverified against Groww's pricing page): 0.572% of position value.
 
 | System | Trades | Win rate | Payoff | Median hold | Expectancy (net) | Excess/date | t (dates) | Excess/trade |
 |---|---|---|---|---|---|---|---|---|
-| `mr` mean reversion | 1,220 | 56.9% | 0.76 | 3d | -0.001% | -0.177% | -1.16 (442 dates) | +0.167% |
-| `tf` trend following | 100 | 46.0% | 1.55 | 24d | +0.868% | -1.088% | -1.41 (84 dates) | -1.252% |
-| `bo` breakout | 229 | 50.2% | 3.70 | 68d | +10.742% | -1.836% | -1.46 (180 dates) | -0.581% |
+| `mr` mean reversion | 1,220 | 56.9% | 0.76 | 3d | -0.001% | -0.203% | -1.32 (442 dates) | +0.137% |
+| `tf` trend following | 100 | 46.0% | 1.55 | 24d | +0.868% | -1.348% | -1.80 (84 dates) | -1.493% |
+| `bo` breakout | 229 | 50.2% | 3.70 | 68d | +10.742% | -2.532% | -2.15 (180 dates) | -1.689% |
 
 No system passed. The pass bar, fixed in the spec (`docs/superpowers/specs/2026-09-20-expectancy-risk-daily-screen-design.md`,
 committed 2026-09-20) before the daily data existed (the fetch ran after that commit): in-sample excess
@@ -114,20 +114,31 @@ in fact all three are negative. None clears the first gate, so none reaches the 
 The central finding: the raw per-trade expectancies are positive and, for breakout, large (+10.742% per
 trade). Almost all of that is the market, not the rule. Against the baseline of simply holding the same
 stock for the same number of trading days from the same entry date, all three systems come out negative
-(excess/date -0.177%, -1.088%, -1.836%). A rule that buys into a six-year rise in Indian large caps
+(excess/date -0.203%, -1.348%, -2.532%). A rule that buys into a six-year rise in Indian large caps
 shows a positive return from the drift alone; only the excess over that drift is evidence the rule's
 timing does anything, and here it does not.
 
-Two corrections made during this work. First, the screen originally printed a trade-weighted excess
-beside a date-weighted t, which for mean reversion showed a positive mean (+0.167%) next to a negative
-t (-1.16) — an apparent contradiction. Trades cluster on entry dates: one market-wide dip fires mean
-reversion across many symbols on the same day, so a few busy dates can carry a trade-weighted average
-that a date-weighted one does not. Dates, not trades, are the independent unit here, so the date-weighted
-figure (-0.177%) is the one the t tests and the one the pass bar is judged on; the script now prints
-both, labelled, so this cannot recur silently. Second: the trade and the baseline are charged the same
-round-trip cost, so the cost cancels out of the excess figure — excess measures entry timing against a
-random entry of the same holding length, nothing more. The `expectancy` line, separately, is the money
-figure, net of costs.
+Three corrections were made during this work. First, the screen originally printed a trade-weighted
+excess beside a date-weighted t, which for mean reversion showed a positive mean (+0.137%) next to a
+negative t (-1.32) — an apparent contradiction. Trades cluster on entry dates: one market-wide dip fires
+mean reversion across many symbols on the same day, so a few busy dates can carry a trade-weighted
+average that a date-weighted one does not. Dates, not trades, are the independent unit here, so the
+date-weighted figure (-0.203%) is the one the t tests and the one the pass bar is judged on; the script
+now prints both, labelled, so this cannot recur silently. Second: the trade and the baseline are charged
+the same round-trip cost, so the cost cancels out of the excess figure — excess measures entry timing
+against a random entry of the same holding length, nothing more. The `expectancy` line, separately, is
+the money figure, net of costs.
+
+Third, found by review, not by the screen: the first in-sample run applied the corporate-action gap
+mask to trades (via `simulate`) but not to the baseline (`baseline_return` took no mask at all), so the
+baseline's average included holds that spanned an unadjusted split — single-day moves of roughly -90%
+and +95% — which pulled it too close to zero and made every system's excess look less negative than it
+is. With the baseline masked the same way trades already were, every t moves more negative: mean
+reversion -1.16 to -1.32, trend following -1.41 to -1.80, breakout -1.46 to -2.15. The conclusion does
+not change — no system passed before the fix and none passes after it — and now rests on stronger
+evidence, not weaker. Because this was a measurement bug the screen itself gave no sign of (the numbers
+it printed looked plausible on their own), the excess figures above should be read alongside the caveat
+list in section 5 rather than taken alone.
 
 The holdout (2024-01-01..2025-11-21) was deliberately not run. No system cleared the in-sample gate, so
 the holdout could only have confirmed a rejection that is already visible in-sample; running it would
