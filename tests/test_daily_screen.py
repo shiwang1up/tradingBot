@@ -2,6 +2,7 @@
 `from __future__ import annotations`, so it is loaded straight from its path rather than imported
 as `tradebot.*` (amendment D7)."""
 import importlib.util
+import math
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -229,3 +230,57 @@ def test_the_window_bounds_which_bars_can_trade():
     assert trades, "the window must contain trades"
     for t in trades:
         assert window[0] <= t.entry_date <= window[1] and t.exit_date <= window[1]
+
+
+def test_baseline_is_the_average_hold_of_the_same_length():
+    """A series compounding 1% a day: holding 3 days always pays 1.01^3 - 1, so the baseline is
+    that minus cost, whichever date you start on."""
+    closes = [100.0 * (1.01 ** k) for k in range(30)]
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), c, c, c, c) for k, c in enumerate(closes)]
+    b = ds.baseline_return(bars, (bars[0].date, bars[-1].date), 3, cost=0.0)
+    assert b == pytest.approx(1.01 ** 3 - 1.0)
+    assert ds.baseline_return(bars, (bars[0].date, bars[-1].date), 3, cost=0.005) == pytest.approx(
+        1.01 ** 3 - 1.0 - 0.005)
+
+
+def test_baseline_is_none_when_no_hold_of_that_length_fits():
+    bars = _flat(4)
+    assert ds.baseline_return(bars, (bars[0].date, bars[-1].date), 10, cost=0.0) is None
+
+
+def test_a_system_that_only_matches_the_drift_has_zero_excess():
+    """The point of the baseline: in a market that rose, being long pays even with no skill."""
+    closes = [100.0 * (1.01 ** k) for k in range(30)]
+    bars = [ds.Bar(date(2020, 1, 1) + timedelta(days=k), c, c, c, c) for k, c in enumerate(closes)]
+    window = (bars[0].date, bars[-1].date)
+    trades, _ = ds.simulate("A", "mr", bars, _ind(bars), set(), window, cost=0.0,
+                            system=(lambda ind, i: i == 5, lambda ind, i, e, h: "x" if i - e >= 3 else None),
+                            warmup=0)
+    scored = ds.attach_excess(trades, bars, window, cost=0.0)
+    assert len(scored) == 1 and scored[0].excess == pytest.approx(0.0, abs=1e-12)
+
+
+def test_t_averages_trades_entered_on_the_same_date_first():
+    """Three dates whose excesses are 0.02, 0.00 and 0.01, the first repeated 50 times because one
+    market-wide dip fired it across 50 names. Collapsed: means 0.02/0.00/0.01, mean 0.01,
+    var 0.0001, t = 0.01 / (0.01 / sqrt(3)) = sqrt(3) = 1.7320508. Counted per trade instead, n
+    would be 52 and t several times larger -- repetition, not evidence."""
+    d1, d2, d3 = date(2020, 1, 1), date(2020, 1, 2), date(2020, 1, 3)
+    trades = ([ds.Trade("A", "mr", d1, d1, 1.0, 1.0, 1, 0.0, 0.0, "x", 0.02) for _ in range(50)]
+              + [ds.Trade("B", "mr", d2, d2, 1.0, 1.0, 1, 0.0, 0.0, "x", 0.00),
+                 ds.Trade("C", "mr", d3, d3, 1.0, 1.0, 1, 0.0, 0.0, "x", 0.01)])
+    assert ds.t_across_dates(trades) == pytest.approx(math.sqrt(3), abs=1e-9)
+    # one date is not enough to say anything
+    assert ds.t_across_dates(trades[:50]) is None
+
+
+def test_describe_reports_expectancy_payoff_and_breakeven():
+    d = date(2020, 1, 1)
+    trades = [ds.Trade("A", "mr", d + timedelta(days=k), d, 1.0, 1.0, 2, 0.0, net, "x", net)
+              for k, net in enumerate([0.03, 0.01, -0.02, -0.02])]
+    s = ds.describe(trades)
+    assert s["trades"] == 4 and s["win_rate"] == pytest.approx(0.5)
+    assert s["avg_win"] == pytest.approx(0.02) and s["avg_loss"] == pytest.approx(-0.02)
+    assert s["payoff"] == pytest.approx(1.0) and s["breakeven"] == pytest.approx(0.5)
+    assert s["expectancy"] == pytest.approx(0.0)
+    assert s["median_days"] == 2

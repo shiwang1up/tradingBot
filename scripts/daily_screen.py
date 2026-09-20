@@ -21,7 +21,7 @@ import argparse
 import math
 import sqlite3
 import sys
-from collections import defaultdict, namedtuple
+from collections import Counter, defaultdict, namedtuple
 from datetime import date, timedelta
 
 DB = "data/tradebot.db"
@@ -264,6 +264,99 @@ def simulate(symbol, name, bars, ind, masked, window, cost, system=None, warmup=
                                 exit_px, exit_i - entry_i, gross, gross - cost, reason))
         i = exit_i
     return trades, excluded
+
+
+def baseline_return(bars, window, h, cost):
+    """Mean net return of simply holding this symbol for h trading days, entered at the open of
+    every date in the window whose exit also lands in it. None when no such hold fits.
+
+    Indian large caps rose over this period, so any rule that buys shows a positive return from the
+    drift alone; only the excess over this baseline is evidence of an edge."""
+    lo, hi = window
+    rs = []
+    for i in range(len(bars)):
+        if not (lo <= bars[i].date <= hi) or bars[i].open <= 0:
+            continue
+        j = i + h
+        if j < len(bars) and bars[j].date <= hi:
+            rs.append(bars[j].open / bars[i].open - 1.0 - cost)
+    return (sum(rs) / len(rs)) if rs else None
+
+
+def attach_excess(trades, bars, window, cost):
+    """Each trade's net return less what holding the same symbol the same number of days paid on
+    average. The baseline is cached per holding length: a system's trades repeat a few lengths."""
+    cache = {}
+    out = []
+    for t in trades:
+        if t.days not in cache:
+            cache[t.days] = baseline_return(bars, window, t.days, cost)
+        base = cache[t.days]
+        out.append(t._replace(excess=t.net - (base if base is not None else 0.0)))
+    return out
+
+
+def t_across_dates(trades, attr="excess"):
+    """t of the mean, averaging trades entered on the same date first. Signals cluster: one
+    market-wide dip fires mean reversion across forty names at once, and counting those as forty
+    independent observations would inflate t by roughly the square root of the cluster size."""
+    by_date = defaultdict(list)
+    for tr in trades:
+        by_date[tr.entry_date].append(getattr(tr, attr))
+    means = [sum(v) / len(v) for v in by_date.values()]
+    n = len(means)
+    if n < 2:
+        return None
+    mean = sum(means) / n
+    var = sum((m - mean) ** 2 for m in means) / (n - 1)
+    if var <= 0:
+        return None
+    return mean / math.sqrt(var / n)
+
+
+def describe(trades):
+    """Rayner's block: win rate, the two averages, payoff, expectancy, the win rate this payoff
+    would need to break even, plus the excess over the baseline and its t."""
+    n = len(trades)
+    if n == 0:
+        return dict(trades=0, win_rate=0.0, avg_win=0.0, avg_loss=0.0, payoff=0.0, expectancy=0.0,
+                    breakeven=0.0, median_days=0, excess=0.0, t=None, dates=0, exits={})
+    wins = [t.net for t in trades if t.net > 0]
+    losses = [t.net for t in trades if t.net <= 0]
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    payoff = avg_win / abs(avg_loss) if avg_loss < 0 and avg_win > 0 else 0.0
+    days = sorted(t.days for t in trades)
+    return dict(
+        trades=n,
+        win_rate=len(wins) / n,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
+        payoff=payoff,
+        expectancy=sum(t.net for t in trades) / n,
+        breakeven=(1.0 / (1.0 + payoff)) if payoff > 0 else 0.0,
+        median_days=days[n // 2],
+        excess=sum(t.excess for t in trades) / n,
+        t=t_across_dates(trades),
+        dates=len(set(t.entry_date for t in trades)),
+        exits=dict(Counter(t.reason for t in trades)),
+    )
+
+
+def format_system(name, label, window, s, excluded, cost):
+    t = "n/a" if s["t"] is None else "%.2f" % s["t"]
+    return "\n".join([
+        "%s   %s %s..%s" % (SYSTEM_TITLES[name], label, window[0], window[1]),
+        "  trades %-6d win %5.1f%%   avg win %+.2f%%   avg loss %+.2f%%   payoff %.2f   median hold %dd"
+        % (s["trades"], s["win_rate"] * 100, s["avg_win"] * 100, s["avg_loss"] * 100,
+           s["payoff"], s["median_days"]),
+        "  expectancy %+.3f%% per trade (net of %.3f%% round trip)   breakeven win %.1f%%"
+        % (s["expectancy"] * 100, cost * 100, s["breakeven"] * 100),
+        "  excess over baseline %+.3f%% per trade   t %s across %d entry dates"
+        % (s["excess"] * 100, t, s["dates"]),
+        "  exits %s   excluded by the gap mask %d"
+        % (", ".join("%s %d" % kv for kv in sorted(s["exits"].items())) or "none", excluded),
+    ])
 
 
 def main():
