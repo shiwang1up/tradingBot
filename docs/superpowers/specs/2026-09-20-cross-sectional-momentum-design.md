@@ -55,8 +55,11 @@ Universe: the 50 symbols in `universe.yaml`, daily candles at interval 1440.
 - **Eligibility** for a rank date: the symbol has closes at m-13, m-1 and m; and no corporate-action
   date (Part 2) falls in [m-13, m]. An ineligible symbol is excluded from BOTH the ranked portfolio
   and the baseline for that month, so the two always hold the same candidate set.
-- **Costs**: the delivery schedule already in the codebase (about 0.572% round trip, see
-  `round_trip_cost`), charged on TURNOVER only. If k of the 10 names change at a rebalance, the
+- **Costs**: the delivery schedule already in the codebase (`round_trip_cost`), charged on
+  TURNOVER only, and sized to the position this portfolio actually trades: 1 lakh across ten
+  names is 10,000 each, which costs 0.712% a round trip, not the 0.572% of the daily screen's
+  25,000 position. Each secondary grid cell is charged at its own concentration, so a more
+  concentrated basket is correctly dearer per rupee rather than sharing the primary's number. If k of the 10 names change at a rebalance, the
   month is charged `k/10 * round_trip_cost`. The baseline is charged the same way on its own
   turnover, which is near zero, and that asymmetry is real and must not be papered over.
 - **Window**: rank dates from 2021-01 (the first month with 13 months of history) to the last full

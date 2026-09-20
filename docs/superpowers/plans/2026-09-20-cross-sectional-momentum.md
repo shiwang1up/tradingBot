@@ -778,8 +778,8 @@ CAVEATS = (
     "be material, and cannot be fixed without a point-in-time constituent list.\n"
     "Monthly observations are few for a t. The window is one long bull market plus two corrections.\n"
     "Costs assume the delivery schedule in the spec, unverified against Groww's pricing page, and\n"
-    "ignore market impact. The portfolio ignores capital, lot sizes and the fact that ten equal\n"
-    "positions at 1 lakh is 10,000 each."
+    "are charged at the portfolio's real per-position value (1 lakh split across the basket), but\n"
+    "they ignore market impact and lot sizes."
 )
 
 
@@ -855,10 +855,20 @@ Add `from datetime import date` to the imports at the top of `scripts/momentum_s
 ```python
 SECONDARY_LOOKBACKS = (12, 6, 3)        # the primary is 12; 6 and 3 are descriptive only
 SECONDARY_TOP_NS = (5, 10, 15)          # the primary is 10
+CAPITAL = 100_000.0                     # the notional the portfolio is sized against
+
+
+def portfolio_cost(top_n):
+    """Round trip as a fraction, at the position value this portfolio actually trades. Splitting
+    1 lakh across ten names is 10,000 a position, where the 20 rupee brokerage floor and the flat
+    DP charge cost 71 bps a round trip against 57 at the daily screen's 25,000. Charging the
+    cheaper number would understate the one thing that has killed every strategy tried so far, and
+    it would let a more concentrated grid cell look cheaper than it is rather than dearer."""
+    return round_trip_cost(CAPITAL / float(top_n))
 
 
 def run_phase(conn, symbols, top_n=TOP_N, out=sys.stdout):
-    cost = round_trip_cost()
+    cost = portfolio_cost(top_n)
     closes, bars = load_closes(conn, symbols)
     masked = {s: gap_mask(b) for s, b in bars.items()}
     missing = [s for s in symbols if s not in closes]
@@ -894,7 +904,8 @@ def run_phase(conn, symbols, top_n=TOP_N, out=sys.stdout):
     for lb in SECONDARY_LOOKBACKS:
         cells = []
         for n in SECONDARY_TOP_NS:
-            g = summarise(run_months(closes, masked, top_n=n, cost=cost, lookback=lb))
+            g = summarise(run_months(closes, masked, top_n=n, cost=portfolio_cost(n),
+                                     lookback=lb))
             gt = "n/a" if g["t"] is None else "%.1f" % g["t"]
             cells.append("%12s" % ("%+.2f%% t%s" % (g["mean_spread"] * 100, gt)))
         print("  %-10s%s" % ("%d-1" % lb, "".join(cells)), file=out)
@@ -906,7 +917,6 @@ def quintiles_phase(conn, symbols, out=sys.stdout):
     """Mean monthly return of each of the five ranked groups. Monotonic ordering from top to bottom
     is far harder to produce by chance than one significant cell, and the bottom group is a
     built-in control: if top and bottom perform alike, the ranking carries no information."""
-    cost = round_trip_cost()
     closes, bars = load_closes(conn, symbols)
     masked = {s: gap_mask(b) for s, b in bars.items()}
     all_dates = sorted({d for by in closes.values() for d in by})
