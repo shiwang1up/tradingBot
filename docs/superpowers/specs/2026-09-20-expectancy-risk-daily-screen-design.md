@@ -34,10 +34,11 @@ shorts cannot be held overnight).
 - `expectancy = total net / trades`, printed with its decomposition
   `win_rate x avg_win - loss_rate x |avg_loss|` (the two are equal by identity; a test pins it).
 - `breakeven_win_rate = 1 / (1 + payoff)` when payoff > 0.
-- Evidence, from the run's `daily_pnl.realised` rows (filtered like the trades when `since_ts` is
-  given): number of days, mean per day, standard error, `t = mean / (sd / sqrt(n))`; computed across
-  DAYS because same-day trades are correlated. `sd` is the sample standard deviation; with fewer than
-  2 days or zero variance t is reported as n/a.
+- Evidence, from the trades' NET PnL summed per IST close date (the same trades as the rest of the
+  block, so `since_ts` applies): number of days with at least one closed trade, mean per day, and
+  `t = mean / (sd / sqrt(n))`; computed across DAYS because same-day trades are correlated. `sd` is the
+  sample standard deviation; with fewer than 2 days or zero variance t is reported as n/a. The
+  `daily_pnl` rows are NOT used: for old runs they are gross, and one code path is simpler.
 - A run with fewer than 30 trades or fewer than 20 days prints `too few to judge` on the evidence
   line; otherwise `|t| < 2` prints `not distinguishable from zero`.
 
@@ -47,11 +48,6 @@ Output, after the `R on risk` line:
     Expectancy            -146.15 per trade = 15.6% x 312.40 - 84.4% x 231.10
     Breakeven win rate    42.5% at this payoff (actual 15.6%)
     Evidence              62 days, mean -2,084 per day, t -9.1
-
-For old runs whose daily rows are gross (charges estimated after the fact) the evidence line is
-computed from per-day sums of the trades' NET PnL by IST close date instead, so it agrees with the
-headline; the summary already knows which case it is in (`charges_estimated_trades`). To keep one
-code path, the evidence line is ALWAYS computed from the trades' net PnL grouped by IST close date.
 
 `report/compare.py` adds rows `Payoff`, `Expectancy` and `t (days)` to the side-by-side table.
 
