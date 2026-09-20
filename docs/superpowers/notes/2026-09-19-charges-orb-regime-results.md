@@ -28,8 +28,9 @@ exchange and SEBI charges. **These rates were typed into the config and have not
 Groww's pricing page. Check them before trusting any net figure.**
 
 The old runs, restated. Charges are estimated from each position's entry and exit, since none were
-recorded at the time. These runs cover the whole stored window (to mid-September), not the tuning
-window used below.
+recorded at the time. These runs were made over the data stored at the time, not the tuning window
+used below, and they do not all cover the same dates: `real-1-sonnet` stops 17 trading days before
+`real-1` (spans under the table).
 
 | Run | Strategy | Trades | Gross | Charges (est.) | Net | Avg R (per trade) | R on risk |
 |---|---|---|---|---|---|---|---|
@@ -37,6 +38,10 @@ window used below.
 | `real-1-sonnet` | ema_rsi, 5 min, Claude filter | 346 | -63,474 | 26,086 | -89,560 | -2.14 | -0.56 |
 | `real-conf-2` | confluence, 5 min | 1,018 | -65,112 | 54,747 | -119,859 | -4.26 | -0.41 |
 | `pb-15m-1` | pullback, 15 min | 512 | -50,200 | 37,139 | -87,338 | -2.07 | -0.35 |
+
+Spans, from each run's daily rows: `real-1` 2026-06-17 to 2026-09-11, 62 trading days;
+`real-1-sonnet` 2026-06-17 to 2026-08-19, 45 trading days; `real-conf-2` 2026-06-17 to 2026-09-11, 62;
+`pb-15m-1` 2026-06-18 to 2026-09-15, 62. Rows of different spans are not comparable on rupee totals.
 
 Charges add another 41 to 84% of the gross loss. Every old strategy was already negative before them.
 
@@ -57,9 +62,14 @@ next bar's open plus slippage, further from the stop. On the `real-1` trades ope
 against 152,152 planned: 16% more. On `orb-t-60-1.5` it is 83,522 against 79,708: 5% more, because the
 stop is three times wider.
 
-The Claude filter, read again. `real-1-sonnet` loses 39,640 rupees less than `real-1` net (-89,560
-against -129,200). `R on risk` moves from -0.61 to -0.56. The filter approved 347 of 1,326 signals. It
-mostly traded less of a losing strategy; it did not find the good trades.
+The Claude filter, read again, on the same window. `real-1-sonnet` covers 45 trading days (to
+2026-08-19) and `real-1` covers 62, so the table rows above are not like for like. `real-1` restricted
+to positions opened on or before 2026-08-19 (the same 45 days): 638 trades, gross -71,987, charges
+(est.) 35,249, net -107,235, `R on risk` -0.589. Against `real-1-sonnet` (346 trades, net -89,560,
+-0.557) the filter loses 17,675 rupees less and `R on risk` moves from -0.59 to -0.56. The
+whole-window difference (39,640 rupees, -0.61 to -0.56) overstates the saving, because the filtered
+run is shorter: 21,965 of it is 17 further days of `real-1` losing money. The filter approved 347 of
+1,326 signals. It mostly traded less of a losing strategy; it did not find the good trades.
 
 ## ORB
 
@@ -107,14 +117,20 @@ deviation 963, t = -3.89. Gross of charges, from the positions: mean -424, 9 pos
 40 of the 41 days hold two positions and on 39 of those both entered on the same bar, so this is about
 41 bets, not 81.
 
-Reading. The cost problem is solved: the median cost per trade fell from 1.32 R to 0.08 R and every
-position is full size. The strategy has no edge on the tuning window. It is negative before charges
+Reading. Cost per unit of risk is no longer the dominant problem: the median cost per trade fell from
+1.32 R to 0.08 R (pooled, 0.21 R to 0.079 R) and every position is full size. It is not gone. Charges
+are still 27% of the net loss of `orb-t-60-1.5` (6,593 of 23,987), and 0.08 R per trade is comparable
+to a realistic intraday edge, so a strategy would have to earn that much before it breaks even. The
+strategy has no edge on the tuning window. It is negative before charges
 and more negative after, for all six parameter sets, and the parameters barely matter (-0.29 to
 -0.35). 60/1.5 is the least bad and is the one carried into the regime experiment; that is not a
 selection worth defending.
 
 Verification during development: every position of all six runs was re-derived from raw candles by an
 independent script and matched. No look-ahead was found.
+
+The shipped `config-orb.yaml` carries `range_minutes: 30, reward_risk: 2.0` (the plan's starting
+values), not the least-bad tuning row (60 / 1.5). No configuration is recommended.
 
 **The holdout (2026-08-16 to 2026-09-15) was NOT run for ORB.** This is deliberate. Every tuning
 configuration is clearly negative, so the holdout could only confirm a rejection. Leaving it unspent
@@ -191,8 +207,9 @@ the `orb` strategy; priority ranking of same-bar signals; the regime filter with
 sources; index fetch and storage; the guarded experiment script. ORB runs match an independent
 re-derivation and the filter-off regime run reproduces its tuning twin exactly.
 
-Supported, and negative: every old strategy is worse net of charges than it looked. ORB fixes cost per
-unit of risk and has no edge on the tuning window. The regime filter improves `R on risk` slightly and
+Supported, and negative: every old strategy is worse net of charges than it looked. With ORB, cost per
+unit of risk is no longer the dominant problem (0.08 R per trade, still 27% of its net loss), and it
+has no edge on the tuning window. The regime filter improves `R on risk` slightly and
 rescues nothing.
 
 Not supported: any profitable configuration.

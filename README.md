@@ -40,6 +40,10 @@ over rupees at risk, all trades pooled. That is the figure to judge a run by; th
 is dominated by scrap-sized trades. Runs stored before the charges model are estimated after the fact
 and marked so.
 
+Upgrading: a config file with no `charges:` block gets charges ENABLED at the default Groww rates, so
+results from an existing config change after upgrading. Set `charges.enabled: false` to reproduce the
+old gross-only numbers.
+
 ## Opening-range breakout
 
     .venv/bin/tradebot --config config-orb.yaml backtest --strategy orb --start 2026-06-17 --end 2026-08-15
@@ -50,8 +54,9 @@ and marked so.
 one signal per symbol per day, at most two entries a day, no entries after 13:00, positions flattened
 at 15:00. When several symbols break out on one bar the engine takes the ones with the highest volume
 relative to their opening range (`Signal.priority`), then alphabetical order, in backtest and paper
-alike. Start the ORB paper session before 09:45: most breakouts fire on the first bar after the range,
-and one seen during warm-up is spent, not traded.
+alike. The ORB paper session must be running before the first bar after the range closes (09:45 for
+the shipped 30-minute range, 10:15 for a 60-minute one): most breakouts fire on that bar, and one seen
+during warm-up is spent, not traded.
 
 `scripts/orb_experiment.py` has three phases: `tune` (six parameter sets on 2026-06-17..2026-08-15),
 `holdout` (2026-08-16..2026-09-15, a fixed run id, so it runs once; guarded) and `regime` (filter off
@@ -61,7 +66,9 @@ Results so far, none of them profitable: `docs/superpowers/notes/2026-09-19-char
 ## Regime filter
 
 `data.index_symbol: NIFTY` is fetched and stored with the universe and never traded. `fetch-data`
-fetches it last, and an index failure never blocks the universe. With `regime.enabled: true` longs
+fetches it last, and an index failure never blocks the universe. The shipped configs name NIFTY, so
+`fetch-data` exits 1 when only the index fails (the universe candles are still stored); clear
+`data.index_symbol` to stop fetching it. With `regime.enabled: true` longs
 are taken only while the index is above its EMA and shorts only while at or below; blocked signals
 appear under "Risk rejects" as `regime` or `regime_not_ready`. `regime.source: composite` builds the
 index from the universe's own returns when Groww serves no index history. The live paper feed carries
