@@ -50,26 +50,32 @@ Append to `tests/test_daily_screen.py` (the file already has a `_bars(rows)` hel
 
 ```python
 def test_gap_mask_catches_a_split_that_happens_inside_the_bar():
-    """Groww's 2025 daily bars carry the previous close forward as the open, so a split shows up
-    as close/open, not as an overnight gap. Bar 5 opens at the pre-split price and closes at half
-    it; its open equals bar 4's close, so the overnight detector sees nothing."""
+    """Groww's 2025 daily bars carry the previous close forward as the open, so a split shows up as
+    close/open with no overnight gap at all. Bar 5's open equals bar 4's close, so the overnight
+    detector sees nothing; the intrabar detector must."""
     rows = [("2020-01-%02d" % d, 100.0, 101.0, 99.0, 100.0) for d in range(1, 10)]
-    rows[5] = ("2020-01-06", 100.0, 101.0, 49.0, 50.0)
+    rows[5] = ("2020-01-06", 100.0, 101.0, 49.0, 50.0)     # open == bar 4's close, close is half
     masked = ds.gap_mask(_bars(rows), mask_days=3)
     assert date(2020, 1, 6) in masked
-    assert date(2020, 1, 9) in masked          # the days after are masked too
+    assert date(2020, 1, 9) in masked                      # the days after are masked too
     assert date(2020, 1, 5) not in masked
 
 
-def test_gap_mask_does_not_mask_the_largest_genuine_intraday_move_in_the_data():
-    """INDUSINDBK rebounded +37.8% intraday on 2020-03-26; ADANIENT fell 33.4% on 2023-02-02.
-    Both are real. The 30% threshold sits above them and below the smallest real split (-40.2%)."""
-    up = [("2020-03-%02d" % d, 100.0, 101.0, 99.0, 100.0) for d in (24, 25, 26, 27)]
-    up[2] = ("2020-03-26", 100.0, 138.0, 99.0, 137.8)       # +37.8% intraday, no overnight gap
-    assert ds.gap_mask(_bars(up), mask_days=3) == set()
-    down = [("2023-02-%02d" % d, 100.0, 101.0, 99.0, 100.0) for d in (1, 2, 3, 6)]
-    down[1] = ("2023-02-02", 100.0, 101.0, 66.0, 66.6)      # -33.4% intraday
-    assert ds.gap_mask(_bars(down), mask_days=3) == set()
+def test_gap_mask_does_not_mask_a_big_move_when_the_open_is_real():
+    """INDUSINDBK genuinely swung +37.8% intraday on 2020-03-26, larger than the smallest real
+    split. It is left alone because its open is a real open, not the previous close carried
+    forward: where the open is real, a split appears as an overnight gap instead."""
+    rows = [("2020-03-%02d" % d, 96.0, 97.0, 94.0, 95.0) for d in (24, 25, 26, 27)]
+    rows[2] = ("2020-03-26", 100.0, 138.0, 99.0, 137.8)    # open 100 != bar 1's close 95
+    assert ds.gap_mask(_bars(rows), mask_days=3) == set()
+
+
+def test_gap_mask_does_not_mask_a_genuine_crash_that_has_a_synthetic_open():
+    """INDUSINDBK fell 27.2% on 2025-03-11 on a real disclosure, in the period where every open is
+    the previous close. It is under the threshold, which is what the 27.2%-to-40.2% gap buys."""
+    rows = [("2025-03-%02d" % d, 100.0, 101.0, 99.0, 100.0) for d in (10, 11, 12, 13)]
+    rows[1] = ("2025-03-11", 100.0, 100.5, 72.0, 72.8)     # open == prev close, -27.2% intraday
+    assert ds.gap_mask(_bars(rows), mask_days=3) == set()
 
 
 def test_gap_mask_still_catches_an_overnight_gap():
@@ -89,10 +95,7 @@ Expected: `test_gap_mask_catches_a_split_that_happens_inside_the_bar` FAILS (the
 In `scripts/daily_screen.py`, beside `GAP_THRESHOLD`, add:
 
 ```python
-INTRABAR_THRESHOLD = 0.30               # a close this far from its own open is a corporate action,
-                                        # not a market move: the largest genuine intraday move in
-                                        # six years of this universe is +37.8% (INDUSINDBK,
-                                        # 2020-03-26), and the smallest real split here is -40.2%
+INTRABAR_THRESHOLD = 0.35               # see gap_mask: only applied when the open is synthetic
 ```
 
 Replace `gap_mask` with:
@@ -104,18 +107,34 @@ def gap_mask(bars, threshold=GAP_THRESHOLD, mask_days=GAP_MASK_DAYS,
     after each. An unadjusted split reads as a crash, which would manufacture mean-reversion
     entries and poison every long average while it sits in the window.
 
-    Two detectors, because the data has two shapes. Before 2025 Groww's daily open is real, so a
-    split appears as an overnight jump from the previous close. For 2025 the open is the previous
-    close carried forward, so the split appears INSIDE the bar as a huge close-to-open move and the
-    overnight detector is blind to it. The intrabar threshold is deliberately loose: over-masking
-    costs data, under-masking manufactures a -90% return, which is far worse."""
+    Two detectors, because the data has two shapes.
+
+    1. Overnight: the open jumps more than `threshold` from the previous close. This is how a split
+       looks whenever the open is real, which is all of 2020-2024.
+    2. Inside the bar: the close is more than `intrabar` from the open, AND the open is exactly the
+       previous close. Groww's daily open is synthetic for 2025 (98.6% of bars carry the previous
+       close forward), so a split there moves the close away from an open that never moved, and
+       detector 1 sees nothing.
+
+    Detector 2 is deliberately conditioned on the synthetic open rather than applied everywhere.
+    The inside-the-bar shape only exists BECAUSE the open is fake; where the open is real, a split
+    is an overnight gap and detector 1 has it. Conditioning also buys a much wider safety margin.
+    Measured over this universe, among bars moving more than 20% from open to close: those with a
+    real open top out at +37.8% (INDUSINDBK, 2020-03-26, a COVID-crash rebound) and are all genuine;
+    those with a synthetic open are the five splits, from -40.2% to -89.9%, plus one genuine crash
+    at -27.2% (INDUSINDBK, 2025-03-11). So the threshold has to separate 27.2% from 40.2%, and 0.35
+    sits in the middle of that gap. Applied unconditionally it would instead have to separate 37.8%
+    from 40.2%, a window too narrow to trust.
+
+    Over-masking costs data; under-masking manufactures a -90% return, which is far worse."""
     masked = set()
     for i, bar in enumerate(bars):
         hit = False
         if i > 0 and bars[i - 1].close > 0:
-            hit = abs(bar.open / bars[i - 1].close - 1.0) > threshold
-        if not hit and bar.open > 0:
-            hit = abs(bar.close / bar.open - 1.0) > intrabar
+            prev_close = bars[i - 1].close
+            hit = abs(bar.open / prev_close - 1.0) > threshold
+            if not hit and bar.open > 0 and abs(bar.open - prev_close) < 1e-9:
+                hit = abs(bar.close / bar.open - 1.0) > intrabar
         if hit:
             for k in range(i, min(i + mask_days + 1, len(bars))):
                 masked.add(bars[k].date)
@@ -125,7 +144,7 @@ def gap_mask(bars, threshold=GAP_THRESHOLD, mask_days=GAP_MASK_DAYS,
 - [ ] **Step 4: Run the suite**
 
 Run: `.venv/bin/pytest -q`
-Expected: `601 passed`. The daily screen's own tests must still pass unchanged.
+Expected: `602 passed` (four new tests). The daily screen's own tests must still pass unchanged.
 
 - [ ] **Step 5: Confirm the in-sample result did not move**
 
@@ -146,7 +165,7 @@ for s, bars in series.items():
     for i, b in enumerate(bars):
         if i and bars[i-1].close > 0 and abs(b.open/bars[i-1].close - 1) > 0.20:
             continue
-        if b.open > 0 and abs(b.close/b.open - 1) > 0.30:
+        if i and b.open > 0 and abs(b.open - bars[i-1].close) < 1e-9 and abs(b.close/b.open - 1) > 0.35:
             added.append((s, b.date.isoformat()))
 print("dates newly masked by the intrabar detector:")
 for s, d in sorted(added, key=lambda x: x[1]): print("  ", d, s)

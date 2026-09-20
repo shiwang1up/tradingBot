@@ -68,13 +68,17 @@ Universe: the 50 symbols in `universe.yaml`, daily candles at interval 1440.
 second detector and take the union:
 
 - **Overnight**: `|open[t] / close[t-1] - 1| > 0.20` (existing).
-- **Inside the bar**: `|close[t] / open[t] - 1| > 0.30`.
+- **Inside the bar**: `|close[t] / open[t] - 1| > 0.35`, AND `open[t]` is exactly `close[t-1]`.
 
-Measured separation on the stored data: the five inside-the-bar events are -40.2%, -50.4%, -50.9%,
--81.1% and -89.9%; the largest genuine intraday move in six years is INDUSINDBK +37.8% on
-2020-03-26 (a COVID-crash rebound), then ADANIENT -33.4% on 2023-02-02 (Hindenburg). A 30% threshold
-separates them, and errs toward masking a real crash rather than admitting a split: over-masking
-loses data, under-masking manufactures a fake -90% return, which is far worse.
+The second detector is conditioned on the synthetic open rather than applied everywhere, because
+the inside-the-bar shape only exists BECAUSE the open is fake; where the open is real a split is an
+overnight gap and the first detector has it. Measured over this universe, among bars moving more
+than 20% from open to close: those with a real open top out at +37.8% (INDUSINDBK 2020-03-26, a
+COVID-crash rebound) and are all genuine; those with a synthetic open are the five splits, -40.2% to
+-89.9%, plus one genuine crash at -27.2% (INDUSINDBK 2025-03-11). The threshold therefore has to
+separate 27.2% from 40.2%, and 0.35 sits in the middle. Applied unconditionally it would have to
+separate 37.8% from 40.2% instead, a window too narrow to trust. Over-masking costs data;
+under-masking manufactures a -90% return, which is far worse.
 
 Both detectors mask the event date. For the daily screen's trade simulation the existing 200-day
 forward mask stays. For THIS screen, eligibility uses the [m-13, m] window rule in Part 1, which is
