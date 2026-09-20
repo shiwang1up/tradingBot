@@ -52,36 +52,43 @@ Append to `tests/test_daily_screen.py` (the file already has a `_bars(rows)` hel
 def test_gap_mask_catches_a_split_that_happens_inside_the_bar():
     """Groww's 2025 daily bars carry the previous close forward as the open, so a split shows up as
     close/open with no overnight gap at all. Bar 5's open equals bar 4's close, so the overnight
-    detector sees nothing; the intrabar detector must."""
-    rows = [("2020-01-%02d" % d, 100.0, 101.0, 99.0, 100.0) for d in range(1, 10)]
-    rows[5] = ("2020-01-06", 100.0, 101.0, 49.0, 50.0)     # open == bar 4's close, close is half
+    detector sees nothing; the intrabar detector must. Prices stay at the post-split level
+    afterwards, as they really would."""
+    rows = [("2020-01-0%d" % d, 100.0, 101.0, 99.0, 100.0) for d in range(1, 6)]
+    rows += [("2020-01-06", 100.0, 101.0, 49.0, 50.0)]          # open == bar 4's close, close halves
+    rows += [("2020-01-0%d" % d, 50.0, 51.0, 49.0, 50.0) for d in (7, 8, 9)]
     masked = ds.gap_mask(_bars(rows), mask_days=3)
     assert date(2020, 1, 6) in masked
-    assert date(2020, 1, 9) in masked                      # the days after are masked too
+    assert date(2020, 1, 9) in masked                            # the days after are masked too
     assert date(2020, 1, 5) not in masked
 
 
 def test_gap_mask_does_not_mask_a_big_move_when_the_open_is_real():
     """INDUSINDBK genuinely swung +37.8% intraday on 2020-03-26, larger than the smallest real
     split. It is left alone because its open is a real open, not the previous close carried
-    forward: where the open is real, a split appears as an overnight gap instead."""
-    rows = [("2020-03-%02d" % d, 96.0, 97.0, 94.0, 95.0) for d in (24, 25, 26, 27)]
-    rows[2] = ("2020-03-26", 100.0, 138.0, 99.0, 137.8)    # open 100 != bar 1's close 95
+    forward: where the open is real, a split appears as an overnight gap instead. The price stays
+    elevated afterwards, so the day after is not itself a gap."""
+    rows = [("2020-03-24", 96.0, 97.0, 94.0, 95.0),
+            ("2020-03-25", 94.5, 99.0, 94.0, 98.0),
+            ("2020-03-26", 100.0, 138.0, 99.0, 137.8),           # open 100 != bar 1's close 98
+            ("2020-03-27", 137.0, 139.0, 136.0, 138.0)]
     assert ds.gap_mask(_bars(rows), mask_days=3) == set()
 
 
 def test_gap_mask_does_not_mask_a_genuine_crash_that_has_a_synthetic_open():
     """INDUSINDBK fell 27.2% on 2025-03-11 on a real disclosure, in the period where every open is
     the previous close. It is under the threshold, which is what the 27.2%-to-40.2% gap buys."""
-    rows = [("2025-03-%02d" % d, 100.0, 101.0, 99.0, 100.0) for d in (10, 11, 12, 13)]
-    rows[1] = ("2025-03-11", 100.0, 100.5, 72.0, 72.8)     # open == prev close, -27.2% intraday
+    rows = [("2025-03-10", 100.0, 101.0, 99.0, 100.0),
+            ("2025-03-11", 100.0, 100.5, 72.0, 72.8),            # open == prev close, -27.2%
+            ("2025-03-12", 72.8, 74.0, 72.0, 73.0),
+            ("2025-03-13", 73.0, 74.0, 72.5, 73.5)]
     assert ds.gap_mask(_bars(rows), mask_days=3) == set()
 
 
 def test_gap_mask_still_catches_an_overnight_gap():
     """The original detector must keep working: 2020-2024 splits appear at the open."""
-    rows = [("2020-01-%02d" % d, 100.0, 101.0, 99.0, 100.0) for d in range(1, 6)]
-    rows[3] = ("2020-01-04", 50.0, 51.0, 49.0, 50.0)
+    rows = [("2020-01-0%d" % d, 100.0, 101.0, 99.0, 100.0) for d in (1, 2, 3)]
+    rows += [("2020-01-04", 50.0, 51.0, 49.0, 50.0), ("2020-01-05", 50.0, 51.0, 49.0, 50.0)]
     assert date(2020, 1, 4) in ds.gap_mask(_bars(rows), mask_days=2)
 ```
 
