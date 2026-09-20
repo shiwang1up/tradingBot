@@ -1,13 +1,22 @@
 # tests/helpers.py
-"""Shared test builders: a config on disk and deterministic synthetic candles."""
+"""Shared test builders: a config on disk, deterministic synthetic candles, and the engine runners
+(FixedStrategy, run_fixed, decisions, MON, FakeTime) test_engine.py and test_engine_regime.py both
+drive a real BacktestEngine through."""
 import math
 from datetime import date
 
 import yaml
 
+from tradebot.ai.filter import StubFilter
 from tradebot.config import Config, load_config
-from tradebot.engine.clock import ist_epoch
-from tradebot.types import Candle
+from tradebot.data.historical import HistoricalSource
+from tradebot.engine.clock import SessionClock, ist_epoch
+from tradebot.engine.loop import BacktestEngine
+from tradebot.execution.backtest import BacktestBroker
+from tradebot.strategy.base import Strategy
+from tradebot.types import Candle, Signal, round_tick_down, round_tick_up
+
+MON = date(2026, 9, 14)  # a Monday; shared by test_engine.py and test_engine_regime.py
 
 BASE_CONFIG = {
     "capital": 100000,
@@ -25,6 +34,7 @@ BASE_CONFIG = {
     "data": {"official_fetch_concurrency": 5},
     "paths": {"db": "data/tradebot.db", "logs": "data/logs", "instruments": "data/instruments.csv",
               "kill_switch": "KILL", "universe": "universe.yaml"},
+    "charges": {"enabled": False},  # tests pin pre-charges numbers (golden-trades fixture); opt in with charges={"enabled": True}
 }
 
 
@@ -37,7 +47,7 @@ def make_config(tmp_path, **overrides) -> Config:
         "universe": str(tmp_path / "universe.yaml"),
     }
     for key, val in overrides.items():          # e.g. risk={"max_open_positions": 1}
-        raw[key] = {**raw[key], **val} if isinstance(val, dict) else val
+        raw[key] = {**(raw.get(key) or {}), **val} if isinstance(val, dict) else val
     p = tmp_path / "config.yaml"
     p.write_text(yaml.safe_dump(raw))
     return load_config(p, tmp_path / "nonexistent.env")
@@ -68,6 +78,57 @@ def synth_candles(symbol: str, days: list[date], phase: float = 0.0, seed: int =
             prev_close = c
             i += 1
     return out
+
+
+class FixedStrategy(Strategy):
+    """Fires exactly the signals it is told to and records every symbol it was shown.
+    `fires` maps (symbol, bar_ts) to (direction, priority)."""
+    name = "fixed"
+    product = "MIS"
+
+    def __init__(self, fires: dict):
+        self.fires = dict(fires)
+        self.seen: set = set()
+        self.seen_bars: set = set()  # (symbol, bar_ts) pairs actually shown to on_candle
+
+    def on_candle(self, candle: Candle):
+        self.seen.add(candle.symbol)
+        self.seen_bars.add((candle.symbol, candle.ts))
+        hit = self.fires.get((candle.symbol, candle.ts))
+        if hit is None:
+            return None
+        direction, priority = hit
+        stop = round_tick_down(candle.close * 0.99) if direction == "LONG" else round_tick_up(candle.close * 1.01)
+        return Signal(self.name, candle.symbol, direction, candle.close, stop, None, "MIS", candle.ts, priority=priority)
+
+    def is_ready(self, symbol: str) -> bool:
+        return True
+
+    def snapshot(self, symbol: str) -> dict:
+        return {}
+
+    def reset(self, symbol: str) -> None:
+        pass
+
+
+def run_fixed(repo, cfg, candles, fires, symbols, run_id="t1"):
+    """Run a FixedStrategy over `candles` through a real BacktestEngine and return the strategy
+    (so a caller can inspect what it was shown). Shared by test_engine.py and test_engine_regime.py."""
+    repo.insert_candles(candles, interval=5)
+    src = HistoricalSource.from_repo(repo, symbols, 5, 0, 2_000_000_000)
+    strat = FixedStrategy(fires)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    BacktestEngine(cfg, repo, src, [strat], broker, StubFilter(), SessionClock(cfg.session, 5),
+                   {s: 1 for s in symbols}, run_id).run()
+    return strat
+
+
+def decisions(repo, run_id="t1"):
+    rows = repo.conn.execute(
+        "SELECT s.symbol, s.direction, d.approved, d.reason FROM signals s JOIN risk_decisions d ON d.signal_id = s.id "
+        "WHERE s.run_id=? ORDER BY s.id", (run_id,)).fetchall()
+    return [(r["symbol"], r["direction"], r["approved"], r["reason"]) for r in rows]
 
 
 class FakeTime:

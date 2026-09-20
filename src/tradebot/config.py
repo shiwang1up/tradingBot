@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ class DataConfig:
     official_fetch_concurrency: int
     bar_grace_sec: int = 5      # paper: seconds to wait after a bar boundary before fetching the closed bar
     warmup_bars: int = 300      # paper: stored bars replayed per symbol before the first live bar (~4 days of 5m)
+    index_symbol: str = ""      # index fetched and stored with the universe for the regime filter; never traded
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,32 @@ class PathsConfig:
     instruments: str
     kill_switch: str
     universe: str
+
+
+@dataclass(frozen=True)
+class ChargesConfig:
+    """Groww intraday equity schedule. ``*_pct`` fields are human percents of order value.
+    Every field has a default, so the section may be left out of config.yaml."""
+    enabled: bool = True
+    brokerage_pct: float = 0.1         # per order ...
+    brokerage_max: float = 20.0        # ... capped at this many rupees
+    brokerage_min: float = 5.0         # ... and floored at this
+    stt_sell_pct: float = 0.025        # sell side only
+    exchange_txn_pct: float = 0.00297  # NSE, both sides
+    sebi_pct: float = 0.0001           # both sides
+    stamp_buy_pct: float = 0.003       # buy side only
+    gst_pct: float = 18.0              # on brokerage + exchange txn + SEBI
+
+
+REGIME_SOURCES = ("index", "composite")
+
+
+@dataclass(frozen=True)
+class RegimeConfig:
+    """Market-direction gate: longs only while the index is above its EMA, shorts only while at or below."""
+    enabled: bool = False
+    source: str = "index"    # index: data.index_symbol candles | composite: equal-weight mean of universe returns
+    ema_period: int = 20     # bars of the run's interval
 
 
 @dataclass(frozen=True)
@@ -104,6 +132,8 @@ class Config:
     paths: PathsConfig
     secrets: Secrets
     raw: dict
+    charges: ChargesConfig = ChargesConfig()
+    regime: RegimeConfig = RegimeConfig()
 
 
 _COERCE = {"float": float, "int": int, "bool": bool, "str": str, "tuple": tuple}
@@ -136,9 +166,12 @@ def _coerce(section: str, name: str, type_name: str, value: Any) -> Any:
 
 
 def _section(raw: dict, name: str, cls):
-    if name not in raw or not isinstance(raw[name], dict):
+    if name not in raw or raw[name] is None:
         raise ValueError(f"config.yaml missing section: {name}")
-    given = dict(raw[name])
+    value = raw[name]
+    if not isinstance(value, dict):
+        raise ValueError(f"config.yaml section '{name}' must be a mapping, got {value!r}")
+    given = dict(value)
     fields = {f.name: f for f in dataclasses.fields(cls)}
     unknown = set(given) - set(fields)
     if unknown:
@@ -149,6 +182,13 @@ def _section(raw: dict, name: str, cls):
     if missing:
         raise ValueError(f"config.yaml section '{name}' missing keys: {sorted(missing)}")
     return cls(**{k: _coerce(name, k, fields[k].type, v) for k, v in given.items()})
+
+
+def _optional_section(raw: dict, name: str, cls):
+    """For a section whose every field has a default: absent or empty in YAML means all defaults."""
+    if raw.get(name) is None:
+        return cls()
+    return _section(raw, name, cls)
 
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -189,9 +229,30 @@ def _validate(cfg: "Config") -> None:
         (a.price_cache_read_per_mtok >= 0, "ai.price_cache_read_per_mtok must be >= 0"),
         (a.price_cache_write_per_mtok >= 0, "ai.price_cache_write_per_mtok must be >= 0"),
     ]
+    ch = cfg.charges
+    for f in dataclasses.fields(ch):
+        if f.type == "float":  # under `from __future__ import annotations`, f.type is this literal string
+            v = getattr(ch, f.name)
+            checks.append((math.isfinite(v) and v >= 0, f"charges.{f.name} must be a finite number >= 0"))
+    checks.append((ch.brokerage_min <= ch.brokerage_max, "charges.brokerage_min must not exceed charges.brokerage_max"))
     for name in ("open", "close", "square_off", "no_new_entries_after"):
         checks.append((bool(_HHMM.match(getattr(s, name))), f'session.{name} must be a quoted "HH:MM" time'))
     checks.append((all(isinstance(h, str) for h in s.holidays), "session.holidays must be a list of ISO date strings"))
+    orb = cfg.strategy.get("orb")
+    if isinstance(orb, dict):  # the strategy counts range bars itself, so its copy of these must not drift
+        checks.append((orb.get("interval_minutes") == e.interval_minutes,
+                       f"strategy.orb.interval_minutes must equal execution.interval_minutes ({e.interval_minutes}), "
+                       f"got {orb.get('interval_minutes')!r}"))
+        checks.append((orb.get("session_open") == s.open,
+                       f"strategy.orb.session_open must equal session.open ({s.open!r}), "
+                       f"got {orb.get('session_open')!r}"))
+    g = cfg.regime
+    checks += [
+        (g.source in REGIME_SOURCES, f"regime.source must be one of {REGIME_SOURCES}"),
+        (g.ema_period >= 2, "regime.ema_period must be >= 2"),
+        (not (g.enabled and g.source == "index") or bool(d.index_symbol),
+         "data.index_symbol must be set when regime.enabled uses source: index"),
+    ]
     for ok, msg in checks:
         if not ok:
             raise ValueError(f"config.yaml {msg}")
@@ -234,6 +295,8 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         ),
         raw=raw,
+        charges=_optional_section(raw, "charges", ChargesConfig),
+        regime=_optional_section(raw, "regime", RegimeConfig),
     )
     _validate(cfg)
     return cfg

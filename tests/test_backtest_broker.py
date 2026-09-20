@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from tradebot.execution.backtest import STOP_FIRST_ON_SAME_BAR, BacktestBroker, check_exit
@@ -236,3 +238,115 @@ def test_restore_then_bar_fills_pending_and_exits_positions():
     assert closed.db_id == 7 and closed.exit_reason == "TARGET" and closed.pnl == pytest.approx(20.0)
     assert set(b.open_positions()) == {"B"} and b.pending_symbols() == set()
     assert b.cash == pytest.approx(99_020.0)
+
+
+def test_close_books_charges_and_moves_cash_by_net():
+    from tradebot.config import ChargesConfig
+    b = BacktestBroker(100_000.0, 0.0, 5.0, None, charges=ChargesConfig())
+    b.place_entry(_order(qty=100))                                   # LONG 100 @ 100, stop 99, target 102
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.2)})
+    ev = b.on_bar(1600, {"X": _c(101.0, 102.5, 100.8, 102.2, ts=1600)})
+    pos = ev[0].position
+    assert pos.exit_reason == "TARGET" and pos.pnl == pytest.approx(200.0)   # pnl stays gross
+    assert pos.charges == pytest.approx(27.42)                       # bought 10,000, sold 10,200
+    assert b.cash == pytest.approx(100_000.0 + 200.0 - 27.42)
+
+
+def test_short_charges_put_the_entry_on_the_sell_side():
+    from tradebot.config import ChargesConfig
+    b = BacktestBroker(100_000.0, 0.0, 5.0, None, charges=ChargesConfig())
+    b.place_entry(_order(direction="SHORT", entry=100.0, stop=101.0, target=98.0, qty=100))
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 99.8)})
+    ev = b.on_bar(1600, {"X": _c(99.0, 99.2, 97.5, 97.8, ts=1600)})
+    pos = ev[0].position
+    assert pos.exit_reason == "TARGET" and pos.exit_price == pytest.approx(98.0)
+    assert pos.charges == pytest.approx(26.88)                       # sold 10,000, bought 9,800
+    assert pos.pnl == pytest.approx(200.0)
+    assert b.cash == pytest.approx(100_000.0 + 200.0 - 26.88)
+
+
+def test_without_a_charges_config_the_cost_is_zero_not_none():
+    b = _broker()
+    b.place_entry(_order())
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.2)})
+    ev = b.on_bar(1600, {"X": _c(100.0, 100.2, 98.5, 98.8, ts=1600)})
+    assert ev[0].position.exit_reason == "STOP" and ev[0].position.charges == 0.0
+    assert b.cash == pytest.approx(100_000.0 + ev[0].position.pnl)
+
+
+def test_charges_are_computed_on_the_slipped_fills():
+    from tradebot.config import ChargesConfig
+    from tradebot.execution.charges import position_charges
+    b = BacktestBroker(100_000.0, 0.05, 5.0, None, charges=ChargesConfig())
+    b.place_entry(_order(entry=100.0, stop=99.0, target=102.0))
+    b.on_bar(1300, {"X": _c(100.0, 100.1, 99.9, 100.0)})
+    ev = b.on_bar(1600, {"X": _c(100.0, 100.1, 98.9, 99.0)})
+    pos = ev[0].position
+    assert pos.exit_reason == "STOP"
+    assert pos.charges == pytest.approx(
+        position_charges(pos.direction, pos.avg_price, pos.exit_price, pos.quantity, ChargesConfig())
+    )
+
+
+@pytest.mark.parametrize("with_charges", [False, True])
+@pytest.mark.parametrize("bad_price", [float("nan"), 0.0, -1.0, float("inf")])
+def test_close_rejects_a_bad_price_and_leaves_the_position_open(bad_price, with_charges):
+    # Reaches into _close directly: through the public API a NaN dies earlier in round_tick, and a
+    # non-positive or infinite price is normally screened out by parse_candles/check_exit, so the
+    # guard inside _close is otherwise untestable.
+    from tradebot.config import ChargesConfig
+    charges = ChargesConfig() if with_charges else None
+    b = BacktestBroker(100_000.0, 0.0, 5.0, None, charges=charges)
+    b.place_entry(_order())
+    b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.2)})
+    pos = b.open_positions()["X"]
+    cash_before = b.cash
+    with pytest.raises(ValueError):
+        b._close(pos, 1600, bad_price, "TARGET")
+    assert b.open_positions() == {"X": pos}
+    assert pos.closed_ts is None
+    assert pos.exit_price is None
+    assert pos.exit_reason is None
+    assert pos.pnl is None
+    assert pos.charges is None
+    assert b.cash == cash_before
+    assert b.closed == []
+
+
+def test_on_bar_contains_a_failed_close_and_returns_the_other_events(caplog):
+    """A hits its target, C's pending entry fills, and B's candle is all zeros: B's LONG stop (99)
+    is triggered by low <= stop, and the fill (min(open, stop) = 0.0) is a bad exit price. The
+    review scenario this reproduces: B's failed close must not swallow A's Closed or C's Filled."""
+    b = _broker()
+    pos_a = Position("A", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 900, "ca", "s")
+    pos_b = Position("B", "MIS", "LONG", 10, 50.0, 49.0, 52.0, 900, "cb", "s")
+    b.restore([pos_a, pos_b], [], cash=100_000.0)
+    b.place_entry(_order(sym="C", entry=10.0, stop=9.0, target=12.0))
+    with caplog.at_level(logging.ERROR, logger="tradebot.backtest"):
+        ev = b.on_bar(1200, {
+            "A": _c(100.0, 103.0, 99.5, 102.5, ts=1200, sym="A"),   # target hit
+            "B": Candle("B", 1200, 0.0, 0.0, 0.0, 0.0, 0),          # stopped, but the fill price is 0.0
+            "C": _c(10.0, 10.5, 9.8, 10.2, ts=1200, sym="C"),       # fills, no exit this bar
+        })
+    kinds = sorted((type(e).__name__, e.position.symbol) for e in ev)
+    assert kinds == [("Closed", "A"), ("Filled", "C")]
+    assert "B" in caplog.text
+    assert {"B", "C"} <= set(b.open_positions())   # B stays open (failed close); C fills and isn't exited this bar
+    b_pos = b.open_positions()["B"]
+    assert (b_pos.closed_ts, b_pos.exit_price, b_pos.exit_reason, b_pos.pnl, b_pos.charges) == (None,) * 5
+    assert b.cash == pytest.approx(100_000.0 + 20.0)   # only A's net (pnl 20, no charges configured)
+
+
+def test_square_off_contains_a_failed_close_and_still_closes_the_rest(caplog):
+    b = _broker()
+    b.place_entry(_order(sym="M", product="MIS"))
+    b.place_entry(_order(sym="Z", product="MIS", entry=50.0, stop=49.0, target=52.0))
+    b.on_bar(1300, {"M": _c(100.0, 100.1, 99.9, 100.0, sym="M"), "Z": _c(50.0, 50.1, 49.9, 50.0, sym="Z")})
+    with caplog.at_level(logging.ERROR, logger="tradebot.backtest"):
+        ev = b.square_off(1600, {"M": _c(101.0, 101.2, 100.8, 101.0, 1600, "M"),
+                                 "Z": Candle("Z", 1600, 0.0, 0.0, 0.0, 0.0, 0)})
+    assert [e.position.symbol for e in ev] == ["M"]
+    assert "Z" in caplog.text
+    assert set(b.open_positions()) == {"Z"}
+    z_pos = b.open_positions()["Z"]
+    assert z_pos.closed_ts is None and z_pos.exit_price is None

@@ -22,14 +22,14 @@ def _seed_pair(repo, cfg_b=CFG):
         repo.insert_ai_decision("A", sa, "stub", True, "stub", 1.0, 0, None)
         cid = make_client_id("ema_rsi", sym, ts)
         pid = repo.insert_position("A", Position(sym, "MIS", "LONG", 10, 100.0, 99.0, 102.0, ts + 300, cid, "ema_rsi"))
-        repo.close_position(pid, ts + 900, 100.0 + pnl / 10, "TARGET" if pnl > 0 else "STOP", pnl)
+        repo.close_position(pid, ts + 900, 100.0 + pnl / 10, "TARGET" if pnl > 0 else "STOP", pnl, charges=None)
         sb = repo.insert_signal("B", sig)
         approve = sym == "Z"
         repo.insert_ai_decision("B", sb, "claude", approve, "fine" if approve else "chop", 0.6, 800, None,
                                 input_tokens=1000, output_tokens=60, cache_read_tokens=500, cache_write_tokens=100)
         if approve:
             pid = repo.insert_position("B", Position(sym, "MIS", "LONG", 10, 100.0, 99.0, 102.0, ts + 300, cid, "ema_rsi"))
-            repo.close_position(pid, ts + 900, 102.0, "TARGET", pnl)
+            repo.close_position(pid, ts + 900, 102.0, "TARGET", pnl, charges=None)
     # a signal Claude rejected that A never filled: must not count as avoided PnL
     sig = Signal("ema_rsi", "W", "LONG", 100.0, 99.0, 102.0, "MIS", 1900)
     repo.insert_ai_decision("A", repo.insert_signal("A", sig), "stub", True, "stub", 1.0, 0, None)
@@ -106,3 +106,74 @@ def test_compare_requires_both_runs(repo):
     repo.create_run("A", "backtest", 0, CFG)
     with pytest.raises(ValueError):
         build_compare(repo, "A", "missing", P)
+
+
+def test_compare_is_net_when_a_schedule_is_given(repo):
+    from tradebot.config import ChargesConfig
+    _seed_pair(repo)
+    gross = build_compare(repo, "A", "B", P)
+    net = build_compare(repo, "A", "B", P, ChargesConfig())
+    assert gross.a.charges == 0.0
+    assert net.a.charges > 0 and net.a.total_pnl == pytest.approx(gross.a.total_pnl - net.a.charges)
+    assert net.rejected_pnl_in_a < gross.rejected_pnl_in_a     # the two rejected trades now carry their costs
+    assert "Charges" in format_compare(net)
+
+
+def test_side_by_side_marks_estimated_charges_and_gross_drawdown(repo):
+    """Every stored row in _seed_pair has NULL charges, so a schedule makes both sides estimated:
+    the Charges cells and the Max DD (equity) cells must say so; without a schedule neither does."""
+    from tradebot.config import ChargesConfig
+    _seed_pair(repo)
+    net = build_compare(repo, "A", "B", P, ChargesConfig())
+    text = format_compare(net)
+    assert "(est.)" in text and "(gross)" in text
+    gross = build_compare(repo, "A", "B", P)
+    text2 = format_compare(gross)
+    assert "(est.)" not in text2 and "(gross)" not in text2
+
+
+def test_compare_warns_on_charges_mismatch(repo):
+    """'charges' is one of COMPARABLE_KEYS: two runs whose stored config differ only there must
+    warn, the same as any other comparability mismatch."""
+    other = json.dumps({**json.loads(CFG), "charges": {"enabled": True}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert any("'charges'" in w for w in c.warnings)
+
+
+def test_compare_warns_when_regime_is_enabled_on_one_side_but_absent_on_the_other(repo):
+    """'regime' is not a COMPARABLE_KEYS entry (it is checked on its effective value, not raw
+    equality), so this must come from the dedicated regime check, not the loop above."""
+    other = json.dumps({**json.loads(CFG), "regime": {"enabled": True, "source": "index", "ema_period": 20}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert any("'regime'" in w for w in c.warnings)
+
+
+def test_compare_does_not_warn_on_regime_when_both_sides_are_absent(repo):
+    _seed_pair(repo)  # neither CFG carries a 'regime' key at all
+    c = build_compare(repo, "A", "B", P)
+    assert not any("'regime'" in w for w in c.warnings)
+
+
+def test_compare_warns_when_source_index_runs_gate_on_different_index_symbols(repo):
+    """Two runs can store the identical 'regime' section (source: index, same ema_period) and still
+    not be like-for-like if data.index_symbol differs - the effective value must fold the index
+    symbol in, read from the stored config's 'data' section (absent -> None)."""
+    a_cfg = json.dumps({**json.loads(CFG), "regime": {"enabled": True, "source": "index", "ema_period": 20},
+                        "data": {"index_symbol": "NIFTY"}})
+    b_cfg = json.dumps({**json.loads(CFG), "regime": {"enabled": True, "source": "index", "ema_period": 20},
+                        "data": {"index_symbol": "BANKNIFTY"}})
+    repo.create_run("A", "backtest", 0, a_cfg)
+    repo.create_run("B", "backtest", 0, b_cfg)
+    c = build_compare(repo, "A", "B", P)
+    assert any("'regime'" in w for w in c.warnings)
+
+
+def test_compare_does_not_warn_when_the_other_side_has_regime_disabled(repo):
+    """An explicit, disabled regime section must compare equal to no section at all: both mean
+    the filter played no part in the run."""
+    other = json.dumps({**json.loads(CFG), "regime": {"enabled": False, "source": "index", "ema_period": 20}})
+    _seed_pair(repo, cfg_b=other)
+    c = build_compare(repo, "A", "B", P)
+    assert not any("'regime'" in w for w in c.warnings)

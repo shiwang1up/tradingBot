@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Optional
 
+from tradebot.config import ChargesConfig
 from tradebot.engine.clock import iso_ist
-from tradebot.report.summary import Summary, build_summary
+from tradebot.report.summary import Summary, build_summary, gross_kind, row_charges
 from tradebot.store.repo import Repo
 from tradebot.types import make_client_id
 
-COMPARABLE_KEYS = ("strategy", "session", "capital", "risk", "execution")
+COMPARABLE_KEYS = ("strategy", "session", "capital", "risk", "execution", "charges")
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,20 @@ class Compare:
     rows: list = field(default_factory=list)
 
 
+def _effective_regime(cfg: dict):
+    """The regime section as it actually behaves, not as stored: disabled reads as absent (an
+    older run with no 'regime' key at all must not warn against a newer run that stores the
+    (disabled, default) section explicitly), and a 'source: index' run also carries the index
+    symbol it gates on - two runs can store the identical 'regime' section yet trade against
+    different indices via data.index_symbol, which is not itself a COMPARABLE_KEYS entry."""
+    regime = cfg.get("regime") or {}
+    if not regime.get("enabled"):
+        return None
+    if regime.get("source", "index") == "index":
+        return regime, (cfg.get("data") or {}).get("index_symbol")
+    return regime, None
+
+
 def _compat_warnings(repo: Repo, run_a: str, run_b: str, a: Summary, b: Summary) -> list:
     out = []
     if a.mode != "backtest" or b.mode != "backtest":
@@ -68,11 +84,13 @@ def _compat_warnings(repo: Repo, run_a: str, run_b: str, a: Summary, b: Summary)
     for key in COMPARABLE_KEYS:
         if ca.get(key) != cb.get(key):
             out.append(f"runs differ in '{key}': the comparison may not be like-for-like")
+    if _effective_regime(ca) != _effective_regime(cb):
+        out.append("runs differ in 'regime': the comparison may not be like-for-like")
     return out
 
 
-def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices) -> Compare:
-    a, b = build_summary(repo, run_a), build_summary(repo, run_b)  # raises ValueError for unknown runs
+def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices, schedule: Optional[ChargesConfig] = None) -> Compare:
+    a, b = build_summary(repo, run_a, schedule), build_summary(repo, run_b, schedule)  # raises ValueError for unknown runs
     warnings = _compat_warnings(repo, run_a, run_b, a, b)
     positions_a = repo.positions_by_client_id(run_a)
     rows, closed, open_, net, losses, wins = [], 0, 0, 0.0, 0.0, 0.0
@@ -85,7 +103,7 @@ def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices) -> Compare
             status, pnl = "open", None
             open_ += 1
         else:
-            status, pnl = "closed", float(pos["pnl"] or 0.0)
+            status, pnl = "closed", float(pos["pnl"] or 0.0) - row_charges(pos, schedule)[0]  # (charges, estimated, unknown)
             closed += 1
             net += pnl
             if pnl <= 0:  # same convention as summary: a scratch counts on the loss side
@@ -109,18 +127,35 @@ def build_compare(repo: Repo, run_a: str, run_b: str, prices: Prices) -> Compare
     )
 
 
+def _dd_suffix(kind: Optional[str]) -> str:
+    if kind == "full":
+        return " (gross)"
+    if kind == "partial":
+        return " (partly gross)"
+    return ""
+
+
 def _side_by_side(a: Summary, b: Summary) -> list:
+    charges_a = f"{a.charges:,.2f}" + (" (est.)" if a.charges_estimated else "")
+    charges_b = f"{b.charges:,.2f}" + (" (est.)" if b.charges_estimated else "")
+    dd_equity_a = f"{a.max_drawdown_equity:,.2f}" + _dd_suffix(gross_kind(a))
+    dd_equity_b = f"{b.max_drawdown_equity:,.2f}" + _dd_suffix(gross_kind(b))
     metrics = [
         ("Trades", f"{a.trades}", f"{b.trades}"),
         ("Win rate", f"{a.win_rate * 100:.1f}%", f"{b.win_rate * 100:.1f}%"),
         ("Total PnL", f"{a.total_pnl:,.2f}", f"{b.total_pnl:,.2f}"),
-        ("Avg R", f"{a.avg_r:.2f}", f"{b.avg_r:.2f}"),
+        ("Charges", charges_a, charges_b),
+        ("Avg R (per trade)", f"{a.avg_r:.2f}", f"{b.avg_r:.2f}"),
+        ("R on risk", f"{a.r_on_risk:.2f}", f"{b.r_on_risk:.2f}"),
         ("Max DD (closed)", f"{a.max_drawdown:,.2f}", f"{b.max_drawdown:,.2f}"),
-        ("Max DD (equity)", f"{a.max_drawdown_equity:,.2f}", f"{b.max_drawdown_equity:,.2f}"),
+        ("Max DD (equity)", dd_equity_a, dd_equity_b),
         ("AI rejects", f"{a.ai_rejections}", f"{b.ai_rejections}"),
     ]
     out = [f"{'Metric':<16} {'A: ' + a.run_id:>18} {'B: ' + b.run_id:>18}"]
     out += [f"{m:<16} {va:>18} {vb:>18}" for m, va, vb in metrics]
+    if a.charges_estimated or b.charges_estimated:
+        out.append("(est.) charges were not recorded for that run; its Total PnL, R figures and "
+                    "closed drawdown use estimated charges")
     return out
 
 

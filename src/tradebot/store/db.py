@@ -7,7 +7,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Union
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 class SchemaVersionError(RuntimeError):
@@ -28,6 +28,12 @@ MIGRATIONS = {
     2: [
         "ALTER TABLE runs ADD COLUMN last_bar_ts INTEGER",
     ],
+    3: [
+        "ALTER TABLE positions ADD COLUMN charges REAL",
+    ],
+    4: [
+        "ALTER TABLE signals ADD COLUMN priority REAL NOT NULL DEFAULT 0",
+    ],
 }
 
 
@@ -44,7 +50,8 @@ def connect(path: Union[str, Path]) -> sqlite3.Connection:
     if found > SCHEMA_VERSION:
         conn.close()
         raise SchemaVersionError(
-            f"{path} has schema version {found}, code expects {SCHEMA_VERSION}; upgrade the code or delete the file"
+            f"{path} has schema version {found}, code expects {SCHEMA_VERSION}; "
+            "upgrade the code, or restore an older backup of the file"
         )
     if 0 < found < SCHEMA_VERSION:  # a fresh database (0) is created at the current version by schema.sql
         missing = [v for v in range(found, SCHEMA_VERSION) if v not in MIGRATIONS]

@@ -50,6 +50,15 @@ def test_signal_and_decisions(repo):
     assert repo.rejection_counts("r1") == {"max_open_positions": 1}
 
 
+def test_insert_signal_round_trips_priority(repo):
+    repo.create_run("r1", "backtest", 0, "{}")
+    default_id = repo.insert_signal("r1", _signal())
+    ranked_id = repo.insert_signal("r1", Signal("orb", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 1000, priority=2.5))
+    rows = {r["id"]: r["priority"] for r in repo.conn.execute("SELECT id, priority FROM signals")}
+    assert rows[default_id] == 0.0
+    assert rows[ranked_id] == 2.5
+
+
 def test_orders_and_fills(repo):
     repo.create_run("r1", "backtest", 0, "{}")
     sid = repo.insert_signal("r1", _signal())
@@ -63,7 +72,7 @@ def test_positions_roundtrip(repo):
     repo.create_run("r1", "backtest", 0, "{}")
     p = Position("RELIANCE", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 5, "cid", "ema_rsi")
     p.db_id = repo.insert_position("r1", p)
-    repo.close_position(p.db_id, closed_ts=9, exit_price=102.0, exit_reason="TARGET", pnl=20.0)
+    repo.close_position(p.db_id, closed_ts=9, exit_price=102.0, exit_reason="TARGET", pnl=20.0, charges=None)
     rows = repo.list_positions("r1")
     assert len(rows) == 1
     assert rows[0]["exit_reason"] == "TARGET"
@@ -100,7 +109,7 @@ def test_foreign_keys_enforced(repo):
 def test_close_position_accepts_null_pnl(repo):
     repo.create_run("r1", "backtest", 0, "{}")
     pid = repo.insert_position("r1", Position("X", "MIS", "LONG", 1, 1.0, 0.5, None, 1, "c", "s"))
-    repo.close_position(pid, closed_ts=2, exit_price=None, exit_reason=None, pnl=None)
+    repo.close_position(pid, closed_ts=2, exit_price=None, exit_reason=None, pnl=None, charges=None)
     assert repo.list_positions("r1")[0]["pnl"] is None
 
 
@@ -130,6 +139,15 @@ def test_v1_database_is_migrated_to_current(tmp_path):
         CREATE TABLE ai_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
                                    filter_kind TEXT NOT NULL, approved INTEGER NOT NULL, reason TEXT NOT NULL,
                                    confidence REAL NOT NULL, latency_ms INTEGER NOT NULL, failure TEXT);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, strategy TEXT NOT NULL,
+                              symbol TEXT NOT NULL, bar_ts INTEGER NOT NULL, direction TEXT NOT NULL,
+                              entry REAL NOT NULL, stop REAL NOT NULL, target REAL, product TEXT NOT NULL);
         PRAGMA user_version = 1;
     """)
     raw.commit()
@@ -137,7 +155,7 @@ def test_v1_database_is_migrated_to_current(tmp_path):
     conn = connect(path)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_decisions)")}
     assert {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
 
 
 def test_v2_database_is_migrated_to_v3(tmp_path):
@@ -146,6 +164,15 @@ def test_v2_database_is_migrated_to_v3(tmp_path):
     raw.executescript("""
         CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
                            ended_at INTEGER, config_json TEXT NOT NULL);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, strategy TEXT NOT NULL,
+                              symbol TEXT NOT NULL, bar_ts INTEGER NOT NULL, direction TEXT NOT NULL,
+                              entry REAL NOT NULL, stop REAL NOT NULL, target REAL, product TEXT NOT NULL);
         INSERT INTO runs VALUES ('r', 'backtest', 0, NULL, '{}');
         PRAGMA user_version = 2;
     """)
@@ -154,8 +181,134 @@ def test_v2_database_is_migrated_to_v3(tmp_path):
     conn = connect(path)
     assert "last_bar_ts" in {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
     assert conn.execute("SELECT last_bar_ts FROM runs WHERE run_id='r'").fetchone()[0] is None
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     conn.close()
+
+
+def _make_v3_database(path) -> None:
+    """A schema-v3 file: positions has no `charges` column yet. Shared by the migration test and
+    the column-order test below."""
+    raw = sqlite3.connect(str(path))
+    raw.executescript("""
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
+                           ended_at INTEGER, config_json TEXT NOT NULL, last_bar_ts INTEGER);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, strategy TEXT NOT NULL,
+                              symbol TEXT NOT NULL, bar_ts INTEGER NOT NULL, direction TEXT NOT NULL,
+                              entry REAL NOT NULL, stop REAL NOT NULL, target REAL, product TEXT NOT NULL);
+        INSERT INTO runs VALUES ('r', 'backtest', 0, NULL, '{}', NULL);
+        INSERT INTO positions(run_id, symbol, product, direction, strategy, client_id, qty, avg_price, stop,
+                              opened_at, closed_at, exit_price, exit_reason, pnl)
+               VALUES ('r', 'A', 'MIS', 'LONG', 'ema_rsi', 'c1', 10, 100.0, 99.0, 1, 2, 102.0, 'TARGET', 20.0);
+        INSERT INTO signals(run_id, strategy, symbol, bar_ts, direction, entry, stop, target, product)
+               VALUES ('r', 'ema_rsi', 'A', 1, 'LONG', 100.0, 99.0, 102.0, 'MIS');
+        PRAGMA user_version = 3;
+    """)
+    raw.commit()
+    raw.close()
+
+
+def test_v3_database_is_migrated_to_v4(tmp_path):
+    path = tmp_path / "v3.db"
+    _make_v3_database(path)
+    conn = connect(path)
+    assert "charges" in {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
+    row = conn.execute("SELECT pnl, charges FROM positions WHERE run_id='r'").fetchone()
+    assert row["pnl"] == 20.0 and row["charges"] is None      # old rows keep NULL: the report estimates them
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    conn.close()
+
+
+def _make_v4_database(path) -> None:
+    """A schema-v4 file: signals has no `priority` column yet. Shared by the migration test and
+    the column-order test below."""
+    raw = sqlite3.connect(str(path))
+    raw.executescript("""
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL, started_at INTEGER NOT NULL,
+                           ended_at INTEGER, config_json TEXT NOT NULL, last_bar_ts INTEGER);
+        CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, strategy TEXT NOT NULL,
+                              symbol TEXT NOT NULL, bar_ts INTEGER NOT NULL, direction TEXT NOT NULL,
+                              entry REAL NOT NULL, stop REAL NOT NULL, target REAL, product TEXT NOT NULL);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0,
+                                charges REAL);
+        INSERT INTO runs VALUES ('r', 'backtest', 0, NULL, '{}', NULL);
+        INSERT INTO signals(run_id, strategy, symbol, bar_ts, direction, entry, stop, target, product)
+               VALUES ('r', 'ema_rsi', 'A', 1, 'LONG', 100.0, 99.0, 102.0, 'MIS');
+        PRAGMA user_version = 4;
+    """)
+    raw.commit()
+    raw.close()
+
+
+def test_v4_database_is_migrated_to_v5(tmp_path):
+    path = tmp_path / "v4.db"
+    _make_v4_database(path)
+    conn = connect(path)
+    assert "priority" in {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
+    row = conn.execute("SELECT priority FROM signals WHERE run_id='r'").fetchone()
+    assert row["priority"] == 0.0      # old rows default to 0: they never carried a ranking
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    conn.close()
+
+
+def test_fresh_and_migrated_databases_have_identical_signals_columns(tmp_path):
+    """ALTER TABLE ADD COLUMN appends, so a fresh database's signals columns must be declared in
+    the same order schema.sql's priority-last ordering gives a migrated (v4 -> v5) database."""
+    def cols(conn):
+        return [(r["name"], r["type"], r["notnull"], r["dflt_value"])
+               for r in conn.execute("PRAGMA table_info(signals)")]
+
+    fresh = connect(":memory:")
+    fresh_cols = cols(fresh)
+    fresh.close()
+
+    path = tmp_path / "v4_for_columns.db"
+    _make_v4_database(path)
+    migrated = connect(path)
+    migrated_cols = cols(migrated)
+    migrated.close()
+
+    assert fresh_cols == migrated_cols
+
+
+def test_fresh_and_migrated_databases_have_identical_positions_columns(tmp_path):
+    """ALTER TABLE ADD COLUMN appends, so a fresh database's positions columns must be declared in
+    the same order schema.sql's charges-last ordering gives a migrated (v3 -> v4) database."""
+    def cols(conn):
+        return [(r["name"], r["type"], r["notnull"], r["dflt_value"])
+               for r in conn.execute("PRAGMA table_info(positions)")]
+
+    fresh = connect(":memory:")
+    fresh_cols = cols(fresh)
+    fresh.close()
+
+    path = tmp_path / "v3_for_columns.db"
+    _make_v3_database(path)
+    migrated = connect(path)
+    migrated_cols = cols(migrated)
+    migrated.close()
+
+    assert fresh_cols == migrated_cols
+
+
+def test_close_position_stores_charges(repo):
+    repo.create_run("r", "backtest", 0, "{}")
+    pid = repo.insert_position("r", Position("A", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 1, "c1", "ema_rsi"))
+    repo.close_position(pid, 9, 102.0, "TARGET", 20.0, charges=3.21)
+    assert repo.list_positions("r")[0]["charges"] == 3.21
+    pid2 = repo.insert_position("r", Position("B", "MIS", "LONG", 10, 100.0, 99.0, 102.0, 1, "c2", "ema_rsi"))
+    repo.close_position(pid2, 9, 102.0, "TARGET", 20.0, charges=None)     # a row with no recorded charges
+    assert repo.list_positions("r")[1]["charges"] is None
 
 
 def test_last_bar_ts_open_positions_and_pending_orders(repo):
@@ -164,19 +317,22 @@ def test_last_bar_ts_open_positions_and_pending_orders(repo):
     repo.set_last_bar_ts("p", 1000)
     assert repo.get_run("p")["last_bar_ts"] == 1000
 
-    sid = repo.insert_signal("p", Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 900))
+    sid = repo.insert_signal("p", Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 900, priority=1.5))
     repo.insert_order("p", "c1", sid, "ENTRY", "BUY", 10, 100.0, "PENDING", 900)
     sid2 = repo.insert_signal("p", Signal("ema_rsi", "B", "SHORT", 50.0, 51.0, 48.0, "MIS", 900))
     repo.insert_order("p", "c2", sid2, "ENTRY", "SELL", 5, 50.0, "PENDING", 900)
     repo.update_order("p", "c2", "FILLED", 1200)
     pend = repo.pending_orders("p")
     assert [(r["client_id"], r["strategy"], r["symbol"], r["direction"], r["qty"], r["entry"], r["stop"],
-             r["target"], r["product"], r["bar_ts"]) for r in pend] == [
-        ("c1", "ema_rsi", "A", "LONG", 10, 100.0, 99.0, 102.0, "MIS", 900)]
+             r["target"], r["product"], r["bar_ts"], r["priority"]) for r in pend] == [
+        ("c1", "ema_rsi", "A", "LONG", 10, 100.0, 99.0, 102.0, "MIS", 900, 1.5)]
+    from tradebot.engine.paper import order_from_row
+    rebuilt = order_from_row(pend[0])
+    assert rebuilt.signal == Signal("ema_rsi", "A", "LONG", 100.0, 99.0, 102.0, "MIS", 900, priority=1.5)
 
     open_id = repo.insert_position("p", Position("B", "MIS", "SHORT", 5, 50.0, 51.0, 48.0, 1200, "c2", "ema_rsi"))
     done_id = repo.insert_position("p", Position("C", "MIS", "LONG", 1, 10.0, 9.0, 12.0, 600, "c3", "ema_rsi"))
-    repo.close_position(done_id, 900, 9.0, "STOP", -1.0)
+    repo.close_position(done_id, 900, 9.0, "STOP", -1.0, charges=None)
     assert [r["id"] for r in repo.open_positions("p")] == [open_id]
 
 
@@ -204,7 +360,7 @@ def test_positions_by_client_id(repo):
     repo.create_run("r1", "backtest", 0, "{}")
     p = Position("A", "MIS", "LONG", 1, 100.0, 99.0, None, 5, "cid-a", "ema_rsi")
     pid = repo.insert_position("r1", p)
-    repo.close_position(pid, 9, 101.0, "TARGET", 1.0)
+    repo.close_position(pid, 9, 101.0, "TARGET", 1.0, charges=None)
     m = repo.positions_by_client_id("r1")
     assert m["cid-a"]["pnl"] == 1.0
 
@@ -217,6 +373,15 @@ def _v1_db(path, extra_ddl=""):
         CREATE TABLE ai_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, signal_id INTEGER NOT NULL,
                                    filter_kind TEXT NOT NULL, approved INTEGER NOT NULL, reason TEXT NOT NULL,
                                    confidence REAL NOT NULL, latency_ms INTEGER NOT NULL, failure TEXT);
+        CREATE TABLE positions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, symbol TEXT NOT NULL,
+                                product TEXT NOT NULL, direction TEXT NOT NULL, strategy TEXT NOT NULL,
+                                client_id TEXT NOT NULL, qty INTEGER NOT NULL, avg_price REAL NOT NULL,
+                                stop REAL NOT NULL, target REAL, exit_ids_json TEXT NOT NULL DEFAULT '[]',
+                                opened_at INTEGER NOT NULL, closed_at INTEGER, exit_price REAL, exit_reason TEXT,
+                                pnl REAL, fill_status TEXT NOT NULL DEFAULT 'full', adopted INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, strategy TEXT NOT NULL,
+                              symbol TEXT NOT NULL, bar_ts INTEGER NOT NULL, direction TEXT NOT NULL,
+                              entry REAL NOT NULL, stop REAL NOT NULL, target REAL, product TEXT NOT NULL);
         PRAGMA user_version = 1;
     """ + extra_ddl)
     raw.commit()

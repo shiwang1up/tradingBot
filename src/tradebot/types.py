@@ -60,6 +60,12 @@ class Signal:
     target_price: float | None
     product: Product
     bar_ts: int
+    priority: float = 0.0  # ranks same-bar signals when slots are short; higher first, then symbol
+
+    def __post_init__(self) -> None:
+        if not (isinstance(self.priority, (int, float)) and not isinstance(self.priority, bool)
+                and math.isfinite(self.priority)):
+            raise ValueError(f"priority: expected a finite number, got {self.priority!r}")
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,8 @@ class Position:
     exit_price: float | None = None
     exit_reason: str | None = None  # "STOP" | "TARGET" | "SQUARE_OFF" | "FLATTEN"
     pnl: float | None = None
+    charges: float | None = None  # None while open; a float once closed; 0.0 (not None) when the broker
+    # has no fee schedule -- the database treats NULL as "predates the charges model"
     fill_status: str = "full"  # "full" | "partial"
     adopted: bool = False
     db_id: int | None = None

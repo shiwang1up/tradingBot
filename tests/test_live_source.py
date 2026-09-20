@@ -10,10 +10,10 @@ from tradebot.types import Candle
 D = date(2026, 9, 14)
 
 
-def _source(repo, tmp_path, fetcher, symbols=("A", "B")):
+def _source(repo, tmp_path, fetcher, symbols=("A", "B"), index_symbol=""):
     cfg = make_config(tmp_path)
     clock = SessionClock(cfg.session, 5)
-    return LiveBarSource(fetcher, repo, list(symbols), "NSE", 5, 2, clock), clock
+    return LiveBarSource(fetcher, repo, list(symbols), "NSE", 5, 2, clock, index_symbol=index_symbol), clock
 
 
 def test_fetch_bar_returns_the_closed_bar_and_stores_only_completed_bars(repo, tmp_path):
@@ -95,6 +95,24 @@ def test_a_symbol_slower_than_the_budget_is_skipped_for_the_bar(repo, tmp_path, 
     assert set(got) == {"A"}
     assert "candle fetch for B did not finish" in caplog.text
     assert "1 of 2 symbols" in caplog.text and "1 failed" in caplog.text
+
+
+def test_index_failure_is_excluded_from_the_tradable_error_and_count(repo, tmp_path, caplog):
+    """Job A item 5: the index is never traded, so an index-only success must not mask every stock
+    failing (the ERROR still fires) and the INFO line's "N of M symbols" counts stocks only, with
+    the index's own outcome appended separately."""
+    def fetcher(sym, exch, start, end, interval):
+        if sym == "NIFTY":
+            return [Candle("NIFTY", ist_epoch(D, "09:20"), 1.0, 1.0, 1.0, 1.0, 0)]
+        raise RuntimeError("boom")
+
+    src, _ = _source(repo, tmp_path, fetcher, symbols=("NIFTY", "A", "B"), index_symbol="NIFTY")
+    with caplog.at_level(logging.INFO, logger="tradebot.live"):
+        got = src.fetch_bar(ist_epoch(D, "09:20"))
+    assert set(got) == {"NIFTY"}
+    assert "every candle fetch failed" in caplog.text
+    assert "0 of 2 symbols" in caplog.text
+    assert "index ok" in caplog.text
 
 
 def test_bars_come_back_in_universe_order_whatever_the_pool_finishes_first(repo, tmp_path):

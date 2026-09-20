@@ -3,8 +3,11 @@ broker-side stop/target exits against each bar's high/low."""
 from __future__ import annotations
 
 import logging
+import math
 
+from tradebot.config import ChargesConfig
 from tradebot.execution.broker import BrokerEvent, Closed, Filled, Unfilled
+from tradebot.execution.charges import position_charges
 from tradebot.types import ApprovedOrder, Candle, Position, round_tick
 
 log = logging.getLogger("tradebot.backtest")
@@ -37,14 +40,16 @@ def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
 
 class BacktestBroker:
     def __init__(self, capital: float, slippage_pct: float, mis_leverage: float,
-                 entry_buffer_pct: float | None = None):
+                 entry_buffer_pct: float | None = None, charges: ChargesConfig | None = None):
         """entry_buffer_pct mirrors the live marketable limit: an entry whose next open is beyond
         signal_price * (1 +/- buffer) is left unfilled, exactly as the live order would be.
-        None disables the check."""
+        None disables the check. charges=None means a free broker (tests); the CLI always passes
+        cfg.charges."""
         self.cash = float(capital)
         self.slip = slippage_pct / 100.0
         self.lev = mis_leverage
         self.buffer = None if entry_buffer_pct is None else entry_buffer_pct / 100.0
+        self._charges_cfg = charges
         self._pending: dict[str, ApprovedOrder] = {}
         self._positions: dict[str, Position] = {}
         self.closed: list[Position] = []
@@ -83,6 +88,10 @@ class BacktestBroker:
         return open_price < sig.entry_price * (1 - self.buffer)
 
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]:
+        """Fill every pending entry at this bar's open, then close every open position whose stop or
+        target this bar hits. A close is contained per position: one whose exit price is bad (see
+        `_close`) is logged at error level and left open for the caller to retry, while every other
+        fill and close on this bar still happens and is still returned."""
         events: list[BrokerEvent] = []
         for sym, order in list(self._pending.items()):
             del self._pending[sym]
@@ -108,7 +117,12 @@ class BacktestBroker:
                 continue
             reason, level = hit
             price = self._exit_price(pos.direction, level) if reason == "STOP" else level
-            self._close(pos, ts, price, reason)
+            try:
+                self._close(pos, ts, price, reason)
+            except ValueError as e:
+                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e,
+                         extra={"symbol": sym, "client_id": pos.client_id})
+                continue
             events.append(Closed(pos))
         return events
 
@@ -116,7 +130,9 @@ class BacktestBroker:
                    reason: str = "SQUARE_OFF", last_prices: dict[str, float] | None = None) -> list[Closed]:
         """Close every position in `products` at this bar's close. A symbol with no candle this
         bar closes at its last known price (`last_prices`) so a data hole cannot carry an
-        intraday position overnight; with no price at all it stays open and the caller retries."""
+        intraday position overnight; with no price at all it stays open and the caller retries.
+        A close that fails (bad exit price) is contained the same way: logged at error level and
+        left open, while every other position in `products` is still closed."""
         out: list[Closed] = []
         for sym, pos in list(self._positions.items()):
             if pos.product not in products:
@@ -125,7 +141,12 @@ class BacktestBroker:
             ref = c.close if c is not None else (last_prices or {}).get(sym)
             if ref is None:
                 continue
-            self._close(pos, ts, self._exit_price(pos.direction, ref), reason)
+            try:
+                self._close(pos, ts, self._exit_price(pos.direction, ref), reason)
+            except ValueError as e:
+                log.error("%s: close failed on bar %d, leaving position open: %s", sym, ts, e,
+                         extra={"symbol": sym, "client_id": pos.client_id})
+                continue
             out.append(Closed(pos))
         return out
 
@@ -161,9 +182,16 @@ class BacktestBroker:
         return round_tick(ref * (1 - self.slip)) if direction == "LONG" else round_tick(ref * (1 + self.slip))
 
     def _close(self, pos: Position, ts: int, price: float, reason: str) -> None:
+        """All-or-nothing: nothing about `pos` or `self` changes unless every computation below
+        succeeds. Compute pnl and charges first, then commit; a raise from position_charges must
+        not leave the position half-closed."""
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError(f"{pos.symbol}: expected a finite exit price greater than 0, got {price!r}")
         pnl = (price - pos.avg_price) * pos.quantity if pos.direction == "LONG" else (pos.avg_price - price) * pos.quantity
-        pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl = ts, price, reason, round(pnl, 2)
-        self.cash += pos.pnl
+        pnl = round(pnl, 2)
+        charges = position_charges(pos.direction, pos.avg_price, price, pos.quantity, self._charges_cfg)
+        pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl, pos.charges = ts, price, reason, pnl, charges
+        self.cash += pnl - charges
         if self.cash <= 0:
             log.warning("simulated cash is %.2f after closing %s: account is blown", self.cash, pos.symbol)
         del self._positions[pos.symbol]

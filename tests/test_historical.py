@@ -61,6 +61,16 @@ def test_parse_candles_skips_pre_open_rows_with_null_prices():
     assert len(out) == 1 and out[0].close == 1267.5
 
 
+def test_parse_candles_skips_non_positive_rows():
+    resp = {"candles": [
+        ["2026-09-11T09:00:00", 0.0, 0.0, 0.0, 0.0, 0, None],           # all-zero: not a tradeable bar
+        ["2026-09-11T09:05:00", 100.0, 101.0, -1.0, 100.5, 10, None],   # negative low
+        ["2026-09-11T09:15:00", 1267.0, 1268.0, 1266.0, 1267.5, 100, None],
+    ]}
+    out = parse_candles("RELIANCE", resp)
+    assert len(out) == 1 and out[0].close == 1267.5
+
+
 def test_fetch_incremental_keep_filter_drops_bars(repo):
     def f(symbol, exchange, start_ts, end_ts, interval):
         return [Candle(symbol, t, 1, 2, 0.5, 1.5, 1) for t in range(start_ts, end_ts, 300)]
@@ -265,3 +275,11 @@ def test_historical_source_groups_by_bar(repo):
     assert set(src.candles_at(100)) == {"A", "B"}
     assert set(src.candles_at(400)) == {"A"}
     assert src.candles_at(999) == {}
+
+
+def test_index_rows_with_zero_or_null_volume_parse():
+    """A guard, not a driver: the parser already accepts a zero or null volume row (an index has no
+    traded quantity), so this pins existing behaviour before Task 15 starts fetching NSE-NIFTY."""
+    out = parse_candles("NIFTY", {"candles": [[1789450000, 25000.0, 25010.0, 24990.0, 25005.0, 0],
+                                              [1789450300, 25005.0, 25020.0, 25000.0, 25015.0, None]]})
+    assert [c.volume for c in out] == [0, 0] and out[0].symbol == "NIFTY"

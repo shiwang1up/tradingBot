@@ -128,8 +128,11 @@ def test_symbols_independent_and_recompute():
 
 
 def test_registry_and_config_defaults():
+    from pathlib import Path
+
     from tradebot.config import load_config
-    cfg = load_config("config.yaml", "/nonexistent.env")
+    # Resolved from this file, not the working directory, so the suite runs from anywhere.
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.yaml", "/nonexistent.env")
     strat = build_strategy("confluence", cfg.strategy["confluence"])
     assert isinstance(strat, ConfluenceStrategy) and strat.weights["breakout"] == 1.5
     with pytest.raises(ValueError):

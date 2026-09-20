@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from tests.helpers import FakeTime, make_config, synth_candles
+from tests.helpers import FakeTime, FixedStrategy, make_config, synth_candles
 from tradebot.ai.filter import StubFilter
 from tradebot.data.historical import HistoricalSource
 from tradebot.data.live import LiveBarSource
@@ -12,6 +12,7 @@ from tradebot.engine.loop import BacktestEngine
 from tradebot.engine.paper import PaperEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.strategy.ema_rsi import EmaRsiStrategy
+from tradebot.types import Candle
 
 PRIOR = [date(2026, 9, 10), date(2026, 9, 11)]   # Thu, Fri: warm-up days
 TODAY = date(2026, 9, 14)                         # Monday
@@ -30,12 +31,18 @@ def _fetcher(market, calls=None):
     return fetch
 
 
-def _engine(repo, cfg, market, clock_time, run_id="paper-2026-09-14", calls=None):
+def _engine(repo, cfg, market, clock_time, run_id="paper-2026-09-14", calls=None, strategy=None,
+           symbols=("A", "B"), index_symbol=""):
+    """`strategy`/`symbols`/`index_symbol` default to the plain two-symbol EmaRsi setup most tests
+    use; a caller exercising the regime filter passes its own FixedStrategy and a symbol list with
+    the index included (see test_live_bar_regime_rejects_a_long_the_index_would_block)."""
     clock = SessionClock(cfg.session, 5)
-    src = LiveBarSource(_fetcher(market, calls), repo, ["A", "B"], "NSE", 5, 2, clock)
-    strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
-    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage, cfg.execution.entry_buffer_pct)
-    return PaperEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, {"A": 1, "B": 1}, run_id,
+    src = LiveBarSource(_fetcher(market, calls), repo, list(symbols), "NSE", 5, 2, clock, index_symbol=index_symbol)
+    strat = strategy if strategy is not None else EmaRsiStrategy(cfg.strategy["ema_rsi"])
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    lots = {s: 1 for s in symbols if s != index_symbol}
+    return PaperEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, lots, run_id,
                        now=clock_time.now, sleep=clock_time.sleep)
 
 
@@ -47,6 +54,70 @@ def _trades(repo, rid, day=None):
     rows = repo.list_positions(rid)
     return [(r["symbol"], r["direction"], r["qty"], r["opened_at"], r["closed_at"], r["exit_reason"], r["pnl"])
             for r in rows if day is None or date_of(r["opened_at"]) == day]
+
+
+def test_warm_drops_an_unusable_candle_and_keeps_the_last_good_close(repo, tmp_path):
+    """warm() feeds candles through the same _usable gate as process_bar (spec: unusable candles are
+    dropped before anything sees them); an all-zero candle later in the same symbol's warm-up must
+    not become its last close."""
+    cfg = make_config(tmp_path)
+    clock = SessionClock(cfg.session, 5)
+    src = LiveBarSource(_fetcher({"A": []}), repo, ["A"], "NSE", 5, 2, clock)
+    strat = EmaRsiStrategy(cfg.strategy["ema_rsi"])
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    eng = PaperEngine(cfg, repo, src, [strat], broker, StubFilter(), clock, {"A": 1}, "warm-zero")
+    t0 = ist_epoch(TODAY, "09:15")
+    good = Candle("A", t0, 100.0, 100.5, 99.8, 100.2, 1)
+    zero = Candle("A", t0 + 300, 0.0, 0.0, 0.0, 0.0, 1)
+    eng.warm([good, zero])
+    assert eng._last_close["A"] == 100.2
+
+
+def test_warm_up_feeds_the_regime_filter_and_hides_the_index(repo, tmp_path):
+    cfg = make_config(tmp_path, regime={"enabled": True, "ema_period": 3}, data={"index_symbol": "NIFTY"})
+    market = _market()
+    eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")))
+    index = [Candle("NIFTY", c.ts, 25000.0 + i, 25000.0 + i, 25000.0 + i, 25000.0 + i, 0)
+             for i, c in enumerate(market["A"]) if c.ts < OPEN]
+    eng.warm(_warm(market) + index)
+    assert eng._regime.state == "UP"
+    assert "NIFTY" not in eng._last_close and "NIFTY" not in eng._history
+
+
+def test_warm_up_feeds_the_composite_regime_filter(repo, tmp_path):
+    """Job A review item 2: the composite counterpart of the test above. `_market()` is wavy, so a
+    rising universe is built by hand here - two symbols, every bar closing above the previous - the
+    only shape that tells a correctly-fed composite (state UP) apart from the swapped-order bug
+    (every return 0, level flat, state stuck)."""
+    cfg = make_config(tmp_path, regime={"enabled": True, "source": "composite", "ema_period": 3})
+    t0 = OPEN - 4 * 300
+    rising_a = [Candle("A", t0 + i * 300, 100.0 + i, 100.5 + i, 99.8 + i, 100.2 + i, 1000) for i in range(4)]
+    rising_b = [Candle("B", t0 + i * 300, 200.0 + i, 200.5 + i, 199.8 + i, 200.2 + i, 1000) for i in range(4)]
+    market = {"A": rising_a, "B": rising_b}
+    eng = _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")))
+    eng.warm(rising_a + rising_b)
+    assert eng._regime.state == "UP"
+
+
+def test_live_bar_regime_rejects_a_long_the_index_would_block(repo, tmp_path):
+    """Job A item 9: the missing end-to-end case for the regime filter in paper mode - a LONG fired
+    by a live bar is rejected `regime` when the live fetcher's own NIFTY series has the index
+    falling, exactly as the backtester rejects it (test_engine_regime.py), with no warm-up candles
+    at all: the filter warms up live, off the same fetcher."""
+    cfg = make_config(tmp_path, regime={"enabled": True, "source": "index", "ema_period": 3},
+                      data={"index_symbol": "NIFTY"})
+    market = _market()
+    t_sig = OPEN + 3 * 300  # the 4th bar: EMA3 is warm by then
+    strat = FixedStrategy({("A", t_sig): ("LONG", 0.0)})
+    falling = [25000.0 - 10 * i for i in range(75)]
+    index_candles = [Candle("NIFTY", OPEN + i * 300, c, c, c, c, 0) for i, c in enumerate(falling)]
+    live_market = {**market, "NIFTY": index_candles}
+    eng = _engine(repo, cfg, live_market, FakeTime(ist_epoch(TODAY, "09:00")), strategy=strat,
+                 symbols=["NIFTY", "A", "B"], index_symbol="NIFTY")
+    rid = eng.run([])
+    assert repo.rejection_counts(rid).get("regime") == 1
+    assert repo.list_positions(rid) == []
 
 
 def test_full_day_matches_the_backtester_bar_for_bar(repo, tmp_path):
@@ -120,6 +191,36 @@ def test_stop_and_resume_matches_a_continuous_run(repo, tmp_path):
     assert _trades(repo, "cont")
     a, b = repo.daily_pnl("cont")[0], repo.daily_pnl("split")[0]
     assert (a["realised"], a["fills"], a["entries_placed"]) == (b["realised"], b["fills"], b["entries_placed"])
+
+
+def test_resume_restores_cash_and_realised_net_of_charges(repo, tmp_path):
+    cfg = make_config(tmp_path, charges={"enabled": True})
+    market = _market()
+    warm = _warm(market)
+    _engine(repo, cfg, market, FakeTime(ist_epoch(TODAY, "09:00")), run_id="cont").run(warm)
+
+    t = FakeTime(ist_epoch(TODAY, "09:00"))
+    first = _engine(repo, cfg, market, t, run_id="split")
+    stop_at = ist_epoch(TODAY, "11:30")
+
+    def sleep_then_stop(seconds):
+        t.sleep(seconds)
+        if t.t >= stop_at:
+            first.request_stop()
+
+    first.sleep = sleep_then_stop
+    first.run(warm)
+    last = repo.get_run("split")["last_bar_ts"]
+    stored_today = [c for c in repo.load_candles(["A", "B"], 5, OPEN, 2_000_000_000) if c.ts <= last]
+    second = _engine(repo, cfg, market, t, run_id="split")
+    second.run(warm + stored_today)
+    assert _trades(repo, "split") == _trades(repo, "cont") and _trades(repo, "cont")
+    a, b = repo.daily_pnl("cont")[0], repo.daily_pnl("split")[0]
+    assert a["realised"] == pytest.approx(b["realised"], abs=0.01)
+    assert a["fills"] == b["fills"] and a["entries_placed"] == b["entries_placed"]
+    net = sum(r["pnl"] - r["charges"] for r in repo.list_positions("split"))
+    assert b["realised"] == pytest.approx(net, abs=0.01)
+    assert second.broker.cash == pytest.approx(cfg.capital + net, abs=0.01)
 
 
 def test_outside_session_creates_no_run(repo, tmp_path):
@@ -253,9 +354,9 @@ def test_resume_restores_the_cooldown_after_a_stop_out(repo, tmp_path):
     repo.create_run("cool", "paper", 0, "{}")
     stopped_at = ist_epoch(TODAY, "09:50")
     pid = repo.insert_position("cool", Position("A", "MIS", "LONG", 5, 100.0, 99.0, 102.0, ist_epoch(TODAY, "09:40"), "c1", "ema_rsi"))
-    repo.close_position(pid, stopped_at, 99.0, "STOP", -5.0)
+    repo.close_position(pid, stopped_at, 99.0, "STOP", -5.0, charges=None)
     pid2 = repo.insert_position("cool", Position("B", "MIS", "SHORT", 5, 50.0, 51.0, 48.0, ist_epoch(TODAY, "09:40"), "c2", "ema_rsi"))
-    repo.close_position(pid2, stopped_at, 48.0, "TARGET", 10.0)
+    repo.close_position(pid2, stopped_at, 48.0, "TARGET", 10.0, charges=None)
     assert eng.resume(TODAY) is True
     assert eng._cooldown_until == {"A": stopped_at + 3 * 300}
     assert eng._state().cooldown_until == {"A": stopped_at + 3 * 300}

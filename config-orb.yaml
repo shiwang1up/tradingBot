@@ -1,49 +1,25 @@
-# 15-minute variant of config.yaml: same database, universe and risk; only the interval and the strategy differ.
+# Opening-range breakout variant: 15-minute bars, at most two entries a day, no entries after 13:00.
+#   .venv/bin/tradebot --config config-orb.yaml backtest --strategy orb --start <date> --end <date>
 capital: 100000
 
 risk:
   per_trade_pct: 1.0          # max loss per trade as % of capital
   daily_loss_cap_pct: 3.0     # realised + unrealised; stop new entries when breached
   flatten_on_daily_cap: false
-  max_entries_per_day: 20     # entry orders only; exits are never blocked
-  max_open_positions: 5
+  max_entries_per_day: 2      # entry orders only; exits are never blocked
+  max_open_positions: 2
   cooldown_bars: 3            # bars to wait on a symbol after a stop-out
   mis_leverage: 5.0           # simulated intraday leverage in backtest/paper
   adopted_stop_pct: 1.5       # fallback stop for orphaned positions (live)
 
 strategy:
-  ema_rsi:
-    fast: 9
-    slow: 21
-    rsi_period: 14
-    rsi_long_min: 55
-    rsi_short_max: 45
-    atr_period: 14
-    atr_stop_mult: 1.5
-    reward_risk: 2.0
-    min_stop_pct: 0.1         # skip signals whose stop is closer than this % of price
-    product: MIS
-  confluence:                 # weighted votes from the technical layers; see the indicators spec
-    weights: {trend: 1.0, macd: 1.0, momentum: 1.0, breakout: 1.5, pattern: 1.0, exhaustion: -1.5}
-    threshold: 3.0            # LONG when the score reaches this, SHORT at minus this
-    adx_min: 20               # no trend, no trade
-    volume_spike_min: 150     # percent of the 20-bar average a break needs to count
-    rsi_overbought: 70
-    rsi_oversold: 30
-    pct_b_high: 0.8
-    pct_b_low: 0.2
-    atr_stop_mult: 1.5
-    reward_risk: 2.0
-    min_stop_pct: 0.1
-    product: MIS
-  pullback:                   # pullback to EMA20 in an EMA20/EMA50 trend; see the 2026-09-15 pullback spec
-    ema_fast: 20
-    ema_slow: 50
-    atr_period: 14
-    max_pullback_bars: 8      # a pullback older than this is spent without a trade
-    reward_risk: 2.0
-    min_stop_pct: 0.1         # skip a stop closer than this % of price
-    max_stop_atr: 3.0         # skip a stop further than this many ATRs
+  orb:                        # opening-range breakout; see the 2026-09-19 charges-orb-regime spec
+    range_minutes: 30         # 30 or 60; must be a multiple of the bar interval
+    reward_risk: 2.0          # null = exit by stop or square-off only
+    min_range_pct: 0.4        # narrower than this and costs dominate
+    max_range_pct: 1.5        # wider than this and the size becomes tiny
+    session_open: "09:15"     # must equal session.open
+    interval_minutes: 15      # must equal execution.interval_minutes
     product: MIS
   indicators:                 # shared technical set (also feeds the AI filter's context)
     ema_fast: 20
@@ -92,7 +68,7 @@ session:
   open: "09:15"
   close: "15:30"
   square_off: "15:10"          # on 15-minute bars the square-off bar is 14:45, so positions are flattened at its close, 15:00
-  no_new_entries_after: "14:45" # last signal bar opens 14:30; its order fills at the 14:45 open
+  no_new_entries_after: "13:00" # last signal bar opens 12:45; its order fills at the 13:00 open
   holidays: []                # ISO dates, e.g. "2026-10-02"
 
 data:

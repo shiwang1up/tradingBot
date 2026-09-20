@@ -123,4 +123,7 @@ def build_strategy(name: str, params: dict) -> Strategy:
     if name == "pullback":
         from tradebot.strategy.pullback import PullbackStrategy  # local import, as for confluence
         return PullbackStrategy(params)
+    if name == "orb":
+        from tradebot.strategy.orb import OrbStrategy  # local import, as for confluence
+        return OrbStrategy(params)
     raise ValueError(f"unknown strategy: {name}")

@@ -1,11 +1,13 @@
 # tests/test_config.py
+import dataclasses
 import textwrap
 from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 
-from tradebot.config import load_config
+from tradebot.config import ChargesConfig, RegimeConfig, load_config
 from tests.helpers import make_config
 from tradebot.engine.clock import SessionClock, ist_epoch
 
@@ -195,3 +197,107 @@ def test_config_15m_loads_and_fits_the_session(tmp_path):
     d = date(2026, 9, 14)
     assert clock.square_off_bar_ts(d) == ist_epoch(d, "14:45")
     assert clock.last_bar_ts(d) == ist_epoch(d, "15:15")
+
+
+def test_charges_section_missing_means_groww_defaults(tmp_path):
+    cfg = make_config(tmp_path, charges=None)
+    assert cfg.charges == ChargesConfig()
+    assert cfg.charges.enabled is True
+    assert (cfg.charges.brokerage_pct, cfg.charges.brokerage_min, cfg.charges.brokerage_max) == (0.1, 5.0, 20.0)
+    assert (cfg.charges.stt_sell_pct, cfg.charges.exchange_txn_pct) == (0.025, 0.00297)
+    assert (cfg.charges.sebi_pct, cfg.charges.stamp_buy_pct, cfg.charges.gst_pct) == (0.0001, 0.003, 18.0)
+
+
+def test_charges_are_validated(tmp_path):
+    with pytest.raises(ValueError, match="charges.stt_sell_pct"):
+        make_config(tmp_path, charges={"stt_sell_pct": -1})
+    with pytest.raises(ValueError, match="brokerage_min"):
+        make_config(tmp_path, charges={"brokerage_min": 30.0})
+    with pytest.raises(ValueError, match="unknown keys"):
+        make_config(tmp_path, charges={"brokrage_pct": 1})
+    with pytest.raises(ValueError, match="charges.gst_pct"):
+        make_config(tmp_path, charges={"gst_pct": float("nan")})  # yaml.safe_dump writes NaN as .nan
+
+
+def test_charges_section_non_mapping_raises_a_clear_error(tmp_path):
+    with pytest.raises(ValueError, match="must be a mapping"):
+        make_config(tmp_path, charges=False)
+    with pytest.raises(ValueError, match="must be a mapping"):
+        make_config(tmp_path, charges=5)
+
+
+def test_charges_section_absent_key_means_groww_defaults(tmp_path):
+    make_config(tmp_path)  # writes a config.yaml under tmp_path with a charges block
+    p = tmp_path / "config.yaml"
+    raw = yaml.safe_load(p.read_text())
+    del raw["charges"]  # genuinely absent, not just null
+    p.write_text(yaml.safe_dump(raw))
+    cfg = load_config(p, tmp_path / "nonexistent.env")
+    assert cfg.charges == ChargesConfig()
+
+
+def test_shipped_configs_carry_the_charges_block(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    for name in ("config.yaml", "config-15m.yaml", "config-orb.yaml"):
+        cfg = load_config(root / name, tmp_path / "nonexistent.env")
+        assert "charges" in cfg.raw, name
+        assert cfg.charges.enabled is True, name
+        # the shipped block names every field so a rate correction can't silently drop a key
+        assert set(cfg.raw["charges"]) == {f.name for f in dataclasses.fields(ChargesConfig)}, name
+
+
+def test_resolved_config_records_charges(tmp_path):
+    from tradebot.config import resolved_config
+    assert resolved_config(make_config(tmp_path, charges={"enabled": True}))["charges"]["enabled"] is True
+
+
+ORB = {"range_minutes": 30, "reward_risk": 2.0, "min_range_pct": 0.4, "max_range_pct": 1.5, "product": "MIS",
+       "session_open": "09:15", "interval_minutes": 15}
+
+
+def test_config_orb_loads_and_builds_the_strategy(tmp_path):
+    from tradebot.strategy.ema_rsi import build_strategy, strategy_params
+    root = Path(__file__).resolve().parents[1]
+    cfg = load_config(root / "config-orb.yaml", tmp_path / "nonexistent.env")
+    assert cfg.execution.interval_minutes == 15 and cfg.strategy["orb"] == ORB
+    assert set(cfg.strategy) == {"orb", "indicators"}  # no default-strategy trap: a forgotten --strategy must fail
+    assert (cfg.risk.max_entries_per_day, cfg.risk.max_open_positions) == (2, 2)
+    assert cfg.session.no_new_entries_after == "13:00" and cfg.charges.enabled is True
+    assert cfg.paths.db == load_config(root / "config.yaml", tmp_path / "nonexistent.env").paths.db
+    SessionClock(cfg.session, cfg.execution.interval_minutes)     # the 13:00 cutoff fits the session
+    assert build_strategy("orb", strategy_params(cfg.strategy, "orb")).name == "orb"
+
+
+def test_orb_keys_must_match_the_session_and_the_interval(tmp_path):
+    with pytest.raises(ValueError, match="orb.interval_minutes"):
+        make_config(tmp_path, strategy={"orb": ORB})                       # BASE_CONFIG runs 5-minute bars
+    with pytest.raises(ValueError, match="orb.session_open"):
+        make_config(tmp_path, strategy={"orb": dict(ORB, interval_minutes=5, session_open="09:30")})
+    make_config(tmp_path, strategy={"orb": dict(ORB, interval_minutes=5, range_minutes=30)})
+
+
+def test_regime_defaults_off_and_is_validated(tmp_path):
+    cfg = make_config(tmp_path)
+    assert cfg.regime == RegimeConfig() and cfg.regime.enabled is False
+    assert (cfg.regime.source, cfg.regime.ema_period, cfg.data.index_symbol) == ("index", 20, "")
+    with pytest.raises(ValueError, match="regime.source"):
+        make_config(tmp_path, regime={"source": "vix"})
+    with pytest.raises(ValueError, match="regime.ema_period"):
+        make_config(tmp_path, regime={"ema_period": 0})
+    with pytest.raises(ValueError, match="regime.ema_period"):
+        make_config(tmp_path, regime={"ema_period": 1})     # EMA1 == close: longs would be blocked forever, silently
+    with pytest.raises(ValueError, match="data.index_symbol"):
+        make_config(tmp_path, regime={"enabled": True})                  # the index source needs a symbol
+    assert make_config(tmp_path, regime={"enabled": True, "source": "composite"}).regime.enabled
+    assert make_config(tmp_path, regime={"enabled": True}, data={"index_symbol": "NIFTY"}).data.index_symbol == "NIFTY"
+
+
+def test_shipped_configs_name_the_index_and_keep_the_filter_off(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    for name in ("config.yaml", "config-15m.yaml", "config-orb.yaml"):
+        cfg = load_config(root / name, tmp_path / "nonexistent.env")
+        assert cfg.data.index_symbol == "NIFTY", name
+        assert cfg.regime.enabled is False, name
+        assert "regime" in cfg.raw, name
+        # the shipped block names every field so a new one can't silently take its default unnoticed
+        assert set(cfg.raw["regime"]) == {f.name for f in dataclasses.fields(RegimeConfig)}, name

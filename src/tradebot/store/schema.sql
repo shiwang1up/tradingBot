@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS signals (
   entry     REAL NOT NULL,
   stop      REAL NOT NULL,
   target    REAL,
-  product   TEXT NOT NULL
+  product   TEXT NOT NULL,
+  priority  REAL NOT NULL DEFAULT 0  -- ranks same-bar signals (Signal.priority); 0 on rows written before schema v5
 );
 
 CREATE TABLE IF NOT EXISTS risk_decisions (
@@ -108,7 +109,8 @@ CREATE TABLE IF NOT EXISTS positions (
   exit_reason   TEXT,
   pnl           REAL,
   fill_status   TEXT NOT NULL DEFAULT 'full',
-  adopted       INTEGER NOT NULL DEFAULT 0
+  adopted       INTEGER NOT NULL DEFAULT 0,
+  charges       REAL             -- brokerage + statutory at close; NULL on rows written before schema v4
 );
 
 CREATE TABLE IF NOT EXISTS daily_pnl (
