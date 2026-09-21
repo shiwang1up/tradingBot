@@ -5,6 +5,7 @@ import pytest
 
 from tradebot.data import instruments as instruments_mod
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
+from tradebot.data.membership import MembershipError
 from tradebot.data.universe import Universe, load_universe
 
 FIXTURE = Path(__file__).parent / "fixtures" / "instrument_sample.csv"
@@ -54,13 +55,6 @@ def test_load_universe_rejects_malformed(tmp_path, text):
     p.write_text(text)
     with pytest.raises(ValueError):
         load_universe(p)
-
-
-def test_load_universe_as_of_is_not_silently_ignored(tmp_path):
-    p = tmp_path / "universe.yaml"
-    p.write_text("exchange: NSE\nsymbols: [RELIANCE]\n")
-    with pytest.raises(NotImplementedError):
-        load_universe(p, as_of=date(2024, 1, 1))
 
 
 def test_load_instruments_missing_column_is_clear_error(tmp_path):
@@ -115,3 +109,72 @@ def test_download_is_atomic_and_validated(tmp_path, monkeypatch):
     monkeypatch.setattr(instruments_mod.requests, "get", lambda url, timeout: Resp(FIXTURE.read_bytes()))
     download_instruments(dest)
     assert ("NSE", "RELIANCE") in load_instruments(dest)
+
+
+TIMELINE = """
+index: TEST 3
+covers_from: 2023-01-01
+anchor:
+  as_of: 2024-01-01
+  source: https://example.test/list.csv
+  fetched: 2024-01-01
+  size: 3
+  symbols: [AAA, BBB, CCC]
+events:
+  - effective: 2023-06-01
+    source: https://example.test/jun2023.pdf
+    include: [CCC]
+    exclude: [ZZZ]
+renames: []
+"""
+
+
+def test_load_universe_without_as_of_is_unchanged(tmp_path):
+    """Every existing caller passes no as_of and must keep getting today's file verbatim."""
+    p = tmp_path / "universe.yaml"
+    p.write_text("exchange: NSE\nsymbols:\n  - RELIANCE\n  - TCS\n")
+    assert load_universe(p) == Universe(exchange="NSE", symbols=("RELIANCE", "TCS"))
+
+
+def test_load_universe_with_as_of_returns_point_in_time_members(tmp_path):
+    p = tmp_path / "universe.yaml"
+    p.write_text("exchange: NSE\nsymbols:\n  - AAA\n  - BBB\n  - CCC\n"
+                 "membership: membership.yaml\n")
+    (tmp_path / "membership.yaml").write_text(TIMELINE)
+    u = load_universe(p, as_of=date(2023, 1, 15))
+    assert u.symbols == ("AAA", "BBB", "ZZZ")
+    assert u.exchange == "NSE"
+
+
+def test_as_of_without_a_membership_file_raises_clearly(tmp_path):
+    """Silently falling back to today's list is the exact bug this whole change exists to
+    remove, so the absence of a timeline must be loud."""
+    p = tmp_path / "universe.yaml"
+    p.write_text("exchange: NSE\nsymbols:\n  - RELIANCE\n")
+    with pytest.raises(ValueError) as e:
+        load_universe(p, as_of=date(2023, 1, 15))
+    assert "membership" in str(e.value).lower()
+
+
+def test_as_of_outside_the_timeline_propagates_the_membership_error(tmp_path):
+    p = tmp_path / "universe.yaml"
+    p.write_text("exchange: NSE\nsymbols:\n  - AAA\nmembership: membership.yaml\n")
+    (tmp_path / "membership.yaml").write_text(TIMELINE)
+    with pytest.raises(MembershipError):
+        load_universe(p, as_of=date(2019, 1, 1))
+
+
+def test_membership_path_is_resolved_next_to_the_universe_file(tmp_path):
+    """So that a universe file can be loaded from any working directory."""
+    sub = tmp_path / "cfg"
+    sub.mkdir()
+    p = sub / "universe.yaml"
+    p.write_text("exchange: NSE\nsymbols:\n  - AAA\nmembership: membership.yaml\n")
+    (sub / "membership.yaml").write_text(TIMELINE)
+    assert load_universe(p, as_of=date(2023, 12, 1)).symbols == ("AAA", "BBB", "CCC")
+
+
+def test_as_of_none_does_not_require_a_membership_file(tmp_path):
+    p = tmp_path / "universe.yaml"
+    p.write_text("exchange: NSE\nsymbols:\n  - AAA\nmembership: missing.yaml\n")
+    assert load_universe(p, as_of=None).symbols == ("AAA",)

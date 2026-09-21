@@ -1,6 +1,9 @@
 # Survivorship bias: this is today's constituent list. Backtests over past
 # months overstate results. See spec section 4.1.
 exchange: NSE
+# Point-in-time membership, for callers that pass as_of. The list below stays what it
+# is: no as_of means today's constituents, exactly as before.
+membership: index_membership.yaml
 symbols:
   - ADANIENT
   - ADANIPORTS
