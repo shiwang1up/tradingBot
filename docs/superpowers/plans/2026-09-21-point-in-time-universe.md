@@ -39,7 +39,13 @@
 | `tests/test_liquidity.py` | Unit tests for the tiers, at boundaries. New. |
 | `tests/test_membership_real.py` | Integration: every date yields 200. New, added in Task 7. |
 
-Test counts: Task 1 +6, Task 2 +6, Task 3 +5, Task 4 +6, Task 5 +5, Task 6 (no tests, data only), Task 7 +3, Task 8 (no tests). From 629: 635, 641, 646, 652, 657, 657, 660, 660.
+Test counts: Task 1 +6, Task 2 +6, Task 3 +5, Task 4 +6 and -1, Task 5 +5, Task 6 (no tests, data only), Task 7 +3, Task 8 (no tests). From 629: 635, 641, 646, 651, 656, 656, 659, 659.
+
+Task 4's -1 is `test_load_universe_as_of_is_not_silently_ignored`, which pinned
+`pytest.raises(NotImplementedError)` for `as_of` -- the exact behaviour Task 4 removes.
+Delete it. Its guarantee is not lost: `test_as_of_without_a_membership_file_raises_clearly`
+asserts the same thing that matters, that `as_of` is never silently ignored, against the
+new `ValueError`.
 
 ---
 
