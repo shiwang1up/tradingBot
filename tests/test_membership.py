@@ -464,3 +464,53 @@ def test_a_timeline_with_no_exceptions_expects_the_plain_size(tmp_path):
     t = load_timeline(_write(tmp_path))
     assert t.size_exceptions == ()
     assert expected_size(t, date(2023, 5, 1)) == 4
+
+
+SAME_DAY = """
+index: TEST SAME DAY
+covers_from: 2022-01-01
+anchor:
+  as_of: 2024-01-01
+  source: https://example.test/list.csv
+  fetched: 2024-01-01
+  size: 4
+  symbols: [AAA, BBB, CCC, DDD]
+events:
+  - effective: 2023-07-01
+    source: https://example.test/review.pdf
+    include: [CCC, DDD]
+    exclude: [EEE]
+  - effective: 2023-07-01
+    source: https://example.test/amendment.pdf
+    include: []
+    exclude: [FFF]
+renames: []
+"""
+
+
+def test_two_releases_effective_the_same_day_are_undone_as_one_transition(tmp_path):
+    """A real case: the 2024-02-28 review and the release amending it are both effective
+    2024-03-28. Undone one release at a time the intermediate state has five names -- a
+    state the market never held, because both releases took effect at the same close --
+    and checking the count there fails on a fiction. Undone as one date it is four.
+
+    Reverting this to per-release checking breaks 1548 dates of the real timeline, so the
+    property is load-bearing and belongs in a unit test rather than only in the
+    integration test that happens to exercise it."""
+    t = load_timeline(_write(tmp_path, SAME_DAY))
+    assert len(t.events) == 2 and t.events[0].effective == t.events[1].effective
+    assert constituents_on(t, date(2023, 6, 30)) == ("AAA", "BBB", "EEE", "FFF")
+
+
+def test_same_day_releases_are_still_checked_once_the_day_is_complete(tmp_path):
+    """Grouping must not become a way of skipping the check: if the day as a whole leaves
+    the wrong count, that still raises, and the error names every release of that day."""
+    bad = SAME_DAY.replace("    include: []\n    exclude: [FFF]\n",
+                           "    include: []\n    exclude: [FFF, GGG]\n")
+    t = load_timeline(_write(tmp_path, bad))
+    with pytest.raises(MembershipError) as e:
+        constituents_on(t, date(2023, 6, 30))
+    msg = str(e.value)
+    assert "2023-07-01" in msg
+    assert "review.pdf" in msg and "amendment.pdf" in msg, "must name both releases"
+    assert "5" in msg and "4" in msg

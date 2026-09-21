@@ -155,7 +155,12 @@ date is 2024-03-28.
 1. If `d >= anchor.as_of`, return the anchor.
 2. Otherwise start from the anchor and, for every event with
    `effective > d`, taken newest first, UNDO it: remove each `include`, restore
-   each `exclude`.
+   each `exclude`. Events sharing an effective date are undone as ONE transition
+   and the count is checked once per date, not once per release. Two releases
+   effective the same day are one market event -- the 2024-02-28 review and the
+   2024-03-19 release amending it both take effect at the close of 2024-03-27 --
+   and the state between them never existed, so checking there fails on a fiction.
+   In the real timeline, checking per release instead of per date breaks 1548 dates.
 3. Apply renames in reverse across the same span, so a pre-merger date returns
    `HDFC` rather than `HDFCBANK`.
 
@@ -191,8 +196,13 @@ handling:
 
 - **A symbol swapped for itself under a new name.** Handled by ALIASES, not by the
   dated `renames` table. What matters is not when a symbol changed but that two symbols
-  denote one entity, so no date need be sourced -- which is fortunate, because no NSE
-  release states these mappings. Aliases are applied at load time to the anchor and to
+  denote one entity, so no date need be sourced. Nine of the fourteen mappings ARE
+  stated in the corpus: each demerger placeholder is named against its listed symbol in
+  the release that excludes it ("had announced inclusion of ITC Hotels Ltd. with a dummy
+  symbol DUMMYITC"), and the three June 2026 Vedanta releases pair all four DUMMYVEDL*
+  symbols to their entities "respectively". The five unstated ones are the plain ticker
+  changes (ADANITRANS to ADANIENSOL and the like), which are not index events and so
+  appear in no release here. Aliases are applied at load time to the anchor and to
   every event, before any replay. This also suits price lookup: Groww serves a company's
   whole history under its CURRENT ticker.
 
@@ -201,9 +211,19 @@ handling:
   leaks through ALL earlier history. Fourteen aliases were needed; without them the
   2020 count was 16 too high.
 - **Two errors that cancel** (a missed inclusion and a missed exclusion in the
-  same release). Mitigated by the cross-check in 3.1 and by asserting that each
-  parsed release has equal include and exclude counts for NIFTY 200, which
-  periodic reviews always do.
+  same release). Mitigated by the cross-check in 3.1 and by comparing each parsed
+  release's include and exclude counts for NIFTY 200. Note that unequal counts are
+  NOT by themselves a parse error: the 2023-08-17 periodic review is genuinely 7 out
+  and 8 in, and the 2020-06-10 review 10 out and 9 in, both because of the Tata
+  Motors DVR. An inequality is a prompt to read the release, not a defect.
+- **A balanced event recorded on the wrong date.** Six out and six in on the wrong
+  day produces the expected size on every single date, so the invariant cannot see it
+  at all -- it is blind to WHEN, and only checks HOW MANY. Seventeen of the thirty-seven
+  events in the real timeline are balanced, so their effective dates rest entirely on
+  transcription being right. All thirty-seven were verified by hand against their PDFs
+  during review, and that hand check is the only control that exists for this. Any event
+  added later without the same check is unguarded: nothing in the loader, the unit tests
+  or the acceptance test will catch a date that is out by a day or a month.
 
 ### 3.5 Mergers and delistings
 
@@ -304,6 +324,13 @@ result is rerun and restated.
   is COMPLETE over the span, which is a fact about how the file was compiled and
   so must be declared rather than inferred. A timeline whose `covers_from` is
   later than one of its own events is internally inconsistent and must not load.
+
+  What backs the claim must be a sweep of ANNOUNCEMENT dates starting well before
+  `covers_from`, not a list of the reviews found. NSE announces off-cycle changes
+  days to weeks ahead, so a release announced in late 2019 can take effect inside a
+  span beginning 2020-01-01, and an off-cycle change is usually one-for-one, which
+  the count invariant cannot see. The real file's 2019-11-01 onward sweep is what
+  closes that edge; "every semi-annual review is present" would not have.
 - `as_of` in the future raises.
 - The count invariant raises, as in 3.4.
 - Symbols are upper-cased and de-duplicated on load, as `load_universe` does now.

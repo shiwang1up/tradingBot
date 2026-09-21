@@ -216,8 +216,26 @@ anchor:
     YESBANK: INE528G01035
     ZYDUSLIFE: INE010B01027
 
-# The record of changes is complete from this date: every semi-annual review from 2020-H1
-# onward was located, so no unrecorded change can sit in the covered span.
+# The record of changes is complete from this date, and the claim rests on the sweep rather
+# than on the reviews being present. Announcement dates from 2019-11-01 to the anchor were
+# swept exhaustively on BOTH NSE hosts -- every ind_prs<DDMMYYYY>{,_1.._3}.pdf -- so no
+# unrecorded change can be effective anywhere in the covered span.
+#
+# The 2019 tail is not decoration. NSE announces off-cycle changes days to weeks ahead, so a
+# release announced in late 2019 could take effect in January to mid-March 2020, and such a
+# change is usually one-for-one, which means the count invariant would never see it. That
+# stretch was swept separately (496 probes; note that niftyindices.com answers 200 with
+# Content-Type text/html for files that do not exist -- it does so even for November 31st --
+# so only application/pdf counts as a hit). 22 distinct releases exist in November and
+# December 2019, 16 of them mirrored on both hosts:
+#   * exactly one changes NIFTY 200 -- 2019-12-16, ALBK, ORIENTBANK and TATACHEM out,
+#     FORTIS, VBL and WHIRLPOOL in
+#     (https://www.niftyindices.com/Press_Release/ind_prs16122019.pdf) -- and it is
+#     effective 2019-12-27, BEFORE this date, so it is already reflected in membership on
+#     2020-01-01 and correctly has no event here;
+#   * four take effect in January 2020 and none of them touches NIFTY 200 (two NIFTY SME
+#     EMERGE replacements, two fixed-income reviews);
+#   * the rest take effect within 2019.
 covers_from: 2020-01-01
 
 # The index holds 200 COMPANIES, and for bounded stretches it carries more SECURITIES than
@@ -326,8 +344,10 @@ size_exceptions:
     source: https://www.niftyindices.com/Press_Release/ind_prs19062026.pdf
 
 # One entity, two symbols. NSE removes an entity under whatever symbol it carries on the
-# day, which need not be the one it came in under, and a symbol change alone is not an
-# index event so no release announces it here. The replay is set arithmetic: unless both
+# day, which need not be the one it came in under. Nine of the fourteen pairings below are
+# stated outright in the release that excludes the entity; the five plain ticker changes
+# are not, because a ticker change is not an index event. The replay is set arithmetic:
+# unless both
 # symbols are folded to one before it starts, the undo removes a name that is not in the
 # set and restores one that is, and the count grows by one for every earlier date.
 # Canonicalising to the CURRENT symbol needs no date, so nothing here is inferred beyond
@@ -335,45 +355,55 @@ size_exceptions:
 # under, so it is what makes those names resolve to candles.
 aliases:
   # Demerger placeholders: added at zero price on the record date under a dummy symbol,
-  # excluded weeks later under the listed entity's own symbol. Both symbols and both
-  # releases are quoted on the events below.
+  # excluded weeks later under the listed entity's own symbol. Each of these pairings is
+  # STATED in the release that excludes it -- "NSE Indices Limited vide its press release
+  # dated December 30, 2024 had announced inclusion of ITC Hotels Ltd. with a dummy symbol
+  # DUMMYITC", and the same sentence pattern for the other four. Both releases of each
+  # pair are cited on the events below.
   DUMMYITC: ITCHOTELS          # ITC Hotels Ltd.
   DUMMYSIEMS: ENRIN            # Siemens Energy India Ltd.
   DUMMYABFRL: ABLBL            # Aditya Birla Lifestyle Brands Ltd.
   DUMMYTATAM: TMCV             # TML Commercial Vehicles Ltd. / Tata Motors Ltd.
   DUMMYHDLVR: KWIL             # Kwality Wall's (India) Ltd.
-  # Ticker changes with no index event of their own. Each of these was included under the
-  # old symbol, never excluded under it, and the new symbol is in today's anchor.
+  # Ticker changes with no index event of their own. THESE FIVE ARE THE UNSOURCED ONES:
+  # a ticker change is not an index change, so no release in the corpus states them. Each
+  # was included under the old symbol, never excluded under it, and the new symbol sits in
+  # today's anchor, which is what identifies the pair. (The nine above are all stated.)
   ADANITRANS: ADANIENSOL       # Adani Transmission -> Adani Energy Solutions
   ADANIGAS: ATGL               # Adani Gas -> Adani Total Gas
   NIITTECH: COFORGE            # NIIT Technologies -> Coforge
   ZOMATO: ETERNAL              # Zomato -> Eternal
   GMRINFRA: GMRAIRPORT         # GMR Airports Infrastructure -> GMR Airports
-  # The Vedanta four-way demerger. READ THIS BEFORE TRUSTING THE LAST TWO LINES:
-  #   * The SET of four successors is certain and sourced: the 2026-04-23 release names the
-  #     four dummies and the June 2026 releases exclude VAML, VEDPOWER, VISL and VOGL.
-  #   * Only DUMMYVEDL1 -> VAML and DUMMYVEDL4 -> VISL are ESTABLISHED, from the company
-  #     names printed in the release (Vedanta Aluminium Metal Ltd., Vedanta Iron and Steel
-  #     Ltd.).
-  #   * The remaining two are ASSIGNED ARBITRARILY. No release states which of Talwandi
-  #     Sabo Power Ltd. (DUMMYVEDL2) and Malco Energy Ltd. (DUMMYVEDL3) became VEDPOWER and
-  #     which became VOGL. The pairing below is a choice, not a finding.
-  #   * A verified what-if run shows every count on every date is identical under any
-  #     bijection of these four, so the choice cannot affect membership SIZE anywhere.
-  #     The only thing it can affect is which of two symbols is reported between
-  #     2026-04-30 and 2026-06-23, and all four are zero-price placeholders with no
-  #     candles, which eligible() drops.
-  # They are aliased rather than left out because an unaliased pair leaks its offset into
-  # every EARLIER date, not just its own window: leaving these out cost a permanent +4
-  # across six years to avoid committing to a pairing inside one seven-week window.
-  DUMMYVEDL1: VAML             # Vedanta Aluminium Metal Ltd. -- established
-  DUMMYVEDL4: VISL             # Vedanta Iron and Steel Ltd. -- established
-  DUMMYVEDL2: VEDPOWER         # Talwandi Sabo Power Ltd. -- ASSIGNED, not stated anywhere
-  DUMMYVEDL3: VOGL             # Malco Energy Ltd. -- ASSIGNED, not stated anywhere
+  # The Vedanta four-way demerger. All four mappings are STATED IN THE SOURCES. Each of
+  # the three June 2026 exclusion releases opens with the same sentence, which pairs the
+  # entities to the dummy symbols in order:
+  #
+  #   "NSE Indices Limited vide its press release dated April 23, 2026 had announced
+  #    inclusion of Vedanta Aluminium Metal Ltd. (VAML), Vedanta Power Ltd. (VEDPOWER),
+  #    Vedanta Oil and Gas Ltd. (VOGL) and Vedanta Iron and Steel Ltd. (VISL) with dummy
+  #    symbols DUMMYVEDL1, DUMMYVEDL2, DUMMYVEDL3 and DUMMYVEDL4 respectively, on account
+  #    of demerger of Aluminium, Merchant Power, Oil and Gas and Iron Ore businesses from
+  #    Vedanta Ltd."
+  #
+  # -- https://www.niftyindices.com/Press_Release/ind_prs17062026.pdf
+  #    https://www.niftyindices.com/Press_Release/ind_prs19062026.pdf
+  #    https://www.niftyindices.com/Press_Release/ind_prs22062026.pdf
+  #    (the same preamble in all three, quoted here from the first)
+  #
+  # "respectively" is what does the work, and the business list repeats the order a second
+  # time. Note that the entities were RENAMED between the April inclusion and the June
+  # exclusions -- DUMMYVEDL2 is Talwandi Sabo Power Ltd. in April and Vedanta Power Ltd. in
+  # June, DUMMYVEDL3 is Malco Energy Ltd. then Vedanta Oil and Gas Ltd. -- so the April
+  # release alone does not settle the pairing and these three do.
+  DUMMYVEDL1: VAML             # Vedanta Aluminium Metal Ltd. (Aluminium)
+  DUMMYVEDL2: VEDPOWER         # Vedanta Power Ltd., formerly Talwandi Sabo Power Ltd. (Merchant Power)
+  DUMMYVEDL3: VOGL             # Vedanta Oil and Gas Ltd., formerly Malco Energy Ltd. (Oil and Gas)
+  DUMMYVEDL4: VISL             # Vedanta Iron and Steel Ltd. (Iron Ore)
 
 # Every NSE release effective on or after covers_from that changes NIFTY 200, newest first.
 # One event per release: a release is the unit of evidence, so two releases effective on the
-# same date stay two events (2020-03-27 and 2024-03-28 each have a pair).
+# same date stay two events -- 2024-03-28 is the one such pair here. constituents_on undoes
+# a whole date at once, so the state between them is never checked; it never existed.
 #
 # Releases effective AFTER the anchor date are deliberately absent: the anchor already
 # reflects only what has happened by anchor.as_of, so replaying a later change backward from
@@ -685,8 +715,10 @@ events:
   # Same class of amendment as an "Inclusion revoked" remark, applied the same way: the
   # cited releases' entries are struck rather than recorded and later undone. The same
   # release re-initiated the review with a 2020-05-31 data cutoff, which is the 2020-06-10
-  # release effective 2020-06-26 below -- and that is why eleven of these twelve names
-  # reappear there. Recording both would double-count every one of them.
+  # release effective 2020-06-26 below -- and that is why ten of the review's twelve names
+  # reappear there: all six exclusions, and four of the six inclusions. ADANIGREEN,
+  # ADANITRANS and the PVR inclusion do not reappear. Recording both would double-count
+  # every one of the ten.
   #
   # The 2020-03-16 release below is NOT affected: it is the accelerated Yes Bank removal,
   # effective 2020-03-19, and the 2020-05-13 release confirms it went through.
