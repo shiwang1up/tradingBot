@@ -39,7 +39,7 @@
 | `tests/test_liquidity.py` | Unit tests for the tiers, at boundaries. New. |
 | `tests/test_membership_real.py` | Integration: every date yields 200. New, added in Task 7. |
 
-Test counts: Task 1 +6, Task 2 +5, Task 3 +5, Task 4 +6, Task 5 +5, Task 6 (no tests, data only), Task 7 +3, Task 8 (no tests). From 629: 635, 640, 645, 651, 656, 656, 659, 659.
+Test counts: Task 1 +6, Task 2 +6, Task 3 +5, Task 4 +6, Task 5 +5, Task 6 (no tests, data only), Task 7 +3, Task 8 (no tests). From 629: 635, 641, 646, 652, 657, 657, 660, 660.
 
 ---
 
@@ -279,6 +279,17 @@ git commit -m "data(membership): timeline file format and a validating loader"
 ---
 
 ### Task 2: backward replay and the count invariant
+
+> **Amended 2026-09-21, after the implementer reported a contradiction.** This task's
+> original tests and code disagreed on the range boundary: the test expected a date one day
+> before the earliest event to resolve, the code raised for it. The test was right and the
+> spec sentence was wrong -- but the obvious repair, allowing exactly one day of reach, is
+> also wrong. The real file's first recorded review is around 2020-03-31 and it must still
+> answer for 2020-01-01, which it legitimately can, since NSE reviews semi-annually and
+> nothing changed in the gap. What bounds the answer is whether the event record is COMPLETE
+> back to the queried date, which is a property of how the file was compiled rather than
+> anything the events imply. The timeline therefore carries a required `covers_from` key and
+> `constituents_on` refuses dates before it. See spec section 6.
 
 **Files:**
 - Modify: `src/tradebot/data/membership.py`

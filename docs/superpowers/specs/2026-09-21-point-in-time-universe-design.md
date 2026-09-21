@@ -256,8 +256,19 @@ result is rerun and restated.
   A release genuinely containing no NIFTY 200 change is recorded explicitly with
   empty include/exclude lists, so "no change" is distinguishable from "not
   parsed".
-- `as_of` earlier than the earliest event raises, rather than returning the
-  oldest reconstructed list as if it extended indefinitely backwards.
+- `as_of` earlier than the timeline's declared `covers_from` raises, rather than
+  returning the oldest reconstructed list as if it extended indefinitely
+  backwards.
+
+  `covers_from` is a required top-level key meaning "every index change effective
+  on or after this date is recorded here". It is NOT derivable from the events.
+  Undoing the earliest event does yield the list in force the day before it, and
+  because NSE reviews semi-annually that list usually stays valid for months
+  further back: the first recorded review is around 2020-03-31 while the real
+  file must answer for 2020-01-01. What bounds the answer is whether the record
+  is COMPLETE over the span, which is a fact about how the file was compiled and
+  so must be declared rather than inferred. A timeline whose `covers_from` is
+  later than one of its own events is internally inconsistent and must not load.
 - `as_of` in the future raises.
 - The count invariant raises, as in 3.4.
 - Symbols are upper-cased and de-duplicated on load, as `load_universe` does now.
