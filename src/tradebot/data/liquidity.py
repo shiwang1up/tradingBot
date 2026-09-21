@@ -12,7 +12,6 @@ seeing a result.
 """
 import statistics
 from datetime import date
-from typing import Optional
 
 INTERVAL = 1440
 IST_OFFSET = 19800
@@ -42,8 +41,9 @@ def slippage_pct_for_value(value):
 
 def median_traded_value(conn, symbol, as_of, window=WINDOW, interval=INTERVAL):
     """Median of close x volume over the `window` daily bars ending the day BEFORE `as_of`.
-    None when the symbol has no bars in that span. Strictly before `as_of` so an estimate
-    never uses the day it is applied to."""
+    None when the symbol has fewer than `window` such bars: a full window is required, and
+    anything less takes the most conservative tier rather than a confident-looking median
+    of five days. Strictly before `as_of` so an estimate never uses the day it applies to."""
     # Daily bars are stamped 00:00 IST, so the bar FOR `as_of` sits at exactly this ts.
     # Using a strict < is the whole guard: an estimate must never see the day it prices.
     as_of_ts = (as_of - date(1970, 1, 1)).days * 86400 - IST_OFFSET
@@ -51,7 +51,11 @@ def median_traded_value(conn, symbol, as_of, window=WINDOW, interval=INTERVAL):
         "SELECT c * v FROM candles WHERE symbol=? AND interval=? AND ts<? AND v>0"
         " ORDER BY ts DESC LIMIT ?", (symbol, interval, as_of_ts, window)).fetchall()
     vals = [r[0] for r in rows if r[0] is not None and r[0] > 0]
-    if not vals:
+    if len(vals) < window:
+        # A short history is not evidence of liquidity. Charging a liquid name too much is
+        # bounded and merely pessimistic; charging a thin one 5 bps is unbounded flattery of
+        # whichever strategy picked it. A name entering the index part-way through the window
+        # has exactly this short history at exactly the dates it first becomes rankable.
         return None
     return statistics.median(vals)
 
@@ -67,9 +71,11 @@ def describe_tiers():
     prev = None
     for floor, pct in TIERS:
         if prev is None:
-            out.append("  >= %5.0f cr   %.2f%%" % (floor / CRORE, pct))
+            band = ">= %6.0f cr" % (floor / CRORE)
         else:
-            out.append("  %5.0f-%5.0f cr  %.2f%%" % (floor / CRORE, prev / CRORE, pct))
+            band = "%6.0f - %6.0f cr" % (floor / CRORE, prev / CRORE)
+        out.append("  %-18s %.2f%%" % (band, pct))
         prev = floor
+    out.append("  a full 60-bar window is required; less takes the most conservative tier")
     out.append("  unvalidated against quote data; see spec 5.3")
     return "\n".join(out)
