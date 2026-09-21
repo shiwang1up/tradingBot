@@ -73,13 +73,43 @@ changes rather than snapshots. The anchor is today's NIFTY 200 constituent list
 as published by NSE Indices, stored with the exact URL it came from and the date
 it was fetched.
 
-The implementation must RECORD the URL it actually used rather than assume one.
-niftyindices.com was unreachable when this spec was written, so no constituent-list
-URL is asserted here; the first task is to find the live one, confirm it returns
-exactly 200 rows, and write it into the anchor block. If NSE Indices cannot be
-reached at all, stop and report rather than falling back to a third party --
-the anchor is the foundation every reconstructed date rests on, and an
-unattributed anchor makes the whole timeline unattributable.
+**Verified 2026-09-21.** Both of these return the same 13,081-byte file:
+
+    https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv
+    https://www.niftyindices.com/IndexConstituent/ind_nifty200list.csv
+
+Columns: `Company Name, Industry, Symbol, Series, ISIN Code`. 200 data rows,
+200 unique symbols, 200 unique ISINs. Fetch it with `curl` and a browser
+user-agent; the WebFetch tool times out against NSE hosts, curl does not.
+
+If a later fetch returns anything other than exactly 200 rows, stop and report
+rather than falling back to a third party. The anchor is the foundation every
+reconstructed date rests on, and an unattributed anchor makes the whole
+timeline unattributable.
+
+### 3.2.1 ISIN is the stable key
+
+The constituent file carries an ISIN per name, which the spec did not
+anticipate. ISIN survives a ticker rename where the symbol does not, so the
+timeline stores BOTH and matches on ISIN wherever one is available. This
+demotes the `renames` table from load-bearing to a fallback for the cases
+where a press release gives only a symbol.
+
+A merger is still not a rename: the ISIN disappears rather than changing, so
+3.5 stands unaltered.
+
+### 3.2.2 Scale, measured rather than estimated
+
+49 of the current 50 names are in today's NIFTY 200, so 151 names must be
+fetched before any historical entrant is considered. Total distinct symbols
+across the window is therefore likely 200-250, not the 300-400 estimated in
+section 4.
+
+The one name of our 50 absent from today's NIFTY 200 is TATAMOTORS, which
+demerged on 2025-10-23. It is already in the database and already ends early.
+That is this entire spec's problem in miniature: a name that was in the index
+for most of the window, is not in it now, and would be invisible to any screen
+built from today's list.
 
 ### 3.3 File format
 
@@ -156,14 +186,14 @@ rather than silently truncating.
 ## 4. Historical data
 
 Every symbol appearing in the anchor, in any event, or in any rename needs
-daily candles from 2020-01-01. Expect 300-400 distinct symbols against today's
-50.
+daily candles from 2020-01-01. Expect 200-250 distinct symbols against today's
+50 (see 3.2.2; 151 are needed for the anchor alone).
 
 - Reuse the existing `tradebot fetch-data` path at `interval=1440`. No new
   fetch machinery.
 - **Never write to `data/` without a backup first.** Take
   `data/tradebot.pre-universe.bak.db` before the first insert.
-- Groww's approval-flow key must be approved that morning. At 300-400 symbols
+- Groww's approval-flow key must be approved that morning. At 200-250 symbols
   this is likely hours, not minutes; it must be resumable and must not restart
   from the beginning after a failure.
 - A symbol Groww has no history for is recorded in a
@@ -257,7 +287,7 @@ Integration, against the real committed timeline:
   worked around.
 - The fetch is long and depends on a key that is approved daily.
 - The tiers are unvalidated, as stated in 5.3.
-- Roughly 300-400 symbols of daily history is 450-580k rows, which SQLite
+- Roughly 200-250 symbols of daily history is 300-360k rows, which SQLite
   handles comfortably; no schema change is expected beyond more rows.
 
 ## 9. Out of scope, and what comes next
