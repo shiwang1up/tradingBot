@@ -44,6 +44,10 @@ class Timeline:
     anchor: Tuple[str, ...]
     events: Tuple[Event, ...]       # newest first
     renames: Tuple[Rename, ...]
+    # retired symbol -> the current symbol of the same entity, as (old, new) pairs. Already
+    # applied to `anchor` and to every event above; kept so callers can canonicalise a
+    # symbol of their own -- a price series filed under a retired ticker, say.
+    aliases: Tuple[Tuple[str, str], ...] = ()
 
 
 def _sym(x):
@@ -57,6 +61,41 @@ def _date(x, what):
         return date.fromisoformat(str(x))
     except ValueError:
         raise ValueError("%s: expected an ISO date, got %r" % (what, x))
+
+
+def _load_aliases(raw_aliases, p):
+    """Read the retired-symbol -> current-symbol map.
+
+    An alias is deliberately undated, unlike a `rename`. What the replay needs to know is
+    not WHEN a symbol changed but THAT two symbols denote one entity: NSE excludes an
+    entity under whatever symbol it carries at the time, so a release can take out
+    ITCHOTELS a name that entered as DUMMYITC, and a set-based replay would then remove a
+    symbol that is not there and put back one that is -- the count grows by one and every
+    earlier date is wrong. Canonicalising both to today's symbol before any replay fixes
+    that, needs no date, and so infers nothing. It is also what makes prices resolve:
+    a broker serves a company's whole history under its current ticker.
+    """
+    if raw_aliases is None:
+        return {}
+    if not isinstance(raw_aliases, dict):
+        raise ValueError("%s: 'aliases' must be a mapping of retired symbol to current "
+                         "symbol, got %s" % (p, type(raw_aliases).__name__))
+    aliases = {}
+    for old, new in raw_aliases.items():
+        o, n = _sym(old), _sym(new)
+        if not o or not n:
+            raise ValueError("%s: alias %r -> %r has an empty symbol" % (p, old, new))
+        if o == n:
+            raise ValueError("%s: alias %s maps to itself" % (p, o))
+        aliases[o] = n
+    chained = sorted(set(n for n in aliases.values() if n in aliases))
+    if chained:
+        raise ValueError(
+            "%s: alias target(s) %s are themselves alias keys, so canonicalising takes "
+            "more than one hop and a single pass would leave a retired symbol in the "
+            "timeline. Point every alias straight at the symbol in use today."
+            % (p, ", ".join(chained)))
+    return aliases
 
 
 def load_timeline(path):
@@ -75,7 +114,10 @@ def load_timeline(path):
         if key not in a:
             raise ValueError("%s: anchor is missing %r" % (p, key))
 
-    symbols = [_sym(s) for s in a["symbols"]]
+    aliases = _load_aliases(raw.get("aliases"), p)
+    canon = lambda s: aliases.get(s, s)                                   # noqa: E731
+
+    symbols = [canon(_sym(s)) for s in a["symbols"]]
     dupes = sorted(set(s for s in symbols if symbols.count(s) > 1))
     if dupes:
         raise ValueError("%s: anchor lists duplicate symbols: %s" % (p, ", ".join(dupes)))
@@ -89,8 +131,8 @@ def load_timeline(path):
         events.append(Event(
             effective=_date(e["effective"], "%s: event effective" % p),
             source=str(e.get("source", "")),
-            include=tuple(_sym(s) for s in (e.get("include") or [])),
-            exclude=tuple(_sym(s) for s in (e.get("exclude") or []))))
+            include=tuple(canon(_sym(s)) for s in (e.get("include") or [])),
+            exclude=tuple(canon(_sym(s)) for s in (e.get("exclude") or []))))
     events.sort(key=lambda e: e.effective, reverse=True)
     anchor_as_of = _date(a["as_of"], "%s: anchor as_of" % p)
     if events and events[0].effective > anchor_as_of:
@@ -118,7 +160,8 @@ def load_timeline(path):
     return Timeline(index=str(raw["index"]), size=size, covers_from=covers_from,
                     anchor_as_of=anchor_as_of,
                     anchor_source=str(a["source"]), anchor=tuple(symbols),
-                    events=tuple(events), renames=tuple(renames))
+                    events=tuple(events), renames=tuple(renames),
+                    aliases=tuple(sorted(aliases.items())))
 
 
 class MembershipError(Exception):

@@ -220,6 +220,39 @@ anchor:
 # onward was located, so no unrecorded change can sit in the covered span.
 covers_from: 2020-01-01
 
+# One entity, two symbols. NSE removes an entity under whatever symbol it carries on the
+# day, which need not be the one it came in under, and a symbol change alone is not an
+# index event so no release announces it here. The replay is set arithmetic: unless both
+# symbols are folded to one before it starts, the undo removes a name that is not in the
+# set and restores one that is, and the count grows by one for every earlier date.
+# Canonicalising to the CURRENT symbol needs no date, so nothing here is inferred beyond
+# the identity itself -- and it is also the symbol a broker files the whole price history
+# under, so it is what makes those names resolve to candles.
+aliases:
+  # Demerger placeholders: added at zero price on the record date under a dummy symbol,
+  # excluded weeks later under the listed entity's own symbol. Both symbols and both
+  # releases are quoted on the events below.
+  DUMMYITC: ITCHOTELS          # ITC Hotels Ltd.
+  DUMMYSIEMS: ENRIN            # Siemens Energy India Ltd.
+  DUMMYABFRL: ABLBL            # Aditya Birla Lifestyle Brands Ltd.
+  DUMMYTATAM: TMCV             # TML Commercial Vehicles Ltd. / Tata Motors Ltd.
+  DUMMYHDLVR: KWIL             # Kwality Wall's (India) Ltd.
+  # Ticker changes with no index event of their own. Each of these was included under the
+  # old symbol, never excluded under it, and the new symbol is in today's anchor.
+  ADANITRANS: ADANIENSOL       # Adani Transmission -> Adani Energy Solutions
+  ADANIGAS: ATGL               # Adani Gas -> Adani Total Gas
+  NIITTECH: COFORGE            # NIIT Technologies -> Coforge
+  ZOMATO: ETERNAL              # Zomato -> Eternal
+  GMRINFRA: GMRAIRPORT         # GMR Airports Infrastructure -> GMR Airports
+  # DUMMYVEDL1-4 are deliberately NOT aliased. The 2026-04-23 release names four demerged
+  # Vedanta entities and the June 2026 releases exclude four listed ones, but no document
+  # states which dummy became which symbol. Only DUMMYVEDL1 -> VAML and DUMMYVEDL4 -> VISL
+  # are certain from the company names; DUMMYVEDL2 (Talwandi Sabo Power Ltd.) and
+  # DUMMYVEDL3 (Malco Energy Ltd.) against VEDPOWER and VOGL are guesswork. Aliasing two
+  # of four would hide the gap without closing it, so all four stand unaliased and the
+  # count runs high between 2026-04-30 and 2026-06-23. That drift is the honest signal
+  # that this identity is still unsourced.
+
 # Every NSE release effective on or after covers_from that changes NIFTY 200, newest first.
 # One event per release: a release is the unit of evidence, so two releases effective on the
 # same date stay two events (2020-03-27 and 2024-03-28 each have a pair).
@@ -412,16 +445,23 @@ events:
 
   - effective: 2023-07-20
     source: https://www.niftyindices.com/Press_Release/ind_prs17072023.pdf
-    include: []
+    include: [JIOFIN]
     exclude: []
-    # SYMBOL UNKNOWN -- one inclusion is missing from this event on purpose. The release
-    # is the corporate adjustment for the Reliance Industries demerger and says only that
-    # "spun off entity shall be included" in Nifty 200; it never prints a symbol. The
-    # entity is Reliance Strategic Investments Ltd., renamed Jio Financial Services Ltd.,
-    # and the 2023-09-05 release calls it JIOFIN -- but this release does not, so nothing
-    # is recorded here rather than a symbol inferred from a later document. Every date
-    # before 2023-07-20 is therefore one name short, which is correct: it is what the
-    # sources support.
+    # JIOFIN IS INFERRED, NOT PRINTED IN THE SOURCE. This release is the corporate
+    # adjustment for the Reliance Industries demerger and says only that "spun off entity
+    # shall be included in following indices", Nifty 200 among them; it prints no symbol.
+    # Three grounds identify it, and the third is decisive:
+    #   1. The release itself describes the spun-off entity of the Reliance demerger.
+    #   2. That entity is Reliance Strategic Investments Ltd., renamed Jio Financial
+    #      Services Ltd. (JIOFIN), as a matter of public record.
+    #   3. The 2023-09-05 release
+    #      (https://www.niftyindices.com/Press_Release/ind_prs05092023.pdf) EXCLUDES JIOFIN
+    #      from Nifty 200 effective 2023-09-07 -- which it cannot do unless JIOFIN was a
+    #      constituent, and this is the only release that could have made it one. Leaving
+    #      the include list empty would have the timeline assert that a name left an index
+    #      it never joined.
+    # Ground 3 comes from the corpus, not from outside it. Weigh 1 and 2 as you like: if
+    # the identification is wrong, the symbol is wrong but the count is still right.
 
   - effective: 2023-07-13
     source: https://www.niftyindices.com/Press_Release/ind_prs04072023.pdf

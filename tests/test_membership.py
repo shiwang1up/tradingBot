@@ -276,3 +276,68 @@ def test_an_event_effective_on_the_anchor_date_is_allowed(tmp_path):
     t = load_timeline(_write(tmp_path, same_day))
     assert t.events[0].effective == date(2024, 1, 1)
     assert constituents_on(t, date(2024, 1, 1)) == ("AAA", "BBB", "CCC", "DDD")
+
+
+ALIASED = """
+index: TEST ALIAS
+covers_from: 2022-01-01
+aliases:
+  OLDCCC: CCC
+anchor:
+  as_of: 2024-01-01
+  source: https://example.test/list.csv
+  fetched: 2024-01-01
+  size: 4
+  symbols: [AAA, BBB, CCC, DDD]
+events:
+  - effective: 2023-07-01
+    source: https://example.test/jul2023.pdf
+    include: [OLDCCC]
+    exclude: [EEE]
+renames: []
+"""
+
+
+def test_an_alias_canonicalises_the_anchor_and_every_event_at_load_time(tmp_path):
+    """One entity, two symbols. The replay is set arithmetic, so it must see one name."""
+    t = load_timeline(_write(tmp_path, ALIASED))
+    assert t.events[0].include == ("CCC",)
+    assert t.aliases == (("OLDCCC", "CCC"),)
+    aliased_anchor = load_timeline(
+        _write(tmp_path, ALIASED.replace("[AAA, BBB, CCC, DDD]", "[AAA, BBB, OLDCCC, DDD]")))
+    assert aliased_anchor.anchor == ("AAA", "BBB", "CCC", "DDD")
+
+
+def test_an_alias_makes_an_otherwise_unbalanced_pair_cancel(tmp_path):
+    """The case this exists for. NSE takes an entity out under whatever symbol it carries
+    at the time, which need not be the one it came in under: DUMMYITC in, ITCHOTELS out.
+    Without the alias the undo removes a symbol that is not in the set and puts back one
+    that is, the count grows by one, and every earlier date is silently wrong."""
+    t = load_timeline(_write(tmp_path, ALIASED))
+    assert constituents_on(t, date(2023, 3, 1)) == ("AAA", "BBB", "DDD", "EEE")
+    unaliased = ALIASED.replace("aliases:\n  OLDCCC: CCC\n", "")
+    with pytest.raises(MembershipError) as e:
+        constituents_on(load_timeline(_write(tmp_path, unaliased)), date(2023, 3, 1))
+    assert "5" in str(e.value) and "4" in str(e.value)
+
+
+def test_a_chained_alias_is_rejected(tmp_path):
+    """A -> B -> C would need two passes; one pass leaves a retired symbol in the timeline
+    and the count breaks exactly as if there were no alias at all."""
+    chained = ALIASED.replace("aliases:\n  OLDCCC: CCC\n",
+                              "aliases:\n  OLDCCC: MIDCCC\n  MIDCCC: CCC\n")
+    with pytest.raises(ValueError) as e:
+        load_timeline(_write(tmp_path, chained))
+    assert "MIDCCC" in str(e.value)
+
+
+def test_an_alias_to_itself_is_rejected(tmp_path):
+    same = ALIASED.replace("  OLDCCC: CCC", "  CCC: CCC")
+    with pytest.raises(ValueError) as e:
+        load_timeline(_write(tmp_path, same))
+    assert "CCC" in str(e.value)
+
+
+def test_a_timeline_with_no_aliases_block_still_loads(tmp_path):
+    t = load_timeline(_write(tmp_path))
+    assert t.aliases == ()
