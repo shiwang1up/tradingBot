@@ -341,3 +341,126 @@ def test_an_alias_to_itself_is_rejected(tmp_path):
 def test_a_timeline_with_no_aliases_block_still_loads(tmp_path):
     t = load_timeline(_write(tmp_path))
     assert t.aliases == ()
+
+
+from tradebot.data.membership import expected_size
+
+EXCEPTED = """
+index: TEST EXC
+covers_from: 2022-01-01
+size_exceptions:
+  - from: 2023-03-01
+    to: 2023-06-30
+    size: 5
+    reason: a demerged entity joined at zero price and had not yet listed
+    source: https://example.test/exc.pdf
+anchor:
+  as_of: 2024-01-01
+  source: https://example.test/list.csv
+  fetched: 2024-01-01
+  size: 4
+  symbols: [AAA, BBB, CCC, DDD]
+events:
+  - effective: 2023-07-01
+    source: https://example.test/jul2023.pdf
+    include: []
+    exclude: [EEE]
+  - effective: 2023-03-01
+    source: https://example.test/mar2023.pdf
+    include: [EEE]
+    exclude: []
+renames: []
+"""
+
+
+def test_a_size_exception_permits_the_extra_name_inside_its_window(tmp_path):
+    """The index held five securities for four companies while the placeholder sat in it.
+    Without the window this is exactly what a missing release looks like, which is why the
+    window has to be dated and sourced rather than a tolerance."""
+    t = load_timeline(_write(tmp_path, EXCEPTED))
+    assert expected_size(t, date(2023, 5, 1)) == 5
+    assert constituents_on(t, date(2023, 5, 1)) == ("AAA", "BBB", "CCC", "DDD", "EEE")
+
+
+def test_outside_the_window_the_plain_size_is_still_demanded(tmp_path):
+    t = load_timeline(_write(tmp_path, EXCEPTED))
+    assert expected_size(t, date(2023, 2, 1)) == 4
+    assert constituents_on(t, date(2023, 2, 1)) == ("AAA", "BBB", "CCC", "DDD")
+
+
+def test_the_window_boundaries_are_inside_the_window(tmp_path):
+    """from and to are inclusive. Tested at the boundary values themselves, because an
+    off-by-one here moves a real trading day into or out of the exception."""
+    t = load_timeline(_write(tmp_path, EXCEPTED))
+    assert expected_size(t, date(2023, 3, 1)) == 5      # first day
+    assert expected_size(t, date(2023, 6, 30)) == 5     # last day
+    assert expected_size(t, date(2023, 2, 28)) == 4     # day before
+    assert expected_size(t, date(2023, 7, 1)) == 4      # day after
+    assert len(constituents_on(t, date(2023, 3, 1))) == 5
+    assert len(constituents_on(t, date(2023, 6, 30))) == 5
+
+
+def test_without_the_exception_the_same_timeline_is_an_error(tmp_path):
+    """The mechanism must be what permits the count, not the count that permits itself."""
+    plain = EXCEPTED[:EXCEPTED.index("size_exceptions:")] + EXCEPTED[EXCEPTED.index("anchor:"):]
+    t = load_timeline(_write(tmp_path, plain))
+    with pytest.raises(MembershipError) as e:
+        constituents_on(t, date(2023, 5, 1))
+    assert "jul2023.pdf" in str(e.value)
+
+
+def test_a_size_exception_without_a_source_is_a_load_error(tmp_path):
+    """An exception nobody can trace to a release is the invariant switched off."""
+    bad = EXCEPTED.replace("    source: https://example.test/exc.pdf\n", "")
+    with pytest.raises(ValueError) as e:
+        load_timeline(_write(tmp_path, bad))
+    assert "source" in str(e.value)
+
+
+def test_a_size_exception_missing_any_other_field_is_a_load_error(tmp_path):
+    for line in ("    to: 2023-06-30\n", "    size: 5\n",
+                 "    reason: a demerged entity joined at zero price and had not yet listed\n"):
+        with pytest.raises(ValueError):
+            load_timeline(_write(tmp_path, EXCEPTED.replace(line, "")))
+
+
+def test_a_backwards_size_exception_is_rejected(tmp_path):
+    bad = EXCEPTED.replace("  - from: 2023-03-01\n    to: 2023-06-30\n",
+                           "  - from: 2023-06-30\n    to: 2023-03-01\n")
+    with pytest.raises(ValueError) as e:
+        load_timeline(_write(tmp_path, bad))
+    assert "2023-06-30" in str(e.value) and "2023-03-01" in str(e.value)
+
+
+def test_overlapping_size_exceptions_are_rejected(tmp_path):
+    """Two windows covering one date disagree about how many names the index held, and
+    whichever is consulted first silently wins."""
+    bad = EXCEPTED.replace("""    source: https://example.test/exc.pdf
+""", """    source: https://example.test/exc.pdf
+  - from: 2023-06-01
+    to: 2023-08-31
+    size: 6
+    reason: a second window that overlaps the first
+    source: https://example.test/exc2.pdf
+""")
+    with pytest.raises(ValueError) as e:
+        load_timeline(_write(tmp_path, bad))
+    assert "overlap" in str(e.value)
+
+
+def test_the_error_names_the_exception_in_force(tmp_path):
+    """A wrong window must be as diagnosable as a missing release, so the error says which
+    exception set the number it was checking against."""
+    wrong = EXCEPTED.replace("    size: 5\n    reason: a demerged",
+                             "    size: 6\n    reason: a demerged")
+    t = load_timeline(_write(tmp_path, wrong))
+    with pytest.raises(MembershipError) as e:
+        constituents_on(t, date(2023, 5, 1))
+    msg = str(e.value)
+    assert "exc.pdf" in msg and "2023-03-01" in msg and "2023-06-30" in msg
+
+
+def test_a_timeline_with_no_exceptions_expects_the_plain_size(tmp_path):
+    t = load_timeline(_write(tmp_path))
+    assert t.size_exceptions == ()
+    assert expected_size(t, date(2023, 5, 1)) == 4

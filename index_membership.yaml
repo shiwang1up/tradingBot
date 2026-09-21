@@ -220,6 +220,111 @@ anchor:
 # onward was located, so no unrecorded change can sit in the covered span.
 covers_from: 2020-01-01
 
+# The index holds 200 COMPANIES, and for bounded stretches it carries more SECURITIES than
+# that. Two ways that happens, both published, both temporary:
+#   * a DVR line trades alongside the ordinary shares of a company that is separately a
+#     constituent -- Tata Motors and TATAMTRDVR;
+#   * a demerged entity joins at zero price on the record date with nothing leaving, and
+#     stays until it lists and is removed.
+# Each window below is bounded by events already in this file and cites the release that
+# evidences it. Outside them the plain size stands, so an unexplained count is still an
+# error -- which is the only reason this mechanism is safe to have.
+size_exceptions:
+
+  - from: 2020-01-01
+    to: 2020-06-25
+    size: 201
+    reason: >-
+      Tata Motors DVR (TATAMTRDVR) is a second listed security of a company whose ordinary
+      shares are separately constituents, so the index carries 201 securities for 200
+      companies. Confirmed by this release leaving NIFTY 100, NIFTY 200 and NIFTY
+      LargeMidcap 250 one short -- precisely the three indices whose exclusion list
+      contains TATAMTRDVR -- while every other fixed-size broad index in it balances.
+    source: https://www.niftyindices.com/Press_Release/ind_prs10062020.pdf
+
+  - from: 2023-07-20
+    to: 2023-09-06
+    size: 201
+    reason: >-
+      Jio Financial Services (JIOFIN) joined on the Reliance demerger with nothing leaving,
+      and was removed on 2023-09-07 for not hitting the price band. The index carried it as
+      a 201st security for those seven weeks.
+    source: https://www.niftyindices.com/Press_Release/ind_prs17072023.pdf
+
+  - from: 2023-09-29
+    to: 2024-08-29
+    size: 201
+    reason: >-
+      Tata Motors DVR (TATAMTRDVR) back in the index, until the DVR was cancelled under the
+      scheme of arrangement and removed on 2024-08-30. This release is the mirror of the
+      2020-06-10 one: Nifty 100, Nifty 200 and Nifty LargeMidcap 250 are each one LONG, and
+      those are precisely the three indices whose inclusion list contains TATAMTRDVR.
+    source: https://www.niftyindices.com/Press_Release/ind_prs17082023.pdf
+
+  - from: 2025-01-06
+    to: 2025-02-09
+    size: 201
+    reason: >-
+      ITC Hotels joined at zero price on the demerger record date as DUMMYITC, with nothing
+      leaving, and was removed as ITCHOTELS on 2025-02-10.
+    source: https://www.niftyindices.com/Press_Release/ind_prs30122024.pdf
+
+  - from: 2025-04-07
+    to: 2025-05-21
+    size: 201
+    reason: >-
+      Siemens Energy India joined at zero price as DUMMYSIEMS, with nothing leaving.
+    source: https://www.niftyindices.com/Press_Release/ind_prs02042025.pdf
+
+  - from: 2025-05-22
+    to: 2025-06-26
+    size: 202
+    reason: >-
+      Two placeholders at once: Aditya Birla Lifestyle Brands joins at zero price as
+      DUMMYABFRL while Siemens Energy India (DUMMYSIEMS) is still in. Both were removed on
+      2025-06-27, as ABLBL and ENRIN.
+    source: https://www.niftyindices.com/Press_Release/ind_prs19052025.pdf
+
+  - from: 2025-10-14
+    to: 2025-11-16
+    size: 201
+    reason: >-
+      TML Commercial Vehicles joined at zero price as DUMMYTATAM on the Tata Motors
+      commercial-vehicle demerger, and was removed as TMCV on 2025-11-17.
+    source: https://www.niftyindices.com/Press_Release/ind_prs07102025.pdf
+
+  - from: 2025-12-05
+    to: 2026-02-23
+    size: 201
+    reason: >-
+      Kwality Wall's (India) joined at zero price as DUMMYHDLVR on the Hindustan Unilever
+      ice cream demerger, and was removed as KWIL on 2026-02-24.
+    source: https://www.niftyindices.com/Press_Release/ind_prs28112025.pdf
+
+  - from: 2026-04-30
+    to: 2026-06-18
+    size: 204
+    reason: >-
+      The Vedanta four-way demerger: four entities joined at zero price with equal weights
+      and nothing left, so the index carried 204 securities for 200 companies.
+    source: https://www.niftyindices.com/Press_Release/ind_prs23042026.pdf
+
+  - from: 2026-06-19
+    to: 2026-06-22
+    size: 202
+    reason: >-
+      Two of the four Vedanta entities (VEDPOWER, VISL) were removed on 2026-06-19, leaving
+      the other two in the index.
+    source: https://www.niftyindices.com/Press_Release/ind_prs17062026.pdf
+
+  - from: 2026-06-23
+    to: 2026-06-23
+    size: 201
+    reason: >-
+      A third Vedanta entity (VAML) was removed on 2026-06-23, leaving one, which was
+      removed on 2026-06-24 and restored the index to 200 securities.
+    source: https://www.niftyindices.com/Press_Release/ind_prs19062026.pdf
+
 # One entity, two symbols. NSE removes an entity under whatever symbol it carries on the
 # day, which need not be the one it came in under, and a symbol change alone is not an
 # index event so no release announces it here. The replay is set arithmetic: unless both
@@ -244,14 +349,27 @@ aliases:
   NIITTECH: COFORGE            # NIIT Technologies -> Coforge
   ZOMATO: ETERNAL              # Zomato -> Eternal
   GMRINFRA: GMRAIRPORT         # GMR Airports Infrastructure -> GMR Airports
-  # DUMMYVEDL1-4 are deliberately NOT aliased. The 2026-04-23 release names four demerged
-  # Vedanta entities and the June 2026 releases exclude four listed ones, but no document
-  # states which dummy became which symbol. Only DUMMYVEDL1 -> VAML and DUMMYVEDL4 -> VISL
-  # are certain from the company names; DUMMYVEDL2 (Talwandi Sabo Power Ltd.) and
-  # DUMMYVEDL3 (Malco Energy Ltd.) against VEDPOWER and VOGL are guesswork. Aliasing two
-  # of four would hide the gap without closing it, so all four stand unaliased and the
-  # count runs high between 2026-04-30 and 2026-06-23. That drift is the honest signal
-  # that this identity is still unsourced.
+  # The Vedanta four-way demerger. READ THIS BEFORE TRUSTING THE LAST TWO LINES:
+  #   * The SET of four successors is certain and sourced: the 2026-04-23 release names the
+  #     four dummies and the June 2026 releases exclude VAML, VEDPOWER, VISL and VOGL.
+  #   * Only DUMMYVEDL1 -> VAML and DUMMYVEDL4 -> VISL are ESTABLISHED, from the company
+  #     names printed in the release (Vedanta Aluminium Metal Ltd., Vedanta Iron and Steel
+  #     Ltd.).
+  #   * The remaining two are ASSIGNED ARBITRARILY. No release states which of Talwandi
+  #     Sabo Power Ltd. (DUMMYVEDL2) and Malco Energy Ltd. (DUMMYVEDL3) became VEDPOWER and
+  #     which became VOGL. The pairing below is a choice, not a finding.
+  #   * A verified what-if run shows every count on every date is identical under any
+  #     bijection of these four, so the choice cannot affect membership SIZE anywhere.
+  #     The only thing it can affect is which of two symbols is reported between
+  #     2026-04-30 and 2026-06-23, and all four are zero-price placeholders with no
+  #     candles, which eligible() drops.
+  # They are aliased rather than left out because an unaliased pair leaks its offset into
+  # every EARLIER date, not just its own window: leaving these out cost a permanent +4
+  # across six years to avoid committing to a pairing inside one seven-week window.
+  DUMMYVEDL1: VAML             # Vedanta Aluminium Metal Ltd. -- established
+  DUMMYVEDL4: VISL             # Vedanta Iron and Steel Ltd. -- established
+  DUMMYVEDL2: VEDPOWER         # Talwandi Sabo Power Ltd. -- ASSIGNED, not stated anywhere
+  DUMMYVEDL3: VOGL             # Malco Energy Ltd. -- ASSIGNED, not stated anywhere
 
 # Every NSE release effective on or after covers_from that changes NIFTY 200, newest first.
 # One event per release: a release is the unit of evidence, so two releases effective on the

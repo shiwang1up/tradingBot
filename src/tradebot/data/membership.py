@@ -7,9 +7,16 @@ anchor back to `d`, undoing each one.
 The index holds a fixed number of names -- 200 for NIFTY 200 -- so the count after every
 undo step is a free correctness check. A missed, misparsed or double-applied release
 breaks it, and the error names the date and the source URL that broke it.
+
+The count is a count of COMPANIES, and for stretches of days the index carries more
+SECURITIES than that: a DVR line trades alongside the ordinary shares of a company that
+is separately a constituent, and a demerged entity joins at zero price on the record date
+with nothing leaving until it lists. Those stretches are real, bounded by published
+releases, and declared as dated `size_exceptions` with the release that evidences each
+one. Everywhere else the plain size stands, so an unexplained count is still an error.
 """
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -35,9 +42,19 @@ class Rename:
 
 
 @dataclass(frozen=True)
+class SizeException:
+    """A dated, sourced window in which the index carries more securities than companies."""
+    start: date             # inclusive
+    end: date               # inclusive
+    size: int               # how many names the index really holds across that window
+    reason: str
+    source: str             # URL of the release that evidences it -- required
+
+
+@dataclass(frozen=True)
 class Timeline:
     index: str
-    size: int                       # the invariant: how many names the index always holds
+    size: int                       # the invariant: how many COMPANIES the index holds
     covers_from: date          # every change effective on or after this date is recorded
     anchor_as_of: date
     anchor_source: str
@@ -48,6 +65,7 @@ class Timeline:
     # applied to `anchor` and to every event above; kept so callers can canonicalise a
     # symbol of their own -- a price series filed under a retired ticker, say.
     aliases: Tuple[Tuple[str, str], ...] = ()
+    size_exceptions: Tuple[SizeException, ...] = ()
 
 
 def _sym(x):
@@ -96,6 +114,62 @@ def _load_aliases(raw_aliases, p):
             "timeline. Point every alias straight at the symbol in use today."
             % (p, ", ".join(chained)))
     return aliases
+
+
+def _load_size_exceptions(raw_exceptions, p):
+    """Read the dated windows in which the index holds more securities than companies.
+
+    Every field is required, the source most of all: an exception without a release behind
+    it is indistinguishable from switching the invariant off for a date that is merely
+    inconvenient, and the invariant is the only thing that catches a missing release.
+    """
+    if raw_exceptions is None:
+        return ()
+    if not isinstance(raw_exceptions, list):
+        raise ValueError("%s: 'size_exceptions' must be a list, got %s"
+                         % (p, type(raw_exceptions).__name__))
+    out = []
+    for i, x in enumerate(raw_exceptions):
+        where = "%s: size_exceptions[%d]" % (p, i)
+        if not isinstance(x, dict):
+            raise ValueError("%s: expected a mapping, got %s" % (where, type(x).__name__))
+        for key in ("from", "to", "size", "reason", "source"):
+            if key not in x or x[key] is None or not str(x[key]).strip():
+                raise ValueError(
+                    "%s: missing %r. Every size exception needs from, to, size, reason and "
+                    "source; the source is an NSE release URL, and without one an exception "
+                    "cannot be told apart from silencing the count check." % (where, key))
+        start = _date(x["from"], "%s: from" % where)
+        end = _date(x["to"], "%s: to" % where)
+        if start > end:
+            raise ValueError("%s: from %s is after to %s" % (where, start, end))
+        out.append(SizeException(start=start, end=end, size=int(x["size"]),
+                                 reason=str(x["reason"]).strip(),
+                                 source=str(x["source"]).strip()))
+    out.sort(key=lambda s: s.start)
+    for a, b in zip(out, out[1:]):
+        if b.start <= a.end:
+            raise ValueError(
+                "%s: size exceptions %s..%s and %s..%s overlap, so two windows disagree "
+                "about how many names the index holds on the same date. Split or merge them."
+                % (p, a.start, a.end, b.start, b.end))
+    return tuple(out)
+
+
+def expected_size(timeline, as_of):
+    """How many names the index holds on `as_of`: the covering exception's size, else the
+    plain index size."""
+    for x in timeline.size_exceptions:
+        if x.start <= as_of <= x.end:
+            return x.size
+    return timeline.size
+
+
+def _exception_on(timeline, as_of):
+    for x in timeline.size_exceptions:
+        if x.start <= as_of <= x.end:
+            return x
+    return None
 
 
 def load_timeline(path):
@@ -161,7 +235,8 @@ def load_timeline(path):
                     anchor_as_of=anchor_as_of,
                     anchor_source=str(a["source"]), anchor=tuple(symbols),
                     events=tuple(events), renames=tuple(renames),
-                    aliases=tuple(sorted(aliases.items())))
+                    aliases=tuple(sorted(aliases.items())),
+                    size_exceptions=_load_size_exceptions(raw.get("size_exceptions"), p))
 
 
 class MembershipError(Exception):
@@ -169,13 +244,51 @@ class MembershipError(Exception):
     date is outside the reconstructable range."""
 
 
+def _check(timeline, members, for_date, day_events):
+    """Assert the reconstructed set is the size the index really held on `for_date`."""
+    want = expected_size(timeline, for_date)
+    if len(members) == want:
+        return
+    x = _exception_on(timeline, for_date)
+    if day_events:
+        what = ("after undoing the %s effective %s from %s"
+                % ("releases" if len(day_events) > 1 else "event",
+                   day_events[0].effective,
+                   ", ".join(e.source or "(no source)" for e in day_events)))
+    else:
+        what = "for the date asked for"
+    because = (" The size expected on %s is %d because of the exception %s..%s (%s), from "
+               "%s -- if that window is wrong, so is this answer."
+               % (for_date, want, x.start, x.end, x.reason, x.source)) if x else ""
+    raise MembershipError(
+        "membership count is %d, expected %d on %s, %s. A release is missing, misparsed, "
+        "or applied twice.%s"
+        % (len(members), want, for_date, what, because))
+
+
+def _undo_day(timeline, members, day_events, as_of):
+    """Undo every release effective on one date, then check the state it leaves behind."""
+    for e in day_events:
+        members.difference_update(e.include)
+        members.update(e.exclude)
+    _check(timeline, members, day_events[0].effective - timedelta(days=1), day_events)
+
+
 def constituents_on(timeline, as_of):
     """The index members on `as_of`, as a sorted tuple.
 
     Walks backward from the anchor, undoing every event effective AFTER `as_of`: the names
     that event brought in are removed, and the names it took out are put back. The count is
-    checked after each undo, because the index always holds exactly `timeline.size` names
+    checked after each undo, because the index holds a known number of names on every date
     and anything else means the timeline is wrong rather than the market.
+
+    Events are undone a DATE at a time, not a release at a time. Two releases effective the
+    same day are one transition -- the 2024-03-28 review and the release that amends it,
+    for instance -- and the membership between them never existed, so checking the count
+    there would fail on a state the market never held.
+
+    What the count is checked against is `expected_size` for the dates the undone state
+    applies to, which is the plain index size except inside a declared exception window.
     """
     if as_of > date.today():
         raise MembershipError("as_of %s is in the future" % as_of)
@@ -190,16 +303,16 @@ def constituents_on(timeline, as_of):
             % (as_of, timeline.covers_from))
 
     members = set(timeline.anchor)
-    for e in timeline.events:                      # newest first
-        if e.effective <= as_of:
+    pending = []                                   # events sharing one effective date
+    for e in list(timeline.events) + [None]:       # newest first; None flushes the last day
+        if pending and (e is None or e.effective != pending[0].effective):
+            _undo_day(timeline, members, pending, as_of)
+            pending = []
+        if e is None or e.effective <= as_of:
             break
-        members -= set(e.include)
-        members |= set(e.exclude)
-        if len(members) != timeline.size:
-            raise MembershipError(
-                "membership count is %d, expected %d, after undoing the event effective "
-                "%s from %s. A release is missing, misparsed, or applied twice."
-                % (len(members), timeline.size, e.effective, e.source or "(no source)"))
+        pending.append(e)
+
+    _check(timeline, members, as_of, None)         # the date asked for, inside a window or not
 
     for r in timeline.renames:                     # undo renames across the same span
         if r.effective > as_of and r.new in members:
