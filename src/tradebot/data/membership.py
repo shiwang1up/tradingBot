@@ -92,6 +92,15 @@ def load_timeline(path):
             include=tuple(_sym(s) for s in (e.get("include") or [])),
             exclude=tuple(_sym(s) for s in (e.get("exclude") or []))))
     events.sort(key=lambda e: e.effective, reverse=True)
+    anchor_as_of = _date(a["as_of"], "%s: anchor as_of" % p)
+    if events and events[0].effective > anchor_as_of:
+        e = events[0]
+        raise ValueError(
+            "%s: the anchor is as of %s but an event is effective %s, after it, from %s. "
+            "The anchor predates that change, so replaying it backward would undo a change "
+            "the anchor never had -- silently wrong for every date. Announced-but-not-yet-"
+            "effective releases do not belong here until the anchor is refetched past them."
+            % (p, anchor_as_of, e.effective, e.source or "(no source)"))
     if events and events[-1].effective < covers_from:
         raise ValueError(
             "%s: covers_from is %s but an event is effective %s, before it. Either the "
@@ -107,7 +116,7 @@ def load_timeline(path):
             isin=(str(r["isin"]).strip() if r.get("isin") else None)))
 
     return Timeline(index=str(raw["index"]), size=size, covers_from=covers_from,
-                    anchor_as_of=_date(a["as_of"], "%s: anchor as_of" % p),
+                    anchor_as_of=anchor_as_of,
                     anchor_source=str(a["source"]), anchor=tuple(symbols),
                     events=tuple(events), renames=tuple(renames))
 

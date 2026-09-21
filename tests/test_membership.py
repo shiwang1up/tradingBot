@@ -251,3 +251,28 @@ def test_the_count_is_checked_after_every_undo_not_once_at_the_end(tmp_path):
     assert "2023-07-01" in msg, "must name the release that broke, not the query date"
     assert "jul2023.pdf" in msg
     assert "5" in msg and "4" in msg
+
+
+def test_an_event_effective_after_the_anchor_is_rejected(tmp_path):
+    """The anchor is a snapshot: it already reflects every change up to its own date and
+    none after it. Replaying a later change backward from it would undo something the
+    anchor never contained, corrupting every query rather than just that date's -- and
+    nothing downstream could tell. NSE announces reviews a month before they take effect,
+    so this file WILL be handed one; it must refuse to load rather than quietly rewrite
+    history."""
+    future = SAMPLE.replace("  - effective: 2023-07-01", "  - effective: 2024-07-01")
+    with pytest.raises(ValueError) as e:
+        load_timeline(_write(tmp_path, future))
+    msg = str(e.value)
+    assert "2024-07-01" in msg, "must name the offending event"
+    assert "2024-01-01" in msg, "must name the anchor date it is after"
+    assert "jul2023.pdf" in msg, "must name the source so it can be checked"
+
+
+def test_an_event_effective_on_the_anchor_date_is_allowed(tmp_path):
+    """The boundary is 'after', not 'on': a change effective on the anchor date is already
+    reflected in the anchor, and constituents_on never undoes it."""
+    same_day = SAMPLE.replace("  - effective: 2023-07-01", "  - effective: 2024-01-01")
+    t = load_timeline(_write(tmp_path, same_day))
+    assert t.events[0].effective == date(2024, 1, 1)
+    assert constituents_on(t, date(2024, 1, 1)) == ("AAA", "BBB", "CCC", "DDD")
