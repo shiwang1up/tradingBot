@@ -232,10 +232,20 @@ traded value (close x volume) over the 60 trading days ending the day before
 | ₹25 cr to ₹100 cr | 0.15% |
 | < ₹25 cr | 0.30% |
 
-Today's 50 names span ₹154 cr to ₹2,668 cr median daily turnover, so the
+Today's 50 names span ₹133 cr to ₹2,668 cr median daily turnover, so the
 existing universe lands in the top two tiers and the 5 bps figure is preserved
-for the largest names. Insufficient history for the 60-day window means the
-most conservative tier, never the cheapest.
+for the largest names.
+
+**"Insufficient history" means fewer than a full 60-bar window, and takes the
+most conservative tier.** The original wording did not define the threshold,
+which let an implementation price a 5-bar history as though it were 60 and land
+a barely-traded name in the CHEAPEST tier. The rule is deliberately strict
+rather than a fraction of the window, because the two errors are not
+symmetrical: charging a liquid name too much is bounded and merely pessimistic,
+while charging a thin name 5 bps is unbounded flattery of whichever strategy
+selected it. This matters most for exactly the names this spec adds -- a stock
+entering the index part-way through the window has a short history at precisely
+the dates it first becomes rankable.
 
 ### 5.3 Honesty about the tiers
 
