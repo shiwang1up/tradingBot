@@ -7,6 +7,7 @@ from tradebot.data.membership import Timeline, load_timeline
 
 SAMPLE = """
 index: TEST 4
+covers_from: 2022-01-01
 anchor:
   as_of: 2024-01-01
   source: https://example.test/list.csv
@@ -91,3 +92,57 @@ def test_a_missing_file_says_so(tmp_path):
     with pytest.raises(ValueError) as e:
         load_timeline(tmp_path / "nope.yaml")
     assert "not found" in str(e.value)
+
+
+from tradebot.data.membership import MembershipError, constituents_on
+
+
+def test_a_date_at_or_after_the_anchor_returns_the_anchor(tmp_path):
+    t = load_timeline(_write(tmp_path))
+    assert constituents_on(t, date(2024, 1, 1)) == ("AAA", "BBB", "CCC", "DDD")
+    assert constituents_on(t, date(2025, 6, 1)) == ("AAA", "BBB", "CCC", "DDD")
+
+
+def test_replay_undoes_one_event(tmp_path):
+    """Between the two events: the July change has been undone, the January one has not.
+    DDD came in and EEE went out in July, so before July it is EEE that is a member."""
+    t = load_timeline(_write(tmp_path))
+    assert constituents_on(t, date(2023, 3, 1)) == ("AAA", "BBB", "CCC", "EEE")
+
+
+def test_replay_undoes_every_event_before_the_earliest(tmp_path):
+    t = load_timeline(_write(tmp_path))
+    assert constituents_on(t, date(2022, 12, 31)) == ("AAA", "BBB", "EEE", "FFF")
+
+
+def test_a_broken_count_raises_and_names_the_date_and_source(tmp_path):
+    """An event that removes two and adds one leaves the index one short. That means a
+    release was missed or misparsed, and the error must say which."""
+    bad = SAMPLE.replace("    include: [DDD]\n    exclude: [EEE]\n",
+                         "    include: [DDD]\n    exclude: [EEE, GGG]\n")
+    t = load_timeline(_write(tmp_path, bad))
+    with pytest.raises(MembershipError) as e:
+        constituents_on(t, date(2023, 3, 1))
+    msg = str(e.value)
+    assert "2023-07-01" in msg
+    assert "jul2023.pdf" in msg
+    assert "5" in msg and "4" in msg
+
+
+def test_a_date_before_the_declared_coverage_raises(tmp_path):
+    """The timeline declares how far back its event record is complete. Before that, an
+    unrecorded change may sit in the gap, so the answer is unknowable rather than merely
+    unrecorded -- and returning the oldest list anyway would be a confident wrong answer."""
+    t = load_timeline(_write(tmp_path))
+    with pytest.raises(MembershipError) as e:
+        constituents_on(t, date(2021, 6, 1))
+    assert "2022-01-01" in str(e.value)
+
+
+def test_coverage_starting_after_an_event_is_rejected(tmp_path):
+    """A timeline claiming completeness from a date later than one of its own events is
+    internally inconsistent; that is a compiler bug and must not load."""
+    bad = SAMPLE.replace("covers_from: 2022-01-01", "covers_from: 2023-06-01")
+    with pytest.raises(ValueError) as e:
+        load_timeline(_write(tmp_path, bad))
+    assert "2023-01-01" in str(e.value)
