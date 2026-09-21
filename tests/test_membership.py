@@ -146,3 +146,63 @@ def test_coverage_starting_after_an_event_is_rejected(tmp_path):
     with pytest.raises(ValueError) as e:
         load_timeline(_write(tmp_path, bad))
     assert "2023-01-01" in str(e.value)
+
+
+RENAMED = SAMPLE.replace("renames: []", """renames:
+  - from: OLDNAME
+    to: DDD
+    effective: 2023-09-01
+    kind: rename
+    source: https://example.test/rename.pdf
+""")
+
+
+def test_a_rename_resolves_to_the_old_symbol_before_its_effective_date(tmp_path):
+    """DDD was called OLDNAME until 2023-09-01. A screen asking for August 2023 needs
+    OLDNAME, because that is the symbol the candles are stored under."""
+    t = load_timeline(_write(tmp_path, RENAMED))
+    after = constituents_on(t, date(2023, 10, 1))
+    assert "DDD" in after and "OLDNAME" not in after
+
+
+def test_a_rename_is_not_applied_after_its_effective_date(tmp_path):
+    t = load_timeline(_write(tmp_path, RENAMED))
+    assert "DDD" in constituents_on(t, date(2024, 1, 1))
+
+
+def test_renames_do_not_change_the_member_count(tmp_path):
+    """A rename swaps one symbol for another. If it ever changes the count, the rename
+    table has an entry that is really an inclusion or exclusion in disguise."""
+    t = load_timeline(_write(tmp_path, RENAMED))
+    for d in (date(2023, 3, 1), date(2023, 10, 1), date(2024, 1, 1)):
+        assert len(constituents_on(t, d)) == 4
+
+
+def test_a_merger_is_recorded_with_its_kind(tmp_path):
+    merged = SAMPLE.replace("renames: []", """renames:
+  - from: HDFC
+    to: HDFCBANK
+    effective: 2023-07-13
+    kind: merger
+    source: https://example.test/merger.pdf
+""")
+    t = load_timeline(_write(tmp_path, merged))
+    assert t.renames[0].kind == "merger"
+    assert t.renames[0].old == "HDFC"
+
+
+def test_rename_carries_an_isin(tmp_path):
+    """ISIN survives a ticker rename where the symbol does not, so where the anchor gives
+    one it is the better key. Absent is allowed: press releases often give only a symbol."""
+    with_isin = SAMPLE.replace("renames: []", """renames:
+  - from: OLDNAME
+    to: DDD
+    effective: 2023-09-01
+    kind: rename
+    source: https://example.test/rename.pdf
+    isin: INE123A01010
+""")
+    t = load_timeline(_write(tmp_path, with_isin))
+    assert t.renames[0].isin == "INE123A01010"
+    plain = load_timeline(_write(tmp_path, RENAMED))
+    assert plain.renames[0].isin is None

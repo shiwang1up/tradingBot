@@ -29,8 +29,9 @@ class Rename:
     old: str
     new: str
     effective: date
-    kind: str               # "rename" or "merger"
+    kind: str               # "rename" (symbol changed, ISIN survived) or "merger" (ISIN gone)
     source: str
+    isin: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,8 @@ def load_timeline(path):
         renames.append(Rename(
             old=_sym(r["from"]), new=_sym(r["to"]),
             effective=_date(r["effective"], "%s: rename effective" % p),
-            kind=str(r.get("kind", "rename")), source=str(r.get("source", ""))))
+            kind=str(r.get("kind", "rename")), source=str(r.get("source", "")),
+            isin=(str(r["isin"]).strip() if r.get("isin") else None)))
 
     return Timeline(index=str(raw["index"]), size=size, covers_from=covers_from,
                     anchor_as_of=_date(a["as_of"], "%s: anchor as_of" % p),
