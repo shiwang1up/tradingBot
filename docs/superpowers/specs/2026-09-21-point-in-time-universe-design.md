@@ -113,8 +113,14 @@ built from today's list.
 
 ### 3.3 File format
 
-`data/index_membership.yaml`, committed to git (it is reference data, not
-generated output, and must be reviewable in a diff):
+`index_membership.yaml` at the repository root, beside `universe.yaml`,
+committed to git (it is reference data, not generated output, and must be
+reviewable in a diff).
+
+NOT under `data/`: that directory is gitignored in its entirety and nothing in
+it is tracked, so a timeline placed there would be invisible to review and lost
+on a fresh clone. `universe.yaml`, the file this one supersedes, already lives
+at the root for the same reason.
 
 ```yaml
 index: NIFTY 200
