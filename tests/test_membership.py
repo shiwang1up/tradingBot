@@ -158,23 +158,29 @@ RENAMED = SAMPLE.replace("renames: []", """renames:
 
 
 def test_a_rename_resolves_to_the_old_symbol_before_its_effective_date(tmp_path):
-    """DDD was called OLDNAME until 2023-09-01. A screen asking for August 2023 needs
-    OLDNAME, because that is the symbol the candles are stored under."""
+    """DDD was called OLDNAME until 2023-09-01, so a query for August 2023 must return
+    OLDNAME -- that is the symbol its candles are stored under, and a screen given DDD
+    for that date would find no prices. This is the case the rename loop exists for."""
     t = load_timeline(_write(tmp_path, RENAMED))
+    before = constituents_on(t, date(2023, 8, 15))
+    assert "OLDNAME" in before and "DDD" not in before
+
+
+def test_a_rename_is_not_applied_after_its_effective_date(tmp_path):
+    """Between the rename and the anchor the new symbol stands. The date must be strictly
+    before anchor_as_of, or constituents_on returns the anchor at its early exit and this
+    never exercises the rename loop at all."""
+    t = load_timeline(_write(tmp_path, RENAMED))
+    assert t.anchor_as_of == date(2024, 1, 1)          # guards the point above
     after = constituents_on(t, date(2023, 10, 1))
     assert "DDD" in after and "OLDNAME" not in after
 
 
-def test_a_rename_is_not_applied_after_its_effective_date(tmp_path):
-    t = load_timeline(_write(tmp_path, RENAMED))
-    assert "DDD" in constituents_on(t, date(2024, 1, 1))
-
-
 def test_renames_do_not_change_the_member_count(tmp_path):
     """A rename swaps one symbol for another. If it ever changes the count, the rename
-    table has an entry that is really an inclusion or exclusion in disguise."""
+    table holds an entry that is really an inclusion or exclusion in disguise."""
     t = load_timeline(_write(tmp_path, RENAMED))
-    for d in (date(2023, 3, 1), date(2023, 10, 1), date(2024, 1, 1)):
+    for d in (date(2023, 3, 1), date(2023, 8, 15), date(2023, 10, 1), date(2024, 1, 1)):
         assert len(constituents_on(t, d)) == 4
 
 
