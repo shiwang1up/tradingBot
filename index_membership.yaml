@@ -1,0 +1,550 @@
+# Point-in-time NIFTY 200 membership, for backtests that must not see the future.
+#
+# NSE publishes index CHANGES, not historical snapshots, so this file is an anchor (today's
+# published constituent list) plus every change back to covers_from. src/tradebot/data/
+# membership.py replays the changes backward from the anchor to answer any date in between.
+#
+# Every event cites the NSE Indices press release it was read from. The releases were found
+# by an exhaustive sweep of both NSE hosts' press-release namespaces, which located all 14
+# semi-annual reviews in the window with no gaps, plus the off-cycle releases.
+index: NIFTY 200
+anchor:
+  as_of: 2026-09-21
+  source: https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv
+  fetched: 2026-09-21
+  size: 200
+  symbols: [360ONE, ABB, ABCAPITAL, ADANIENSOL, ADANIENT, ADANIGREEN, ADANIPORTS, ADANIPOWER, ALKEM, AMBUJACEM, APLAPOLLO, APOLLOHOSP, ASHOKLEY, ASIANPAINT, ASTRAL, ATGL, AUBANK, AUROPHARMA, AXISBANK, BAJAJ-AUTO, BAJAJFINSV, BAJAJHLDNG, BAJFINANCE, BANKBARODA, BANKINDIA, BDL, BEL, BHARATFORG, BHARTIARTL, BHEL, BIOCON, BLUESTARCO, BOSCHLTD, BPCL, BRITANNIA, BSE, CANBK, CGPOWER, CHOLAFIN, CIPLA, COALINDIA, COCHINSHIP, COFORGE, COLPAL, CONCOR, COROMANDEL, CUMMINSIND, DABUR, DIVISLAB, DIXON, DLF, DMART, DRREDDY, EICHERMOT, ENRIN, ETERNAL, EXIDEIND, FEDERALBNK, FORTIS, GAIL, GLENMARK, GMRAIRPORT, GODFRYPHLP, GODREJCP, GODREJPROP, GRASIM, GROWW, GVT&D, HAL, HAVELLS, HCLTECH, HDFCAMC, HDFCBANK, HDFCLIFE, HEROMOTOCO, HINDALCO, HINDPETRO, HINDUNILVR, HINDZINC, HUDCO, HYUNDAI, ICICIAMC, ICICIBANK, ICICIGI, IDEA, IDFCFIRSTB, INDHOTEL, INDIANB, INDIGO, INDUSINDBK, INDUSTOWER, INFY, IOC, IRCTC, IREDA, IRFC, ITC, JINDALSTEL, JIOFIN, JSWENERGY, JSWSTEEL, JUBLFOOD, KALYANKJIL, KEI, KOTAKBANK, KPITTECH, LAURUSLABS, LENSKART, LGEINDIA, LICHSGFIN, LODHA, LT, LTF, LTM, LUPIN, M&M, M&MFIN, MANKIND, MARICO, MARUTI, MAXHEALTH, MAZDOCK, MCX, MFSL, MOTHERSON, MOTILALOFS, MPHASIS, MRF, MUTHOOTFIN, NATIONALUM, NAUKRI, NESTLEIND, NHPC, NMDC, NTPC, NYKAA, OBEROIRLTY, OFSS, OIL, ONGC, PAGEIND, PATANJALI, PAYTM, PERSISTENT, PFC, PHOENIXLTD, PIDILITIND, PIIND, PNB, POLICYBZR, POLYCAB, POWERGRID, POWERINDIA, PREMIERENE, PRESTIGE, RADICO, RECLTD, RELIANCE, RVNL, SAIL, SBICARD, SBILIFE, SBIN, SHREECEM, SHRIRAMFIN, SIEMENS, SOLARINDS, SRF, SUNPHARMA, SUPREMEIND, SUZLON, SWIGGY, TATACAP, TATACOMM, TATACONSUM, TATAELXSI, TATAINVEST, TATAPOWER, TATASTEEL, TCS, TECHM, TIINDIA, TITAN, TMCV, TMPV, TORNTPHARM, TRENT, TVSMOTOR, ULTRACEMCO, UNIONBANK, UNITDSPR, UPL, VBL, VEDL, VMM, VOLTAS, WAAREEENER, WIPRO, YESBANK, ZYDUSLIFE]
+  isins:
+    360ONE: INE466L01038
+    ABB: INE117A01022
+    ABCAPITAL: INE674K01013
+    ADANIENSOL: INE931S01010
+    ADANIENT: INE423A01024
+    ADANIGREEN: INE364U01010
+    ADANIPORTS: INE742F01042
+    ADANIPOWER: INE814H01029
+    ALKEM: INE540L01014
+    AMBUJACEM: INE079A01024
+    APLAPOLLO: INE702C01027
+    APOLLOHOSP: INE437A01024
+    ASHOKLEY: INE208A01029
+    ASIANPAINT: INE021A01026
+    ASTRAL: INE006I01046
+    ATGL: INE399L01023
+    AUBANK: INE949L01017
+    AUROPHARMA: INE406A01037
+    AXISBANK: INE238A01034
+    BAJAJ-AUTO: INE917I01010
+    BAJAJFINSV: INE918I01026
+    BAJAJHLDNG: INE118A01012
+    BAJFINANCE: INE296A01032
+    BANKBARODA: INE028A01039
+    BANKINDIA: INE084A01016
+    BDL: INE171Z01026
+    BEL: INE263A01024
+    BHARATFORG: INE465A01025
+    BHARTIARTL: INE397D01024
+    BHEL: INE257A01026
+    BIOCON: INE376G01013
+    BLUESTARCO: INE472A01039
+    BOSCHLTD: INE323A01026
+    BPCL: INE029A01011
+    BRITANNIA: INE216A01030
+    BSE: INE118H01025
+    CANBK: INE476A01022
+    CGPOWER: INE067A01029
+    CHOLAFIN: INE121A01024
+    CIPLA: INE059A01026
+    COALINDIA: INE522F01014
+    COCHINSHIP: INE704P01025
+    COFORGE: INE591G01025
+    COLPAL: INE259A01022
+    CONCOR: INE111A01025
+    COROMANDEL: INE169A01031
+    CUMMINSIND: INE298A01020
+    DABUR: INE016A01026
+    DIVISLAB: INE361B01024
+    DIXON: INE935N01020
+    DLF: INE271C01023
+    DMART: INE192R01011
+    DRREDDY: INE089A01031
+    EICHERMOT: INE066A01021
+    ENRIN: INE1NPP01017
+    ETERNAL: INE758T01015
+    EXIDEIND: INE302A01020
+    FEDERALBNK: INE171A01029
+    FORTIS: INE061F01013
+    GAIL: INE129A01019
+    GLENMARK: INE935A01035
+    GMRAIRPORT: INE776C01039
+    GODFRYPHLP: INE260B01028
+    GODREJCP: INE102D01028
+    GODREJPROP: INE484J01027
+    GRASIM: INE047A01021
+    GROWW: INE0HOQ01053
+    GVT&D: INE200A01026
+    HAL: INE066F01020
+    HAVELLS: INE176B01034
+    HCLTECH: INE860A01027
+    HDFCAMC: INE127D01025
+    HDFCBANK: INE040A01034
+    HDFCLIFE: INE795G01014
+    HEROMOTOCO: INE158A01026
+    HINDALCO: INE038A01020
+    HINDPETRO: INE094A01015
+    HINDUNILVR: INE030A01027
+    HINDZINC: INE267A01025
+    HUDCO: INE031A01017
+    HYUNDAI: INE0V6F01027
+    ICICIAMC: INE346A01027
+    ICICIBANK: INE090A01021
+    ICICIGI: INE765G01017
+    IDEA: INE669E01016
+    IDFCFIRSTB: INE092T01019
+    INDHOTEL: INE053A01029
+    INDIANB: INE562A01011
+    INDIGO: INE646L01027
+    INDUSINDBK: INE095A01012
+    INDUSTOWER: INE121J01017
+    INFY: INE009A01021
+    IOC: INE242A01010
+    IRCTC: INE335Y01020
+    IREDA: INE202E01016
+    IRFC: INE053F01010
+    ITC: INE154A01025
+    JINDALSTEL: INE749A01030
+    JIOFIN: INE758E01017
+    JSWENERGY: INE121E01018
+    JSWSTEEL: INE019A01038
+    JUBLFOOD: INE797F01020
+    KALYANKJIL: INE303R01014
+    KEI: INE878B01027
+    KOTAKBANK: INE237A01036
+    KPITTECH: INE04I401011
+    LAURUSLABS: INE947Q01028
+    LENSKART: INE956O01016
+    LGEINDIA: INE324D01010
+    LICHSGFIN: INE115A01026
+    LODHA: INE670K01029
+    LT: INE018A01030
+    LTF: INE498L01015
+    LTM: INE214T01019
+    LUPIN: INE326A01037
+    M&M: INE101A01026
+    M&MFIN: INE774D01024
+    MANKIND: INE634S01028
+    MARICO: INE196A01026
+    MARUTI: INE585B01010
+    MAXHEALTH: INE027H01010
+    MAZDOCK: INE249Z01020
+    MCX: INE745G01043
+    MFSL: INE180A01020
+    MOTHERSON: INE775A01035
+    MOTILALOFS: INE338I01027
+    MPHASIS: INE356A01018
+    MRF: INE883A01011
+    MUTHOOTFIN: INE414G01012
+    NATIONALUM: INE139A01034
+    NAUKRI: INE663F01032
+    NESTLEIND: INE239A01024
+    NHPC: INE848E01016
+    NMDC: INE584A01023
+    NTPC: INE733E01010
+    NYKAA: INE388Y01029
+    OBEROIRLTY: INE093I01010
+    OFSS: INE881D01027
+    OIL: INE274J01014
+    ONGC: INE213A01029
+    PAGEIND: INE761H01022
+    PATANJALI: INE619A01035
+    PAYTM: INE982J01020
+    PERSISTENT: INE262H01021
+    PFC: INE134E01011
+    PHOENIXLTD: INE211B01039
+    PIDILITIND: INE318A01026
+    PIIND: INE603J01030
+    PNB: INE160A01022
+    POLICYBZR: INE417T01026
+    POLYCAB: INE455K01017
+    POWERGRID: INE752E01010
+    POWERINDIA: INE07Y701011
+    PREMIERENE: INE0BS701011
+    PRESTIGE: INE811K01011
+    RADICO: INE944F01028
+    RECLTD: INE020B01018
+    RELIANCE: INE002A01018
+    RVNL: INE415G01027
+    SAIL: INE114A01011
+    SBICARD: INE018E01016
+    SBILIFE: INE123W01016
+    SBIN: INE062A01020
+    SHREECEM: INE070A01015
+    SHRIRAMFIN: INE721A01047
+    SIEMENS: INE003A01024
+    SOLARINDS: INE343H01029
+    SRF: INE647A01010
+    SUNPHARMA: INE044A01036
+    SUPREMEIND: INE195A01028
+    SUZLON: INE040H01021
+    SWIGGY: INE00H001014
+    TATACAP: INE976I01016
+    TATACOMM: INE151A01013
+    TATACONSUM: INE192A01025
+    TATAELXSI: INE670A01012
+    TATAINVEST: INE672A01026
+    TATAPOWER: INE245A01021
+    TATASTEEL: INE081A01020
+    TCS: INE467B01029
+    TECHM: INE669C01036
+    TIINDIA: INE974X01010
+    TITAN: INE280A01028
+    TMCV: INE1TAE01010
+    TMPV: INE155A01022
+    TORNTPHARM: INE685A01028
+    TRENT: INE849A01020
+    TVSMOTOR: INE494B01023
+    ULTRACEMCO: INE481G01011
+    UNIONBANK: INE692A01016
+    UNITDSPR: INE854D01024
+    UPL: INE628A01036
+    VBL: INE200M01039
+    VEDL: INE205A01025
+    VMM: INE01EA01019
+    VOLTAS: INE226A01021
+    WAAREEENER: INE377N01017
+    WIPRO: INE075A01022
+    YESBANK: INE528G01035
+    ZYDUSLIFE: INE010B01027
+
+# The record of changes is complete from this date: every semi-annual review from 2020-H1
+# onward was located, so no unrecorded change can sit in the covered span.
+covers_from: 2020-01-01
+
+# Every NSE release effective on or after covers_from that changes NIFTY 200, newest first.
+# One event per release: a release is the unit of evidence, so two releases effective on the
+# same date stay two events (2020-03-27 and 2024-03-28 each have a pair).
+#
+# Releases effective AFTER the anchor date are deliberately absent: the anchor already
+# reflects only what has happened by anchor.as_of, so replaying a later change backward from
+# it would corrupt every query. The 2026-H2 review (announced 2026-08-10, effective
+# 2026-09-30, 7 out / 7 in, https://www.niftyindices.com/Press_Release/ind_prs10082026.pdf)
+# is the one release in the corpus that this excludes. load_timeline rejects such an event.
+#
+# "Inclusion revoked" / "Exclusion revoked" wording is an AMENDMENT to an earlier release,
+# not a change of its own. Both such releases in this window are resolved by editing the
+# review they cite; see the comments on 2024-03-28 and 2024-09-30.
+#
+# DUMMY* symbols are real constituents: a demerged entity is added at zero price on the
+# record date under a placeholder symbol and removed days or weeks later under its real
+# symbol once it lists. They are recorded because the index genuinely held them.
+events:
+
+  - effective: 2026-06-24
+    source: https://www.niftyindices.com/Press_Release/ind_prs22062026.pdf
+    include: []
+    exclude: [VOGL]
+    # Vedanta Oil and Gas Ltd. did not hit the lower price band on two consecutive days.
+    # Listed sibling of the DUMMYVEDL* placeholders added 2026-04-30.
+
+  - effective: 2026-06-23
+    source: https://www.niftyindices.com/Press_Release/ind_prs19062026.pdf
+    include: []
+    exclude: [VAML]
+    # Vedanta Aluminium Metal Ltd.
+
+  - effective: 2026-06-19
+    source: https://www.niftyindices.com/Press_Release/ind_prs17062026.pdf
+    include: []
+    exclude: [VEDPOWER, VISL]
+    # Vedanta Power Ltd. and Vedanta Iron and Steel Ltd.
+
+  - effective: 2026-04-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs23042026.pdf
+    include: [DUMMYVEDL1, DUMMYVEDL2, DUMMYVEDL3, DUMMYVEDL4]
+    exclude: []
+    # Four-way demerger of Vedanta Ltd.: Vedanta Aluminium Metal Ltd. (DUMMYVEDL1),
+    # Talwandi Sabo Power Ltd. (DUMMYVEDL2), Malco Energy Ltd. (DUMMYVEDL3) and Vedanta
+    # Iron and Steel Ltd. (DUMMYVEDL4), all at zero price without divisor adjustment.
+    # They leave under their listed symbols (VAML, VEDPOWER, VISL, VOGL) in June 2026;
+    # which dummy became which listed symbol is not stated by any release, so no rename
+    # is recorded. Only DUMMYVEDL1 -> VAML and DUMMYVEDL4 -> VISL are certain by name.
+
+  - effective: 2026-03-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs23022026.pdf
+    include: [GROWW, GVT&D, ICICIAMC, LAURUSLABS, LENSKART, LGEINDIA, MCX, RADICO,
+              TATACAP, TATAINVEST, TMCV]
+    exclude: [ACC, BAJAJHFL, BHARTIHEXA, IGL, IRB, ITCHOTELS, LICI, NTPCGREEN, SONACOMS,
+              TATATECH, TORNTPOWER]
+    # 2026-H1 periodic review, announced 2026-02-23.
+
+  - effective: 2026-02-24
+    source: https://www.niftyindices.com/Press_Release/ind_prs20022026_1.pdf
+    include: []
+    exclude: [KWIL]
+    # Kwality Wall's (India) Ltd., which entered as the placeholder DUMMYHDLVR on 2025-12-05.
+
+  - effective: 2025-12-05
+    source: https://www.niftyindices.com/Press_Release/ind_prs28112025.pdf
+    include: [DUMMYHDLVR]
+    exclude: []
+    # Demerger of Hindustan Unilever's ice cream business; Kwality Wall's (India) Ltd.
+    # included at zero price. Leaves as KWIL on 2026-02-24.
+
+  - effective: 2025-11-17
+    source: https://www.niftyindices.com/Press_Release/ind_prs13112025.pdf
+    include: []
+    exclude: [TMCV]
+    # TML Commercial Vehicles Ltd., which entered as the placeholder DUMMYTATAM on
+    # 2025-10-14. The same symbol re-enters the index in the 2026-H1 review: symbols are
+    # not permanent identities.
+
+  - effective: 2025-10-14
+    source: https://www.niftyindices.com/Press_Release/ind_prs07102025.pdf
+    include: [DUMMYTATAM]
+    exclude: []
+    # Demerger of Tata Motors' commercial vehicle business, at zero price.
+
+  - effective: 2025-09-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs22082025.pdf
+    include: [360ONE, BLUESTARCO, COROMANDEL, FORTIS, GODFRYPHLP, POWERINDIA, ITCHOTELS,
+              KEI, ENRIN]
+    exclude: [ABFRL, APOLLOTYRE, BANDHANBNK, MAHABANK, ESCORTS, ICICIPRULI, OLAELEC,
+              PETRONET, SJVN]
+    # 2025-H2 periodic review, announced 2025-08-22.
+
+  - effective: 2025-06-27
+    source: https://www.niftyindices.com/Press_Release/ind_prs25062025_2.pdf
+    include: []
+    exclude: [ENRIN, ABLBL]
+    # Two-part release. ENRIN is Siemens Energy India Ltd., which entered as DUMMYSIEMS on
+    # 2025-04-07; ABLBL is Aditya Birla Lifestyle Brands Ltd., which entered as DUMMYABFRL
+    # on 2025-05-22. Nifty 200 is listed in both parts' index lists.
+
+  - effective: 2025-05-22
+    source: https://www.niftyindices.com/Press_Release/ind_prs19052025.pdf
+    include: [DUMMYABFRL]
+    exclude: []
+    # Demerger of ABFRL's Madura business, at zero price.
+
+  - effective: 2025-04-07
+    source: https://www.niftyindices.com/Press_Release/ind_prs02042025.pdf
+    include: [DUMMYSIEMS]
+    exclude: []
+    # Demerger of Siemens Ltd.'s energy business, at zero price.
+
+  - effective: 2025-03-28
+    source: https://www.niftyindices.com/Press_Release/ind_prs21022025.pdf
+    include: [BAJAJHFL, GLENMARK, HYUNDAI, MOTILALOFS, NATIONALUM, NTPCGREEN, OLAELEC,
+              PREMIERENE, SWIGGY, VMM, WAAREEENER]
+    exclude: [BALKRISIND, DELHIVERY, FACT, IDBI, IOB, JSWINFRA, MRPL, NLCINDIA, POONAWALLA,
+              SUNDARMFIN, TATACHEM]
+    # 2025-H1 periodic review, announced 2025-02-21.
+
+  - effective: 2025-02-10
+    source: https://www.niftyindices.com/Press_Release/ind_prs06022025_1.pdf
+    include: []
+    exclude: [ITCHOTELS]
+    # ITC Hotels Ltd., which entered as the placeholder DUMMYITC on 2025-01-06. It returns
+    # under this symbol in the 2025-H2 review.
+
+  - effective: 2025-01-06
+    source: https://www.niftyindices.com/Press_Release/ind_prs30122024.pdf
+    include: [DUMMYITC]
+    exclude: []
+    # Demerger of ITC's hotel business, at zero price without divisor adjustment.
+
+  - effective: 2024-09-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs23082024.pdf
+    include: [BHARTIHEXA, COCHINSHIP, EXIDEIND, HINDZINC, HUDCO, IOB, IREDA, IRB, MRPL,
+              MUTHOOTFIN, NLCINDIA, PHOENIXLTD, SOLARINDS, SUNDARMFIN]
+    exclude: [BERGEPAINT, DALBHARAT, DEEPAKNTR, LALPATHLAB, FORTIS, GLAND, GUJGASLTD,
+              IPCALAB, LTTS, LAURUSLABS, PEL, SUNTV, SYNGENE, ZEEL]
+    # 2024-H2 periodic review, announced 2024-08-23, AMENDED by
+    # https://www.niftyindices.com/Press_Release/ind_prs25092024.pdf (2024-09-25), which
+    # records "Vodafone Idea Ltd. IDEA Exclusion revoked" and "Central Bank of India
+    # CENTRALBK Inclusion revoked". Those are not changes of their own: they cancel two
+    # entries of this review. So IDEA is struck from its exclusion list (15 -> 14; IDEA
+    # stayed in the index) and CENTRALBK from its inclusion list (15 -> 14; CENTRALBK
+    # never entered). The revoking release is therefore not a separate event.
+
+  - effective: 2024-08-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs23082024_1.pdf
+    include: []
+    exclude: [TATAMTRDVR]
+    # Tata Motors Ltd. 'A' Ordinary Shares - DVR cancelled under a scheme of arrangement.
+
+  - effective: 2024-03-28
+    source: https://www.niftyindices.com/Press_Release/ind_prs28022024.pdf
+    include: [MAHABANK, GMRINFRA, IDBI, JIOFIN, JSWINFRA, KALYANKJIL, OFSS, SJVN,
+              SUPREMEIND, SUZLON, TATATECH]
+    exclude: [AWL, BATAINDIA, COROMANDEL, CROMPTON, DEVYANI, FLUOROCHEM, MSUMI, MUTHOOTFIN,
+              NAVINFLUOR, PGHH, RAMCOCEM, UBL]
+    # 2024-H1 periodic review, announced 2024-02-28, AMENDED by
+    # https://www.niftyindices.com/Press_Release/ind_prs19032024.pdf (2024-03-19), which
+    # records "Indian Renewable Energy Dev. Agency Ltd. IREDA Inclusion revoked". That is
+    # not an exclusion -- IREDA never became a constituent -- so IREDA is struck from this
+    # review's inclusion list (12 -> 11) rather than removed later. The same release also
+    # includes BSE Ltd., which IS a change and is recorded as the next event, effective the
+    # same day. (IREDA enters the index for real in the 2024-H2 review.)
+
+  - effective: 2024-03-28
+    source: https://www.niftyindices.com/Press_Release/ind_prs19032024.pdf
+    include: [BSE]
+    exclude: []
+    # The inclusion half of the 2024-03-19 release; its IREDA half is an amendment applied
+    # to the 2024-02-28 review above.
+
+  - effective: 2023-09-29
+    source: https://www.niftyindices.com/Press_Release/ind_prs17082023.pdf
+    include: [APLAPOLLO, BDL, FACT, KPITTECH, LODHA, MAZDOCK, RVNL, TATAMTRDVR]
+    exclude: [ABBOTINDIA, HINDZINC, HONAUT, OFSS, TTML, TRIDENT, WHIRLPOOL]
+    # 2023-H2 periodic review, announced 2023-08-17. Genuinely unequal: 7 excluded, 8
+    # included. Verified against the verbatim text -- the inclusion table really has eight
+    # rows, the eighth being Tata Motors Ltd. DVR (TATAMTRDVR), a symbol last excluded on
+    # 2020-06-26 and here re-entering.
+
+  - effective: 2023-09-07
+    source: https://www.niftyindices.com/Press_Release/ind_prs05092023.pdf
+    include: []
+    exclude: [JIOFIN]
+    # Jio Financial Services Ltd. did not hit the price band on two consecutive days. This
+    # is the release that first prints the symbol of the entity included on 2023-07-20.
+
+  - effective: 2023-07-20
+    source: https://www.niftyindices.com/Press_Release/ind_prs17072023.pdf
+    include: []
+    exclude: []
+    # SYMBOL UNKNOWN -- one inclusion is missing from this event on purpose. The release
+    # is the corporate adjustment for the Reliance Industries demerger and says only that
+    # "spun off entity shall be included" in Nifty 200; it never prints a symbol. The
+    # entity is Reliance Strategic Investments Ltd., renamed Jio Financial Services Ltd.,
+    # and the 2023-09-05 release calls it JIOFIN -- but this release does not, so nothing
+    # is recorded here rather than a symbol inferred from a later document. Every date
+    # before 2023-07-20 is therefore one name short, which is correct: it is what the
+    # sources support.
+
+  - effective: 2023-07-13
+    source: https://www.niftyindices.com/Press_Release/ind_prs04072023.pdf
+    include: [MANKIND]
+    exclude: [HDFC]
+    # HDFC merged into HDFC Bank.
+
+  - effective: 2023-03-31
+    source: https://www.niftyindices.com/Press_Release/ind_prs17022023_1.pdf
+    include: [ADANIPOWER, APOLLOTYRE, CGPOWER, DEVYANI, FLUOROCHEM, IRFC, NHPC, NMDC, PEL]
+    exclude: [CLEAN, EMAMILTD, GSPL, ISEC, INDIAMART, IEX, LINDEINDIA, NATIONALUM,
+              NAM-INDIA]
+    # 2023-H1 periodic review, announced 2023-02-17.
+
+  - effective: 2022-09-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs01092022.pdf
+    include: [AWL, LINDEINDIA, MSUMI, PATANJALI, POONAWALLA, MOTHERSON, TTML, TIINDIA]
+    exclude: [APLLTD, APOLLOTYRE, EXIDEIND, GLENMARK, IDBI, MANAPPURAM, METROPOLIS,
+              MINDTREE]
+    # 2022-H2 periodic review, announced 2022-09-01 (late by the usual rhythm, not a gap).
+    # MindTree Ltd. excluded on account of a proposed scheme of arrangement for amalgamation.
+
+  - effective: 2022-08-08
+    source: https://www.niftyindices.com/Press_Release/ind_prs11072022.pdf
+    include: [DELHIVERY, LICI]
+    exclude: [NMDC, PEL]
+
+  - effective: 2022-05-04
+    source: https://www.niftyindices.com/Press_Release/ind_prs05042022.pdf
+    include: [HONAUT]
+    exclude: [AARTIIND]
+
+  - effective: 2022-03-31
+    source: https://www.niftyindices.com/Press_Release/ind_prs24022022_1.pdf
+    include: [ABB, ABBOTINDIA, CLEAN, NYKAA, IDBI, IEX, MAXHEALTH, METROPOLIS, PAYTM, OFSS,
+              POLICYBZR, PERSISTENT, TRIDENT, ZOMATO]
+    exclude: [AJANTPHARM, AMARAJABAT, CASTROLIND, CUB, DHANI, ENDURANCE, GODREJIND,
+              HINDCOPPER, IRFC, MGL, NATCOPHARM, PFIZER, RBLBANK, SANOFI]
+    # 2022-H1 periodic review, announced 2022-02-24.
+
+  - effective: 2021-10-29
+    source: https://www.niftyindices.com/Press_Release/ind_prs22102021.pdf
+    include: [SONACOMS]
+    exclude: [GMRINFRA]
+
+  - effective: 2021-09-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs23082021.pdf
+    include: [ASTRAL, HINDCOPPER, INDIANB, IRFC, NATIONALUM, TATACOMM]
+    exclude: [ABBOTINDIA, BBTC, CESC, GODREJAGRO, IBULHSGFIN, VGUARD]
+    # 2021-H2 periodic review, announced 2021-08-23.
+
+  - effective: 2021-06-30
+    source: https://www.niftyindices.com/Press_Release/ind_prs15062021.pdf
+    include: [GLAND]
+    exclude: [MOTHERSUMI]
+
+  - effective: 2021-03-31
+    source: https://www.niftyindices.com/Press_Release/ind_prs23022021.pdf
+    include: [DEEPAKNTR, DIXON, HAL, INDIAMART, LAURUSLABS, TATAELXSI, VEDL]
+    exclude: [EDELWEISS, FRETAIL, GICRE, HUDCO, NATIONALUM, OFSS, RAJESHEXPO]
+    # 2021-H1 periodic review, announced 2021-02-23.
+
+  - effective: 2020-09-25
+    source: https://www.niftyindices.com/Press_Release/ind_prs20082020.pdf
+    include: [ADANIENT, ADANIGREEN, APLLTD, ISEC, NAVINFLUOR, SANOFI, TATACHEM, YESBANK]
+    exclude: [ADANIPOWER, HEXAWARE, IDBI, JUBILANT, MRPL, NHPC, PNBHOUSING, QUESS]
+    # 2020-H2 periodic review, announced 2020-08-20.
+
+  - effective: 2020-07-31
+    source: https://www.niftyindices.com/Press_Release/ind_prs02072020_1.pdf
+    include: [SBICARD]
+    exclude: [VEDL]
+    # This release carries two effective dates; the NIFTY 200 change is in section A,
+    # effective 2020-07-31 (close of 2020-07-30).
+
+  - effective: 2020-06-26
+    source: https://www.niftyindices.com/Press_Release/ind_prs10062020.pdf
+    include: [AARTIIND, ABBOTINDIA, ADANIGAS, LALPATHLAB, GUJGASLTD, IRCTC, NIITTECH,
+              POLYCAB, TRENT]
+    exclude: [ENGINERSIN, FCONSUMER, GRAPHITE, HEG, INDIANB, NBCC, STRTECH, TATAMTRDVR,
+              NIACL, VARROC]
+    # Genuinely unequal: 10 excluded, 9 included. Read against the verbatim text -- the
+    # exclusion table has ten rows and the inclusion table nine. Not a parse artefact.
+    # Several of these names were already excluded by the 2020-03-27 review and are
+    # excluded again here, which is what the document says.
+
+  # NO EVENT EFFECTIVE 2020-03-27. Two releases announced NIFTY 200 replacements for that
+  # date -- the 2020-H1 periodic review of 2020-02-18
+  # (https://www.niftyindices.com/Press_Release/ind_prs18022020.pdf, 6 out / 6 in) and the
+  # prose-only PVR inclusion of 2020-03-19
+  # (https://www.niftyindices.com/Press_Release/ind_prs19032020.pdf, 0 out / 1 in) -- and
+  # NEITHER TOOK EFFECT. NSE first deferred the 2020-03-27 rebalancing on 2020-03-23
+  # (https://www.niftyindices.com/Press_Release/ind_prs23032020.pdf, "Deferment of Index
+  # Rebalancing ... deferred until further notice") and then cancelled it outright on
+  # 2020-05-13 (https://www.niftyindices.com/Press_Release/ind_prs13052020.pdf):
+  #
+  #   "Replacements in various indices effective March 27, 2020 announced vide press
+  #    release dated February 18, March 12 and March 19, 2020 (except replacements in
+  #    NIFTY 50 and NIFTY Bank index as they had been rebalanced effective March 19, 2020)
+  #    shall stand null and void"
+  #
+  # NIFTY 200 is not among the excepted indices, so both announcements are void for it.
+  # Same class of amendment as an "Inclusion revoked" remark, applied the same way: the
+  # cited releases' entries are struck rather than recorded and later undone. The same
+  # release re-initiated the review with a 2020-05-31 data cutoff, which is the 2020-06-10
+  # release effective 2020-06-26 below -- and that is why eleven of these twelve names
+  # reappear there. Recording both would double-count every one of them.
+  #
+  # The 2020-03-16 release below is NOT affected: it is the accelerated Yes Bank removal,
+  # effective 2020-03-19, and the 2020-05-13 release confirms it went through.
+
+  - effective: 2020-03-19
+    source: https://www.niftyindices.com/Press_Release/ind_prs16032020.pdf
+    include: [ADANITRANS]
+    exclude: [YESBANK]
+    # Yes Bank Ltd. out under the reconstruction scheme; it returns in the 2020-H2 review.
+
+renames: []
+# No renames are recorded. The DUMMY* placeholders each leave under a different, real
+# symbol (DUMMYITC -> ITCHOTELS, DUMMYSIEMS -> ENRIN, DUMMYABFRL -> ABLBL, DUMMYTATAM ->
+# TMCV, DUMMYHDLVR -> KWIL, and the four DUMMYVEDL* -> VAML / VEDPOWER / VISL / VOGL), and
+# those identities are real -- but no NSE release states the mapping as a symbol change,
+# the DUMMYVEDL* mapping is not derivable at all for two of the four, and a rename here is
+# applied after the backward replay rather than during it, so it would relabel names in
+# periods where neither symbol was a member. The identities are recorded in the comments on
+# the events above instead.
