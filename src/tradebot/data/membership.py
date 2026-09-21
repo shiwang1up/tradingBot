@@ -11,7 +11,7 @@ breaks it, and the error names the date and the source URL that broke it.
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import yaml
 

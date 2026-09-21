@@ -212,3 +212,42 @@ def test_rename_carries_an_isin(tmp_path):
     assert t.renames[0].isin == "INE123A01010"
     plain = load_timeline(_write(tmp_path, RENAMED))
     assert plain.renames[0].isin is None
+
+
+CANCELLING = """
+index: TEST CANCEL
+covers_from: 2022-01-01
+anchor:
+  as_of: 2024-01-01
+  source: https://example.test/list.csv
+  fetched: 2024-01-01
+  size: 4
+  symbols: [AAA, BBB, CCC, DDD]
+events:
+  - effective: 2023-07-01
+    source: https://example.test/jul2023.pdf
+    include: [DDD]
+    exclude: [EEE, FFF]
+  - effective: 2023-03-01
+    source: https://example.test/mar2023.pdf
+    include: [EEE, FFF]
+    exclude: [GGG]
+renames: []
+"""
+
+
+def test_the_count_is_checked_after_every_undo_not_once_at_the_end(tmp_path):
+    """Two events whose count errors cancel. Undoing the July event leaves five names;
+    undoing the March event brings it back to four. A check that ran only after the whole
+    replay would see a valid count and return a silently wrong list.
+
+    Per-step checking is also what lets the error name the release that actually broke --
+    2023-07-01 here -- which is what makes the invariant usable for finding a missing NSE
+    release rather than merely knowing one is missing."""
+    t = load_timeline(_write(tmp_path, CANCELLING))
+    with pytest.raises(MembershipError) as e:
+        constituents_on(t, date(2023, 1, 1))
+    msg = str(e.value)
+    assert "2023-07-01" in msg, "must name the release that broke, not the query date"
+    assert "jul2023.pdf" in msg
+    assert "5" in msg and "4" in msg
