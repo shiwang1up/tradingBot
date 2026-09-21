@@ -159,7 +159,24 @@ date is 2024-03-28.
 3. Apply renames in reverse across the same span, so a pre-merger date returns
    `HDFC` rather than `HDFCBANK`.
 
-**The membership count must be exactly 200 after every undo step.** If it is
+**The index holds 200 COMPANIES, but sometimes more SECURITIES.** This was discovered
+while building the real file and is the single most important correction to this spec.
+A DVR line counts alongside its company's ordinary shares, and a demerged entity joins
+at zero price with nothing leaving. Eleven such windows exist across 2020-2026.
+
+The evidence is a cross-check from inside the corpus rather than an outside inference:
+the 2020-06-10 release leaves exactly three broad indices one short -- NIFTY 100,
+NIFTY 200 and NIFTY LargeMidcap 250 -- and those are precisely the three whose
+exclusion list contains TATAMTRDVR, while every other fixed-size index in the same
+release balances. The 2023-08-17 review is the exact mirror, re-including it.
+
+So the invariant is an EXPECTED size per date, not a constant. `size_exceptions`
+declares dated windows, each carrying a reason and a source URL. **An exception without
+a source is a load error, and overlapping windows are a load error** -- that is what
+stops the mechanism becoming a way to silence the check. An exception is legitimate
+only where one can point at the extra security the index was actually carrying.
+
+**The membership count must equal the expected size after every undo step.** If it is
 not, a release was missed, misparsed, or double-applied. The loader raises with
 the offending event's effective date and source URL, and the count it produced.
 
@@ -172,9 +189,17 @@ review cycle and two rounds of controls.
 Two failure modes the invariant does NOT catch, which therefore need their own
 handling:
 
-- **A symbol swapped for itself under a new name.** Caught by the rename table;
-  a rename not recorded there shows up as a symbol with no candles, which the
-  fetch step reports.
+- **A symbol swapped for itself under a new name.** Handled by ALIASES, not by the
+  dated `renames` table. What matters is not when a symbol changed but that two symbols
+  denote one entity, so no date need be sourced -- which is fortunate, because no NSE
+  release states these mappings. Aliases are applied at load time to the anchor and to
+  every event, before any replay. This also suits price lookup: Groww serves a company's
+  whole history under its CURRENT ticker.
+
+  An unaliased pair does not merely distort its own window. Because the backward walk
+  tries to remove a symbol the set does not hold, the removal is a no-op and the offset
+  leaks through ALL earlier history. Fourteen aliases were needed; without them the
+  2020 count was 16 too high.
 - **Two errors that cancel** (a missed inclusion and a missed exclusion in the
   same release). Mitigated by the cross-check in 3.1 and by asserting that each
   parsed release has equal include and exclude counts for NIFTY 200, which
