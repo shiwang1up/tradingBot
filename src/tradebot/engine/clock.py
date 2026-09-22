@@ -52,6 +52,10 @@ class SessionClock:
     Validates at construction that the session times are ordered and that at least one
     bar fits between open and square-off, and that the square-off bar does not precede
     the entry cutoff (otherwise an entry could be opened after square-off already ran).
+
+    An interval of a day or more sets ``daily``, and only the ordering check applies: a daily
+    bar is stamped 00:00 IST, before the open, so the intra-session window would reject every
+    one of them, and a position held for weeks is never squared off at the close.
     """
 
     def __init__(self, session: SessionConfig, interval_minutes: int):
@@ -62,6 +66,12 @@ class SessionClock:
                          (session.open, session.no_new_entries_after, session.square_off, session.close))
         if not (o < cut <= sq <= c):
             raise ValueError("session times must satisfy open < no_new_entries_after <= square_off <= close")
+        self.daily = interval_minutes >= 1440
+        if self.daily:
+            # One bar a day, stamped 00:00 IST. The intra-session window and the square-off do
+            # not apply: a CNC position is meant to survive the close, which is the entire point.
+            self._square_off_offset_sec = 0
+            return
         n_bars = (sq - o) // interval_minutes
         if n_bars < 1:
             raise ValueError(f"interval {interval_minutes}m does not fit between {session.open} and {session.square_off}")
@@ -80,6 +90,8 @@ class SessionClock:
 
     def in_session(self, ts: int) -> bool:
         d = date_of(ts)
+        if self.daily:
+            return self.is_trading_day(d)
         return self.open_ts(d) <= ts < self.close_ts(d)
 
     def square_off_bar_ts(self, d: date) -> int:
@@ -87,15 +99,21 @@ class SessionClock:
         return self.open_ts(d) + self._square_off_offset_sec
 
     def is_square_off_bar(self, ts: int) -> bool:
+        if self.daily:
+            return False
         return ts == self.square_off_bar_ts(date_of(ts))
 
     def square_off_due(self, ts: int) -> bool:
         """True from the square-off bar onward. Callers latch once per day so a missing
         bar at exactly the square-off time cannot skip the square-off."""
+        if self.daily:
+            return False
         return ts >= self.square_off_bar_ts(date_of(ts))
 
     def entries_allowed(self, ts: int) -> bool:
         d = date_of(ts)
+        if self.daily:
+            return self.is_trading_day(d)
         cutoff = ist_epoch(d, self.session.no_new_entries_after)
         return self.open_ts(d) <= ts < cutoff
 

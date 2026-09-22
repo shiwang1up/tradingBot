@@ -102,3 +102,52 @@ def test_last_bar_and_latest_complete_bar():
     assert clk.latest_complete_bar(ist_epoch(D, "12:00"), 0) == ist_epoch(D, "11:55")
     assert clk.latest_complete_bar(ist_epoch(D, "12:00") + 3, grace_sec=5) == ist_epoch(D, "11:50")
     assert clk.latest_complete_bar(ist_epoch(D, "16:00"), 0) == ist_epoch(D, "15:25")  # capped at the last bar
+
+
+DAILY_TS = 1577817000       # 2020-01-01 00:00 IST, how daily candles are actually stamped
+
+
+def test_a_daily_interval_constructs():
+    """1440 raised before: one bar does not fit between 09:15 and 15:10."""
+    c = SessionClock(SESSION, 1440)
+    assert c.daily is True
+
+
+def test_intraday_intervals_are_not_daily():
+    assert SessionClock(SESSION, 5).daily is False
+    assert SessionClock(SESSION, 15).daily is False
+
+
+def test_a_daily_bar_is_in_session_despite_being_stamped_before_the_open():
+    """The bar is stamped 00:00 IST and the session opens at 09:15. Reusing the intraday window
+    check would reject every daily bar, and the engine would consume them all and trade nothing."""
+    c = SessionClock(SESSION, 1440)
+    assert c.in_session(DAILY_TS)
+
+
+def test_entries_are_allowed_on_a_daily_bar():
+    """Same trap as in_session: the intraday cutoff check would forbid every entry."""
+    c = SessionClock(SESSION, 1440)
+    assert c.entries_allowed(DAILY_TS)
+
+
+def test_a_daily_bar_is_never_a_square_off_bar():
+    c = SessionClock(SESSION, 1440)
+    assert not c.is_square_off_bar(DAILY_TS)
+    assert not c.square_off_due(DAILY_TS)
+
+
+def test_a_daily_bar_on_a_weekend_is_not_in_session():
+    """Trading-day filtering still applies; only the intra-day window is dropped."""
+    c = SessionClock(SESSION, 1440)
+    sunday = DAILY_TS + 4 * 86400       # 2020-01-01 was a Wednesday, so this is Sunday the 5th
+    assert not c.in_session(sunday)
+    assert not c.entries_allowed(sunday)
+
+
+def test_sixty_and_two_forty_minute_intervals_still_raise():
+    """These are genuine misconfigurations for an intraday session and must keep failing.
+    Widening the daily gate to cover them would silently change what an intraday run does."""
+    for bad in (60, 240):
+        with pytest.raises(ValueError):
+            SessionClock(SESSION, bad)
