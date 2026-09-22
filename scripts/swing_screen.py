@@ -181,6 +181,54 @@ SETUPS = (
 )
 
 
+Obs = namedtuple("Obs", "symbol entry_date horizon ret")
+
+
+def forward_return(bars, i, h):
+    """Close-to-close return from bar i to bar i+h, or None if the exit is past the end.
+
+    Close, not open: Groww's daily `open` is synthetic for 2025 -- 98.6% of bars carry the
+    previous close forward -- so a fill at an open would be fictional over much of the window.
+    """
+    j = i + h
+    if j >= len(bars) or bars[i].close <= 0:
+        return None
+    return bars[j].close / bars[i].close - 1.0
+
+
+def is_member(members_by_date, symbol, d):
+    """Was `symbol` in the index on `d`? Unknown dates are not members: silently treating a
+    missing date as membership is how survivorship bias gets back in."""
+    return symbol in members_by_date.get(d, ())
+
+
+def hold_is_clean(bars, i, h, masked):
+    """No corporate action anywhere in [entry, exit] inclusive. An unadjusted split makes the
+    return fiction wherever in the window it lands, so the check spans the whole hold."""
+    j = min(i + h, len(bars) - 1)
+    return not any(bars[k].date in masked for k in range(i, j + 1))
+
+
+def observations(symbol, bars, ind, masked, members_by_date, window, setup, horizons):
+    """Every name-day this setup fires on, one Obs per horizon."""
+    name, fires = setup
+    lo, hi = window
+    out = []
+    for i in range(len(bars)):
+        d = bars[i].date
+        if not (lo <= d <= hi) or not is_member(members_by_date, symbol, d):
+            continue
+        if not fires(ind, i):
+            continue
+        for h in horizons:
+            if not hold_is_clean(bars, i, h, masked):
+                continue
+            r = forward_return(bars, i, h)
+            if r is not None:
+                out.append(Obs(symbol, d, h, r))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)

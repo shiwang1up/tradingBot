@@ -10,6 +10,8 @@ _spec = importlib.util.spec_from_file_location("swing_screen", SCRIPT)
 sw = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sw)
 
+INSAMPLE_TEST = (date(2020, 1, 1), date(2021, 12, 31))
+
 
 def _bars(closes, highs=None, lows=None, opens=None, vols=None):
     """Daily bars from a close series; the other fields default to something inert."""
@@ -100,3 +102,47 @@ def test_every_setup_declines_before_warmup():
         if name == "random":
             continue
         assert not fn(ind, 10), "%s fired before warm-up" % name
+
+
+def test_forward_return_is_close_to_close_over_the_horizon():
+    closes = [100.0] * 220 + [110.0]
+    bars = _bars(closes)
+    assert sw.forward_return(bars, 200, 20) == pytest.approx(0.10)
+    assert sw.forward_return(bars, 210, 20) is None      # exit lands past the end
+
+
+def test_an_observation_needs_the_symbol_to_be_an_index_member_that_day():
+    """The whole point of the point-in-time work. A name-day for a symbol that was not in
+    the index that morning is a name-day you could not have traded."""
+    members = {date(2021, 3, 1): ("AAA",), date(2021, 3, 2): ("BBB",)}
+    assert sw.is_member(members, "AAA", date(2021, 3, 1))
+    assert not sw.is_member(members, "AAA", date(2021, 3, 2))
+    assert not sw.is_member(members, "AAA", date(2099, 1, 1))
+
+
+def test_a_masked_date_anywhere_in_the_hold_disqualifies_the_observation():
+    """Same inclusive check the daily screen applies to a trade: an unadjusted split inside
+    the holding window makes the return fiction, wherever in the window it falls."""
+    bars = _bars([100.0] * 230)
+    masked = {bars[205].date}
+    assert sw.hold_is_clean(bars, 200, 20, set())
+    assert not sw.hold_is_clean(bars, 200, 20, masked)
+    assert sw.hold_is_clean(bars, 100, 20, masked)        # window ends before the mask
+
+
+def test_a_masked_entry_or_exit_date_also_disqualifies():
+    bars = _bars([100.0] * 230)
+    assert not sw.hold_is_clean(bars, 200, 20, {bars[200].date})
+    assert not sw.hold_is_clean(bars, 200, 20, {bars[220].date})
+
+
+def test_observations_carry_symbol_date_horizon_and_return():
+    bars = _bars([100.0 + i for i in range(230)])
+    ind = sw.Indicators(bars)
+    members = {b.date: ("AAA",) for b in bars}
+    obs = sw.observations("AAA", bars, ind, set(), members, INSAMPLE_TEST, ("breakout", sw.breakout), (20,))
+    assert obs, "the fixture rises monotonically, so breakout must fire somewhere"
+    o = obs[0]
+    assert o.symbol == "AAA" and o.horizon == 20
+    assert o.entry_date in [b.date for b in bars]
+    assert isinstance(o.ret, float)
