@@ -95,7 +95,14 @@ class SessionClock:
         return self.open_ts(d) <= ts < self.close_ts(d)
 
     def square_off_bar_ts(self, d: date) -> int:
-        """Open time of the last bar whose end is at or before the square-off time."""
+        """Open time of the last bar whose end is at or before the square-off time.
+
+        Raises in daily mode: the offset there is 0, so this would return the 09:15 session open
+        - a meaningless value for a bar stamped 00:00 that is never squared off at all. Nothing
+        calls it on a daily clock today (`is_square_off_bar` and `square_off_due` short-circuit
+        to False first), and raising keeps it that way."""
+        if self.daily:
+            raise ValueError("a daily bar has no square-off: square_off_bar_ts is intraday-only")
         return self.open_ts(d) + self._square_off_offset_sec
 
     def is_square_off_bar(self, ts: int) -> bool:

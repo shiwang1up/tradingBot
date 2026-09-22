@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace as dc_replace
 from datetime import date
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from tradebot.data.historical import HistoricalSource
 from tradebot.engine.clock import SessionClock, date_of, ist_epoch
 from tradebot.engine.loop import BacktestEngine
 from tradebot.execution.backtest import BacktestBroker
+from tradebot.report.summary import build_summary
 from tradebot.strategy.ema_rsi import EmaRsiStrategy
 from tradebot.types import Candle
 
@@ -643,3 +645,79 @@ def test_a_late_bar_still_simulates_exits(repo, tmp_path):
     rows = repo.list_positions("late-exit")
     assert broker.open_positions() == {} and rows and rows[0]["exit_reason"] == "STOP"
 
+
+
+# -- daily mode: a CNC position must survive the close ---------------------------------------
+DAILY_DAYS = [date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16),
+              date(2026, 9, 17), date(2026, 9, 18)]  # Mon-Fri
+
+
+def _flat_candles(symbol, timestamps, start=100.0, step=0.02):
+    """Near-flat bars: each closes a hair above its own open and moves 0.02 a bar, so neither
+    FixedStrategy's 1% stop nor the config's 0.1% entry buffer is ever touched - whichever bar
+    an entry fills on, and whether it fills at the open or the close."""
+    return [Candle(symbol, ts, round(start + step * i, 2), round(start + step * i + 0.3, 2),
+                   round(start + step * i - 0.3, 2), round(start + step * i + 0.01, 2), 1000)
+            for i, ts in enumerate(timestamps)]
+
+
+class _CncFixedStrategy(FixedStrategy):
+    """FixedStrategy fires MIS; a daily run needs CNC, which is the product that survives a close."""
+    product = "CNC"
+
+    def on_candle(self, candle):
+        sig = super().on_candle(candle)
+        return None if sig is None else dc_replace(sig, product="CNC")
+
+
+def _run_daily(repo, cfg, candles, fires, symbols, run_id="d1"):
+    """The same shape as helpers.run_fixed, at a 1440-minute interval with a CNC strategy."""
+    repo.insert_candles(candles, interval=1440)
+    src = HistoricalSource.from_repo(repo, symbols, 1440, 0, 2_000_000_000)
+    broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+    BacktestEngine(cfg, repo, src, [_CncFixedStrategy(fires)], broker, StubFilter(),
+                   SessionClock(cfg.session, 1440), {s: 1 for s in symbols}, run_id).run()
+    return broker
+
+
+def test_a_cnc_position_survives_a_daily_bar_boundary(repo, tmp_path):
+    """The whole point of daily mode. A position opened on one daily bar must still be open
+    several bars later, with no square-off having run."""
+    cfg = make_config(tmp_path, execution={"interval_minutes": 1440})
+    bars = [ist_epoch(d, "00:00") for d in DAILY_DAYS]
+    broker = _run_daily(repo, cfg, _flat_candles("A", bars), {("A", bars[0]): ("LONG", 1.0)}, ["A"])
+    rows = repo.list_positions("d1")
+    assert len(rows) == 1, "the entry placed on bar 1 must still be pending when bar 2 arrives"
+    assert rows[0]["product"] == "CNC"
+    assert rows[0]["opened_at"] == bars[1], "filled on the bar after the signal"
+    assert rows[0]["closed_at"] is None, "nothing may close a CNC position on a daily bar"
+    assert set(broker.open_positions()) == {"A"}
+    assert broker.closed == [], "no square-off ran"
+
+
+def test_an_intraday_run_still_squares_off(repo, tmp_path):
+    """The control. If this ever fails, daily mode has leaked into intraday behaviour."""
+    cfg = make_config(tmp_path)
+    clock = SessionClock(cfg.session, 5)
+    assert clock.daily is False
+    bars = [ist_epoch(MON, "09:15") + k * 300 for k in range(75)]
+    run_fixed(repo, cfg, _flat_candles("A", bars), {("A", bars[9]): ("LONG", 1.0)}, ["A"])
+    rows = repo.list_positions("t1")
+    assert len(rows) == 1 and rows[0]["product"] == "MIS"
+    assert rows[0]["exit_reason"] == "SQUARE_OFF"
+    assert rows[0]["closed_at"] == clock.square_off_bar_ts(MON)
+
+
+def test_an_open_daily_position_at_the_end_of_a_run_is_reported_open_not_realised(repo, tmp_path):
+    """A 60-day hold backtested over a year ends with positions still open. Marking them to
+    market and folding them into realised PnL would flatter the result by whatever the last
+    bar happened to print, so they stay open and the summary reports them separately."""
+    cfg = make_config(tmp_path, execution={"interval_minutes": 1440})
+    bars = [ist_epoch(d, "00:00") for d in DAILY_DAYS]
+    _run_daily(repo, cfg, _flat_candles("A", bars), {("A", bars[0]): ("LONG", 1.0)}, ["A"])
+    rows = repo.list_positions("d1")
+    assert len(rows) == 1 and rows[0]["closed_at"] is None
+    s = build_summary(repo, "d1", cfg.charges)
+    assert s.open_positions == 1
+    assert s.trades == 0 and s.total_pnl == 0.0, "an unrealised mark is never counted as realised PnL"

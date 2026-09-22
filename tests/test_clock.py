@@ -151,3 +151,13 @@ def test_sixty_and_two_forty_minute_intervals_still_raise():
     for bad in (60, 240):
         with pytest.raises(ValueError):
             SessionClock(SESSION, bad)
+
+
+def test_square_off_bar_ts_raises_on_a_daily_clock():
+    """A daily clock has no square-off offset, so this would quietly return the 09:15 session
+    open - a meaningless value. Nothing calls it on a daily clock today (is_square_off_bar and
+    square_off_due both short-circuit first), and a raise keeps a later refactor honest."""
+    c = SessionClock(SESSION, 1440)
+    with pytest.raises(ValueError) as e:
+        c.square_off_bar_ts(D)
+    assert "daily" in str(e.value)

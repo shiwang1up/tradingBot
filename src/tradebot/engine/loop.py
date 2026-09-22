@@ -106,7 +106,12 @@ class Engine:
                         d, len(leftovers))
             self._record(leftovers)
         # Entries queued on the last bar must not fill against tomorrow's open on a stale signal.
-        self._record(self.broker.cancel_pending(ts, "day_end"))
+        # Not in daily mode: there one bar IS one day, so this would cancel every entry on the bar
+        # it was placed and nothing could ever fill. The staleness this guards against is the
+        # seventeen hours between 15:10 and the next 09:15; the gap between daily bar i and bar
+        # i+1 is exactly the one-day fill delay daily mode intends.
+        if not self.clock.daily:
+            self._record(self.broker.cancel_pending(ts, "day_end"))
         self._write_daily_row(d)
 
     def _write_daily_row(self, d: date) -> None:
@@ -243,7 +248,11 @@ class Engine:
         self._observe(candles)
 
         self._record(self.broker.on_bar(ts, candles))
-        if not self._day.squared_off and self.clock.square_off_due(ts):
+        # In daily mode there is no intraday square-off: a CNC position is meant to survive the
+        # close, which is the whole point. `square_off_due` already returns False on a daily
+        # clock, so this gate is explicit rather than load-bearing - it says the skip is intended,
+        # not an emergent consequence a later refactor could quietly undo.
+        if not self.clock.daily and not self._day.squared_off and self.clock.square_off_due(ts):
             # Latched per day only once every intraday position is gone: a symbol with no candle at
             # the square-off bar closes at its last known price, and anything still open is retried.
             self._record(self.broker.square_off(ts, candles, last_prices=self._last_close))
