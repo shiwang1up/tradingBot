@@ -59,7 +59,7 @@ Six, chosen to span the standard families rather than to be exhaustive, plus a c
 | `pullback` | close > SMA(200) and RSI(2) < 10 |
 | `breakout` | close is a new 100-day closing high and close > SMA(200) |
 | `trend_dip` | SMA(50) > SMA(200), close < SMA(20), close > SMA(50) |
-| `squeeze` | ATR(20)/close at a 100-day low, and close > the prior day's high |
+| `squeeze` | ATR(20)/close at a 100-day low **on the prior bar**, and close > the prior day's high |
 | `gap_vol` | open > prior close x 1.01, volume > 2x its 20-day average, close > open |
 | `three_down` | three consecutive lower closes, close > SMA(200) |
 | `random` | **control.** Fires with the mean probability of the six above, seeded. |
