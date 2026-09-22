@@ -721,3 +721,17 @@ def test_an_open_daily_position_at_the_end_of_a_run_is_reported_open_not_realise
     s = build_summary(repo, "d1", cfg.charges)
     assert s.open_positions == 1
     assert s.trades == 0 and s.total_pnl == 0.0, "an unrealised mark is never counted as realised PnL"
+
+
+def test_a_mis_strategy_on_a_daily_config_is_rejected(repo, tmp_path):
+    """MIS on a daily bar has no meaning: _end_day's safety net squares the position off on the
+    bar that opened it, and the run then reports a full set of plausible numbers for trades that
+    were never held. Silent nonsense is worse than a crash, so this raises at construction."""
+    cfg = make_config(tmp_path, execution={"interval_minutes": 1440})
+    broker = BacktestBroker(cfg.capital, 0.0, cfg.risk.mis_leverage)
+    with pytest.raises(ValueError, match="MIS"):
+        BacktestEngine(cfg, repo, HistoricalSource([]), [FixedStrategy({})], broker, StubFilter(),
+                       SessionClock(cfg.session, 1440), {"A": 1}, "mis-daily")
+    # The control: the same MIS strategy on an intraday clock is exactly what the engine is for.
+    BacktestEngine(cfg, repo, HistoricalSource([]), [FixedStrategy({})], broker, StubFilter(),
+                   SessionClock(cfg.session, 5), {"A": 1}, "mis-intraday")

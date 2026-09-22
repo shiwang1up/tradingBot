@@ -72,6 +72,14 @@ class Engine:
         self.run_id = run_id
         self.mode = mode
         self.interval_sec = cfg.execution.interval_minutes * 60
+        if clock.daily:
+            # MIS on a daily bar has no meaning: _end_day's safety net squares the position off on
+            # the bar that opened it, and the run then reports plausible numbers for trades that
+            # were never held. Refuse at construction rather than produce silent nonsense.
+            intraday = sorted(s.name for s in strategies if getattr(s, "product", None) == "MIS")
+            if intraday:
+                raise ValueError(f"{', '.join(intraday)}: product MIS is meaningless on a daily bar - the "
+                                 f"position would be squared off on the bar that opened it; use CNC")
         self._history: dict[str, deque[Candle]] = {}
         self._indicators: dict[str, IndicatorSet] = {}  # shared technical context, one set per symbol
         self._indicator_params = validate_indicator_params(cfg.strategy.get("indicators"))  # fail at start, not mid-run

@@ -19,9 +19,9 @@ def _c(o, h, l, c, ts=1300, sym="X"):
     return Candle(sym, ts, o, h, l, c, 1)
 
 
-def _broker(slip=0.0, buffer=None, fill_on_close=False):
+def _broker(slip=0.0, buffer=None, fill_on_close=False, charges=None):
     return BacktestBroker(capital=100_000.0, slippage_pct=slip, mis_leverage=5.0, entry_buffer_pct=buffer,
-                          fill_on_close=fill_on_close)
+                          charges=charges, fill_on_close=fill_on_close)
 
 
 _: Broker = _broker()  # BacktestBroker must satisfy the Protocol (checked at import by type checkers)
@@ -440,3 +440,27 @@ def test_a_stop_on_the_time_exit_bar_is_still_a_stop():
     assert len(closed) == 1
     assert closed[0].position.exit_reason == "STOP"
     assert closed[0].position.exit_price == pytest.approx(99.0)
+
+
+def test_a_cnc_close_is_charged_the_delivery_schedule():
+    """The schedule is selected by the position's product. Charged as MIS, a delivery round trip
+    is understated by STT on the buy side, the higher stamp duty and the DP fee -- and every
+    charge would still be non-zero, so a test that only checked "charges > 0" would not see it."""
+    from tradebot.config import ChargesConfig
+    from tradebot.execution.charges import position_charges
+    schedule = ChargesConfig()
+
+    def close_one(product):
+        b = _broker(charges=schedule)
+        b.place_entry(_order(entry=100.0, stop=90.0, target=None, product=product))
+        b.on_bar(1300, {"X": _c(100.0, 100.5, 99.5, 100.0)})
+        b.square_off(1600, {"X": _c(100.0, 102.5, 99.9, 102.0)}, products=("MIS", "CNC"))
+        return b.closed[0]
+
+    mis, cnc = close_one("MIS"), close_one("CNC")
+    assert mis.avg_price == cnc.avg_price and mis.exit_price == cnc.exit_price, "the same trade"
+    assert cnc.charges > mis.charges
+    assert cnc.charges == pytest.approx(
+        position_charges("LONG", cnc.avg_price, cnc.exit_price, cnc.quantity, schedule, product="CNC"))
+    assert mis.charges == pytest.approx(
+        position_charges("LONG", mis.avg_price, mis.exit_price, mis.quantity, schedule, product="MIS"))

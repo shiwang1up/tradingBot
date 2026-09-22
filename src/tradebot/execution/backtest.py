@@ -214,7 +214,10 @@ class BacktestBroker:
             raise ValueError(f"{pos.symbol}: expected a finite exit price greater than 0, got {price!r}")
         pnl = (price - pos.avg_price) * pos.quantity if pos.direction == "LONG" else (pos.avg_price - price) * pos.quantity
         pnl = round(pnl, 2)
-        charges = position_charges(pos.direction, pos.avg_price, price, pos.quantity, self._charges_cfg)
+        # product selects the schedule: CNC pays STT on both sides, the higher stamp duty and the
+        # DP fee. Omitting it charged every delivery position at intraday rates.
+        charges = position_charges(pos.direction, pos.avg_price, price, pos.quantity, self._charges_cfg,
+                                   product=pos.product)
         pos.closed_ts, pos.exit_price, pos.exit_reason, pos.pnl, pos.charges = ts, price, reason, pnl, charges
         self.cash += pnl - charges
         if self.cash <= 0:

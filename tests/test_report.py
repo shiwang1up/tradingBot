@@ -457,3 +457,24 @@ def test_zero_trade_run_expectancy_lines_show_na_not_zero_percent(repo):
         line = next(l for l in text.splitlines() if l.startswith(label))
         assert "0.0%" not in line
         assert line.rstrip().endswith("n/a")
+
+
+def test_row_charges_estimates_a_cnc_row_at_delivery_rates(repo):
+    """A row with no stored charges is estimated here, and the estimate must use the row's own
+    product. Estimating a delivery trade at intraday rates understates it while still returning a
+    plausible non-zero number, which is exactly why this asserts CNC against MIS."""
+    from tradebot.config import ChargesConfig
+    from tradebot.execution.charges import position_charges
+    from tradebot.report.summary import row_charges
+    schedule = ChargesConfig()
+    repo.create_run("prod1", "backtest", 0, "{}")
+    for product in ("MIS", "CNC"):
+        p = Position(product, product, "LONG", 100, 100.0, 99.0, None, 1, "c-" + product, "ema_rsi")
+        repo.close_position(repo.insert_position("prod1", p), 9, 102.0, "TARGET", 200.0, charges=None)
+    rows = {r["symbol"]: r for r in repo.list_positions("prod1")}
+    mis, _, _ = row_charges(rows["MIS"], schedule)
+    cnc, estimated, unknown = row_charges(rows["CNC"], schedule)
+    assert (estimated, unknown) == (True, False)
+    assert cnc > mis
+    assert cnc == pytest.approx(position_charges("LONG", 100.0, 102.0, 100, schedule, product="CNC"))
+    assert mis == pytest.approx(position_charges("LONG", 100.0, 102.0, 100, schedule, product="MIS"))
