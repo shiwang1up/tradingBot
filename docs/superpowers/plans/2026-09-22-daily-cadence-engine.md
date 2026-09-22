@@ -10,7 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-22-daily-cadence-engine-design.md`
 
-**Baseline:** `.venv/bin/pytest -q` from the repo root gives `720 passed`.
+**Baseline:** `.venv/bin/pytest -q` from the repo root gives `682 passed`.
+
+(Not 720. This branch is off `main`; the swing screen's 38 tests live on
+`dev-swing-screen` and are not here. An earlier draft of this plan said 720 and the
+spec still says it in prose — the spec's point stands, the number is from the other
+branch.)
 
 **Branch:** `dev-daily-engine`, to be created from `main`.
 
@@ -18,7 +23,7 @@
 
 ## The constraint that governs every task
 
-**No intraday behaviour may change.** 720 tests pass and `tests/fixtures/golden_trades.json` pins backtest output bar by bar. Every change here is gated on daily mode or on an argument that defaults to today's behaviour.
+**No intraday behaviour may change.** 682 tests pass on this branch and `tests/fixtures/golden_trades.json` pins backtest output bar by bar. Every change here is gated on daily mode or on an argument that defaults to today's behaviour.
 
 **After every single task, run the full suite.** If any pre-existing test fails, or the golden fixture moves, STOP and report — that is a regression, not something to update the fixture for. The fixture is the control; changing it to match new output would destroy the only guard this plan has.
 
@@ -46,7 +51,7 @@
 | `src/tradebot/strategy/trend_dip.py` | New: the setup that cleared the screen. |
 | `config-daily.yaml` | New: a daily CNC config. |
 
-Test counts: Task 1 +6, Task 2 +7, Task 3 +3, Task 4 +4, Task 5 +5. From 720: 726, 733, 736, 740, 745.
+Test counts: Task 1 +6, Task 2 +7, Task 3 +3, Task 4 +4, Task 5 +5. From 682: 688, 695, 698, 702, 707.
 
 ---
 
@@ -176,7 +181,7 @@ Give `position_charges` the same `product: str = "MIS"` parameter and pass it th
 
 - [ ] **Step 4: Run**
 
-`.venv/bin/pytest tests/test_charges.py -q`, then `.venv/bin/pytest -q` → `726 passed`.
+`.venv/bin/pytest tests/test_charges.py -q`, then `.venv/bin/pytest -q` → `688 passed`.
 
 **If any pre-existing charge test fails, STOP.** The default path must be untouched.
 
@@ -306,7 +311,7 @@ Then gate the four window methods. Each keeps its intraday body unchanged:
         return self.open_ts(d) <= ts < cutoff
 ```
 
-- [ ] **Step 4: Run** — `.venv/bin/pytest -q` → `733 passed`. **Any pre-existing clock or engine test failing is a STOP.**
+- [ ] **Step 4: Run** — `.venv/bin/pytest -q` → `695 passed`. **Any pre-existing clock or engine test failing is a STOP.**
 
 - [ ] **Step 5: Commit**
 
@@ -364,7 +369,7 @@ At `loop.py:246`, make the daily skip explicit rather than implicit:
 Add a comment: in daily mode there is no intraday square-off, because a CNC position is meant to
 survive the close; end-of-run flattening still applies and is handled elsewhere.
 
-- [ ] **Step 4: Run** — `.venv/bin/pytest -q` → `736 passed`.
+- [ ] **Step 4: Run** — `.venv/bin/pytest -q` → `698 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -433,7 +438,7 @@ at the close would let through exactly the runaway entries the buffer exists to 
 Then in `cli.py`, pass `fill_on_close=(cfg.execution.interval_minutes >= 1440)` where the
 backtest broker is constructed (both construction sites, around lines 262 and 397).
 
-- [ ] **Step 4: Run** — `.venv/bin/pytest -q` → `740 passed`. **The golden fixture must be byte-identical.** Confirm with `git diff --stat tests/fixtures/golden_trades.json` showing no change.
+- [ ] **Step 4: Run** — `.venv/bin/pytest -q` → `702 passed`. **The golden fixture must be byte-identical.** Confirm with `git diff --stat tests/fixtures/golden_trades.json` showing no change.
 
 - [ ] **Step 5: Commit**
 
@@ -480,7 +485,7 @@ not a validated strategy.
 Create `config-daily.yaml` from `config.yaml` with `execution.interval_minutes: 1440`, the
 `trend_dip` strategy, `product: CNC`, and the session block unchanged.
 
-- [ ] **Step 4: Run the tests** — `.venv/bin/pytest -q` → `745 passed`.
+- [ ] **Step 4: Run the tests** — `.venv/bin/pytest -q` → `707 passed`.
 
 - [ ] **Step 5: Run a real daily backtest, in 2022 only**
 
