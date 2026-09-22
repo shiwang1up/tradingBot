@@ -464,3 +464,49 @@ def test_a_cnc_close_is_charged_the_delivery_schedule():
         position_charges("LONG", cnc.avg_price, cnc.exit_price, cnc.quantity, schedule, product="CNC"))
     assert mis.charges == pytest.approx(
         position_charges("LONG", mis.avg_price, mis.exit_price, mis.quantity, schedule, product="MIS"))
+
+
+def test_a_daily_entry_bar_cannot_stop_the_position_it_just_opened():
+    """The fill is this bar's CLOSE, so the bar's own high and low have already printed by the
+    time the position exists. Exiting against them books a trade at a price from before the
+    entry: in the 2022 smoke run an ADANIENT long filled at 3644.0 on a bar whose low was
+    3616.8 and was "stopped" at 3649.9 -- ABOVE its own entry, a profit on a losing setup."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=99.0, target=None))
+    ev = b.on_bar(1300, {"X": _c(101.0, 101.5, 98.0, 100.0)})  # the low is through the stop
+    assert isinstance(ev[0], Filled)
+    assert not [e for e in ev if isinstance(e, Closed)], "that low printed before the fill"
+    assert set(b.open_positions()) == {"X"}
+
+
+def test_a_daily_entry_bar_cannot_hit_the_target_it_just_opened_against():
+    """The same reasoning the other way: a bar whose high ran through the target must not book a
+    win on a position that did not exist until that bar's close."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=90.0, target=102.0))
+    ev = b.on_bar(1300, {"X": _c(101.0, 103.0, 100.5, 101.0)})  # the high is through the target
+    assert isinstance(ev[0], Filled)
+    assert not [e for e in ev if isinstance(e, Closed)]
+    assert set(b.open_positions()) == {"X"}
+
+
+def test_the_bar_after_a_daily_entry_exits_normally():
+    """The skip is the entry bar and nothing more. Bar i+1 lies entirely after the fill, so its
+    range is real and a stop on it is a real stop."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=99.0, target=None))
+    assert isinstance(b.on_bar(1300, {"X": _c(101.0, 101.5, 98.0, 100.0)})[0], Filled)
+    ev = b.on_bar(1600, {"X": _c(100.0, 100.2, 98.5, 98.8)})
+    closed = [e for e in ev if isinstance(e, Closed)]
+    assert len(closed) == 1 and closed[0].position.exit_reason == "STOP"
+    assert closed[0].position.exit_price == pytest.approx(99.0)
+
+
+def test_an_intraday_entry_bar_can_still_stop_out():
+    """The control. Intraday fills at the OPEN, so the rest of that bar genuinely follows the
+    fill and a same-bar stop is real. The golden fixture depends on this staying true."""
+    b = _broker()
+    b.place_entry(_order(entry=100.0, stop=99.0, target=None))
+    ev = b.on_bar(1300, {"X": _c(100.0, 100.5, 98.0, 98.5)})
+    closed = [e for e in ev if isinstance(e, Closed)]
+    assert len(closed) == 1 and closed[0].position.exit_reason == "STOP"

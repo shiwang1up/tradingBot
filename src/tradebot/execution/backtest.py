@@ -104,7 +104,8 @@ class BacktestBroker:
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]:
         """Fill every pending entry at this bar's open (its close when `fill_on_close`), then close
         every open position whose stop or target this bar hits, and after that any whose hold has
-        run out. A close is contained per position: one whose exit price is bad (see
+        run out. When `fill_on_close`, the bar that fills an entry cannot also exit it: its range
+        printed before the fill. A close is contained per position: one whose exit price is bad (see
         `_close`) is logged at error level and left open for the caller to retry, while every other
         fill and close on this bar still happens and is still returned."""
         events: list[BrokerEvent] = []
@@ -129,9 +130,16 @@ class BacktestBroker:
             c = candles.get(sym)
             if c is None:
                 continue
-            if pos.opened_ts != ts:
+            if pos.opened_ts == ts:
                 # The entry bar does not count: max_hold_bars is bars held AFTER the fill. Bars with
                 # no candle for this symbol are skipped here, so a data hole never ages a position.
+                if self._fill_on_close:
+                    # Filled at this bar's close, so its high and low printed BEFORE the position
+                    # existed. Checking them would close a trade at a price from before its entry:
+                    # a long can be "stopped" above its own fill for a profit on a losing setup.
+                    # An open fill is different -- the rest of that bar really does follow it.
+                    continue
+            else:
                 pos.bars_held += 1
             hit = check_exit(pos, c)
             if hit is None:
