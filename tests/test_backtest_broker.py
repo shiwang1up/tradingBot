@@ -510,3 +510,75 @@ def test_an_intraday_entry_bar_can_still_stop_out():
     ev = b.on_bar(1300, {"X": _c(100.0, 100.5, 98.0, 98.5)})
     closed = [e for e in ev if isinstance(e, Closed)]
     assert len(closed) == 1 and closed[0].position.exit_reason == "STOP"
+
+
+# -- an entry already through its own stop or target ------------------------------------------
+def test_a_long_filling_at_or_below_its_own_stop_is_not_filled():
+    """The signal's stop is computed on the signal bar; the fill lands a bar later. A gap between
+    the two can leave a long already below the stop it was sized against. Opening it books a
+    "stop" ABOVE the entry -- a profit on a setup that has already failed -- and the quantity came
+    from a risk distance that no longer exists. ADANIENT, 2022-12-23: filled 3644.00, stop 3649.90.
+    """
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=99.0, target=None))
+    ev = b.on_bar(1300, {"X": _c(99.5, 99.6, 98.4, 98.7)})   # closes below the stop
+    assert isinstance(ev[0], Unfilled) and ev[0].reason == "through_stop"
+    assert b.open_positions() == {}
+
+
+def test_a_long_filling_exactly_at_its_stop_is_not_filled():
+    """Risk per share is zero there, and check_exit's `low <= stop` fires on the next bar that so
+    much as touches it. Nothing to size and nothing to hold."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=99.0, target=None))
+    ev = b.on_bar(1300, {"X": _c(99.5, 99.6, 98.4, 99.0)})
+    assert isinstance(ev[0], Unfilled) and ev[0].reason == "through_stop"
+
+
+def test_a_short_filling_at_or_above_its_own_stop_is_not_filled():
+    """The mirror: a short's stop sits above it, so a gap up leaves it already stopped."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order("SHORT", entry=100.0, stop=101.0, target=None))
+    ev = b.on_bar(1300, {"X": _c(100.5, 102.0, 100.4, 101.5)})
+    assert isinstance(ev[0], Unfilled) and ev[0].reason == "through_stop"
+    assert b.open_positions() == {}
+
+
+def test_a_long_filling_at_or_beyond_its_own_target_is_not_filled():
+    """The same defect at the other end: the move the trade was waiting for has already happened,
+    and check_exit would close it at a target BELOW the entry, booking a loss on a winning setup."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=99.0, target=102.0))
+    ev = b.on_bar(1300, {"X": _c(101.0, 102.6, 100.9, 102.4)})
+    assert isinstance(ev[0], Unfilled) and ev[0].reason == "through_target"
+    assert b.open_positions() == {}
+
+
+def test_an_intraday_entry_gapping_through_its_stop_still_fills_and_scratches():
+    """The control, and the reason the guard is daily-only. Intraday the fill IS the open, so the
+    rest of the bar follows it: the position opens and stops at the clamped open for a scratch,
+    which is what a marketable entry meeting its stop at once really does. Under fill_on_close
+    that exit does not exist -- the bar is over -- so there the entry is declined instead."""
+    b = _broker()
+    b.place_entry(_order(entry=100.0, stop=99.0, target=None))
+    ev = b.on_bar(1300, {"X": _c(98.5, 99.2, 98.0, 99.1)})
+    assert [type(e) for e in ev] == [Filled, Closed]
+    assert ev[1].position.exit_reason == "STOP" and ev[1].position.pnl == 0.0
+
+
+def test_an_entry_between_its_stop_and_target_still_fills():
+    """The control. A fill that has moved against the signal but is still short of the stop is an
+    ordinary entry and must not be rejected -- that is most of them."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=99.0, target=102.0))
+    ev = b.on_bar(1300, {"X": _c(100.2, 100.4, 99.2, 99.3)})
+    assert isinstance(ev[0], Filled)
+    assert ev[0].position.avg_price == pytest.approx(99.3)
+
+
+def test_a_position_with_no_target_is_judged_on_its_stop_alone():
+    """trend_dip has no target. A None target must not be compared against anything."""
+    b = _broker(fill_on_close=True)
+    b.place_entry(_order(entry=100.0, stop=99.0, target=None))
+    ev = b.on_bar(1300, {"X": _c(100.0, 140.0, 99.5, 138.0)})
+    assert isinstance(ev[0], Filled), "a runaway move with no target is a buffer question, not a target one"

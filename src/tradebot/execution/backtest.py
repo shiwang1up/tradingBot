@@ -101,6 +101,39 @@ class BacktestBroker:
             return ref > sig.entry_price * (1 + self.buffer)
         return ref < sig.entry_price * (1 - self.buffer)
 
+    def _through_own_levels(self, sig, price: float) -> str | None:
+        """The reason this entry is already over before it opens, or None.
+
+        A signal's stop and target are computed on the signal bar; the fill lands a bar later, at
+        the next open intraday or at that bar's close in daily mode. A gap in between can put the
+        fill on the far side of one of them. Opening the position then is wrong twice over: the
+        quantity was sized on a risk distance that no longer exists, and `check_exit` closes it on
+        the next bar at a level the wrong side of its own entry -- a long "stopped" ABOVE its fill
+        books a profit on a setup that has already failed. ADANIENT, 2022-12-23: filled 3644.00
+        against a stop of 3649.90 after a 4.7% gap, closed for +12.30.
+
+        Equality counts: risk per share is zero there, and check_exit's `low <= stop` fires on any
+        later bar that so much as touches the level.
+
+        This is not the same guard as `_beyond_buffer`, which is one-sided -- it rejects a long
+        whose price has run AWAY, and says nothing about one that has fallen through its stop.
+
+        Daily only, and deliberately. Intraday the fill IS the bar's open, so the rest of that bar
+        genuinely follows it: the position opens, `check_exit` stops it at the clamped open, and
+        the trade scratches -- a faithful model of a marketable entry meeting its stop at once
+        (see test_entry_bar_gapping_through_stop_is_a_loss_not_a_profit). Under `fill_on_close`
+        the entry bar is already over when the fill happens, so that scratch exit does not exist
+        and the clamp reaches back to an open with no relation to the fill. Declining the entry is
+        the honest answer there, and it sits at the same moment, on the same price, as the buffer.
+        """
+        long = sig.direction == "LONG"
+        if (price <= sig.stop_price) if long else (price >= sig.stop_price):
+            return "through_stop"
+        if sig.target_price is not None and (
+                (price >= sig.target_price) if long else (price <= sig.target_price)):
+            return "through_target"
+        return None
+
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]:
         """Fill every pending entry at this bar's open (its close when `fill_on_close`), then close
         every open position whose stop or target this bar hits, and after that any whose hold has
@@ -121,6 +154,10 @@ class BacktestBroker:
                 events.append(Unfilled(order, ts, "beyond_buffer"))
                 continue
             price = self._entry_price(sig.direction, ref)
+            through = self._through_own_levels(sig, price) if self._fill_on_close else None
+            if through:
+                events.append(Unfilled(order, ts, through))
+                continue
             pos = Position(sym, sig.product, sig.direction, order.quantity, price, sig.stop_price,
                            sig.target_price, ts, order.client_id, sig.strategy,
                            max_hold_bars=sig.max_hold_bars)
