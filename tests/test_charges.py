@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from tradebot.config import ChargesConfig
@@ -105,3 +107,57 @@ def test_position_charges_validates_quantity_and_prices(quantity, entry_price, e
     # these checks run whether or not the schedule is enabled, like the direction check above
     with pytest.raises(ValueError, match=match):
         position_charges("LONG", entry_price, exit_price, quantity, CFG)
+
+
+def test_delivery_charges_more_than_intraday_on_the_same_trade():
+    """The point of the whole task: CNC pays STT on both sides plus a DP charge, so a delivery
+    round trip must cost materially more than the same trade intraday. If these ever come out
+    equal, the product argument is not reaching the schedule."""
+    mis = round_trip_charges(10_000.0, 10_200.0, CFG, product="MIS")
+    cnc = round_trip_charges(10_000.0, 10_200.0, CFG, product="CNC")
+    assert cnc > mis
+    assert cnc - mis > 25.0          # STT alone is ~0.175% of 20,200 = ~35
+
+
+def test_the_default_product_is_intraday_and_unchanged():
+    """Every existing caller omits the argument and must get exactly what it got before."""
+    assert round_trip_charges(10_000.0, 10_200.0, CFG) == round_trip_charges(
+        10_000.0, 10_200.0, CFG, product="MIS")
+    assert round_trip_charges(10_000.0, 10_200.0, CFG) == pytest.approx(27.42)
+
+
+def test_raising_the_buy_leg_costs_more_under_delivery_than_intraday():
+    """Two things make a delivery BUY dearer: STT is charged on both sides rather than the
+    sell alone, and stamp duty is 0.015% rather than 0.003%. So the differential is the sum of
+    both, not STT alone -- an earlier version of this test counted only the STT and contradicted
+    the DP-charge test two below it, which does compute the stamp term."""
+    base_mis = round_trip_charges(10_000.0, 10_000.0, CFG, product="MIS")
+    more_mis = round_trip_charges(20_000.0, 10_000.0, CFG, product="MIS")
+    base_cnc = round_trip_charges(10_000.0, 10_000.0, CFG, product="CNC")
+    more_cnc = round_trip_charges(20_000.0, 10_000.0, CFG, product="CNC")
+    extra_stt = 10_000.0 * CFG.delivery_stt_pct / 100.0
+    extra_stamp = 10_000.0 * (CFG.delivery_stamp_buy_pct - CFG.stamp_buy_pct) / 100.0
+    assert (more_cnc - base_cnc) - (more_mis - base_mis) == pytest.approx(
+        extra_stt + extra_stamp, rel=1e-6)
+
+
+def test_the_dp_charge_is_flat_and_applied_once():
+    """A fixed rupee fee per sell, so it does not scale with value and appears exactly once in
+    a round trip."""
+    small = round_trip_charges(1_000.0, 1_000.0, CFG, product="CNC")
+    small_mis = round_trip_charges(1_000.0, 1_000.0, CFG, product="MIS")
+    stt_delta = 2_000.0 * CFG.delivery_stt_pct / 100.0 - 1_000.0 * CFG.stt_sell_pct / 100.0
+    stamp_delta = 1_000.0 * (CFG.delivery_stamp_buy_pct - CFG.stamp_buy_pct) / 100.0
+    assert small - small_mis == pytest.approx(stt_delta + stamp_delta + CFG.dp_charge, abs=0.02)
+
+
+def test_a_disabled_schedule_is_free_for_delivery_too():
+    disabled = replace(CFG, enabled=False)
+    assert round_trip_charges(10_000.0, 10_200.0, disabled, product="CNC") == 0.0
+
+
+def test_an_unknown_product_raises():
+    """Silently falling back to the cheaper schedule is the failure mode that matters."""
+    with pytest.raises(ValueError) as e:
+        round_trip_charges(10_000.0, 10_200.0, CFG, product="NRML")
+    assert "NRML" in str(e.value)

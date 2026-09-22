@@ -72,6 +72,10 @@ charges:                        # Groww intraday equity; check against groww.in/
   exchange_txn_pct: 0.00297     # NSE, both sides
   sebi_pct: 0.0001              # both sides
   stamp_buy_pct: 0.003          # buy side only
+  # the CNC fields below are carried for schema completeness; unused at this intraday interval
+  delivery_stt_pct: 0.1         # CNC only: both sides, against 0.025% sell-side intraday
+  delivery_stamp_buy_pct: 0.015 # CNC only: buy side, against 0.003% intraday
+  dp_charge: 15.34              # CNC only: depository, flat, per sell
   gst_pct: 18.0                 # on brokerage + exchange txn + SEBI
 
 regime:                         # longs only while the index is above its EMA, shorts only while at or below

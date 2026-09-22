@@ -1,4 +1,4 @@
-"""Statutory and brokerage charges on one closed intraday trade. Pure: no I/O, no state.
+"""Statutory and brokerage charges on one closed trade, intraday or delivery. Pure: no I/O, no state.
 
 Values are taken by side (what was bought, what was sold), not by entry and exit, because STT is
 charged on the sell side and stamp duty on the buy side: a short sells first and buys second."""
@@ -10,7 +10,8 @@ from typing import Optional
 from tradebot.config import ChargesConfig
 
 
-def round_trip_charges(buy_value: float, sell_value: float, cfg: Optional[ChargesConfig]) -> float:
+def round_trip_charges(buy_value: float, sell_value: float, cfg: Optional[ChargesConfig],
+                       product: str = "MIS") -> float:
     """Rupees charged on a trade that bought `buy_value` and sold `sell_value`. Zero when `cfg` is
     None or disabled, and neither value is validated in that case: a disabled schedule never raises.
 
@@ -21,9 +22,16 @@ def round_trip_charges(buy_value: float, sell_value: float, cfg: Optional[Charge
     are not rounded on their own. Every order pays at least `brokerage_min`, including one worth
     zero rupees.
 
+    Delivery (`product="CNC"`) pays STT on both sides rather than on the sell alone, a higher
+    stamp duty on the buy, and a flat DP charge per sell. `product` defaults to "MIS", so every
+    existing caller is charged exactly as before.
+
     `position_charges` below always validates its arguments regardless of `cfg`; this function
-    validates only when the schedule is enabled.
+    validates only when the schedule is enabled. The product, though, is validated before the
+    disabled check, so a typo is caught even with charges off.
     """
+    if product not in ("MIS", "CNC"):
+        raise ValueError(f"product: expected MIS or CNC, got {product!r}")
     if cfg is None or not cfg.enabled:
         return 0.0
 
@@ -36,16 +44,22 @@ def round_trip_charges(buy_value: float, sell_value: float, cfg: Optional[Charge
 
     turnover = buy_value + sell_value
     brok = brokerage(buy_value) + brokerage(sell_value)
-    stt = sell_value * cfg.stt_sell_pct / 100.0
+    if product == "CNC":
+        stt = turnover * cfg.delivery_stt_pct / 100.0
+        stamp = buy_value * cfg.delivery_stamp_buy_pct / 100.0
+        dp = cfg.dp_charge
+    else:
+        stt = sell_value * cfg.stt_sell_pct / 100.0
+        stamp = buy_value * cfg.stamp_buy_pct / 100.0
+        dp = 0.0
     txn = turnover * cfg.exchange_txn_pct / 100.0
     sebi = turnover * cfg.sebi_pct / 100.0
-    stamp = buy_value * cfg.stamp_buy_pct / 100.0
     gst = (brok + txn + sebi) * cfg.gst_pct / 100.0
-    return round(brok + stt + txn + sebi + stamp + gst, 2)
+    return round(brok + stt + txn + sebi + stamp + gst + dp, 2)
 
 
 def position_charges(direction: str, entry_price: float, exit_price: float, quantity: int,
-                      cfg: Optional[ChargesConfig]) -> float:
+                      cfg: Optional[ChargesConfig], product: str = "MIS") -> float:
     """Charges on one closed position. A LONG buys at entry and sells at exit; a SHORT sells at
     entry and buys at exit.
 
@@ -66,4 +80,4 @@ def position_charges(direction: str, entry_price: float, exit_price: float, quan
         buy_value, sell_value = exit_value, entry_value
     else:
         raise ValueError(f"direction: expected LONG or SHORT, got {direction!r}")
-    return round_trip_charges(buy_value, sell_value, cfg)
+    return round_trip_charges(buy_value, sell_value, cfg, product)

@@ -99,6 +99,12 @@ class ChargesConfig:
     exchange_txn_pct: float = 0.00297  # NSE, both sides
     sebi_pct: float = 0.0001           # both sides
     stamp_buy_pct: float = 0.003       # buy side only
+    # Delivery (CNC) differs from intraday in exactly three ways. Rates duplicated in
+    # scripts/daily_screen.py as module constants; that script's committed results depend on
+    # those exact numbers, so the two are deliberately not unified. Keep them in step.
+    delivery_stt_pct: float = 0.1       # both sides, against 0.025% sell-side intraday
+    delivery_stamp_buy_pct: float = 0.015   # buy side, against 0.003% intraday
+    dp_charge: float = 15.34            # depository, flat, per sell
     gst_pct: float = 18.0              # on brokerage + exchange txn + SEBI
 
 
