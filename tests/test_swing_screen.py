@@ -272,3 +272,52 @@ def test_the_holdout_phase_refuses_without_the_explicit_flag():
 
 def test_the_holdout_guard_allows_an_explicit_confirmation():
     sw.guard_holdout(confirmed=True)        # must not raise
+
+
+def test_firings_by_date_counts_observations_per_entry_date():
+    exs = ([sw.Ex("S%d" % k, date(2021, 3, 1), 60, 0.0, 0.0) for k in range(3)]
+           + [sw.Ex("A", date(2021, 4, 1), 60, 0.0, 0.0)])
+    assert sw.firings_by_date(exs) == {date(2021, 3, 1): 3, date(2021, 4, 1): 1}
+
+
+def test_the_permutation_fires_on_the_same_dates_with_the_same_counts():
+    """The whole permutation rests on holding the clustering fixed. Same dates, same count
+    per date, only the symbols randomised -- otherwise the test measures timing as well as
+    selection and stops isolating either."""
+    import random as _random
+    counts = {date(2021, 3, 1): 3, date(2021, 4, 1): 1, date(2021, 5, 3): 7}
+    pools = {d: tuple("S%d" % k for k in range(40)) for d in counts}
+    for seed in (1, 2, 3):
+        picks = sw.permuted_firings(counts, pools, _random.Random(seed))
+        assert set(picks) == set(counts), "fired on a different set of dates"
+        for d in counts:
+            assert len(picks[d]) == counts[d], "wrong count on %s" % d
+            assert len(set(picks[d])) == counts[d], "drew the same symbol twice"
+
+
+def test_the_permutation_draws_only_from_that_dates_eligible_members():
+    """A symbol that was not an eligible member that day is a name-day you could not have
+    traded, so it must not enter the control either."""
+    import random as _random
+    counts = {date(2021, 3, 1): 2, date(2021, 4, 1): 2}
+    pools = {date(2021, 3, 1): ("AAA", "BBB", "CCC"),
+             date(2021, 4, 1): ("DDD", "EEE")}
+    for seed in range(5):
+        picks = sw.permuted_firings(counts, pools, _random.Random(seed))
+        for d in counts:
+            assert set(picks[d]) <= set(pools[d]), "drew outside %s's pool" % d
+
+
+def test_the_parametrised_trend_dip_reproduces_the_registered_one():
+    """The neighbourhood is only interpretable if its centre IS the registered setup. If
+    make_trend_dip(20, 50) ever diverged from trend_dip, the grid would be comparing the
+    registered cell against a different rule."""
+    closes = [100.0 + i * 0.5 for i in range(230)]
+    ind = sw.Indicators(_bars(closes))
+    dipped = closes[:]
+    dipped[229] = (ind.sma20[229] + ind.sma50[229]) / 2.0
+    fires = sw.make_trend_dip(*sw.REGISTERED_TREND_DIP)
+    for bars in (_bars(closes), _bars(dipped)):
+        ind2 = sw.Indicators(bars)
+        for i in range(len(bars)):
+            assert fires(ind2, i) == sw.trend_dip(ind2, i), "diverged at bar %d" % i

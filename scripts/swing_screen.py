@@ -49,6 +49,12 @@ CAPITAL = 100_000.0
 POSITIONS = 8                            # the book the hurdle is computed for
 BONFERRONI_T = 2.64                      # six primary cells at alpha 0.05
 RANDOM_SEED = 20260922
+PERM_SEED = 20260923                     # the permutation test, printed with its output
+PERMUTATIONS = 2000
+ROBUST_YEARS = (2020, 2021, 2022, 2023)
+REGISTERED_TREND_DIP = (20, 50)          # fixed before the run; the grid never overrides it
+TREND_DIP_GRID = ((15, 45), (15, 50), (20, 45), (20, 50),
+                  (20, 55), (20, 60), (25, 50), (25, 55))
 
 # Indicators, the corporate-action mask, the cost model and the date-clustered t come from
 # the daily screen rather than being written twice: one definition of a split, of a round
@@ -85,6 +91,15 @@ class Indicators(object):
         self.atrpct = [None if (self.atr20[i] is None or self.closes[i] <= 0)
                        else self.atr20[i] / self.closes[i] for i in range(len(bars))]
         self.atrpct_min100_prev = _rolling_min_prev_opt(self.atrpct, 100)
+        # Only the parameter-sensitivity check asks for other lengths; the registered setups
+        # read the three fixed series above and nothing here changes what they see.
+        self._sma_cache = {20: self.sma20, 50: self.sma50, 200: self.sma200}
+
+    def sma_n(self, n):
+        """SMA of any length, computed once per symbol per length."""
+        if n not in self._sma_cache:
+            self._sma_cache[n] = sma(self.closes, n)
+        return self._sma_cache[n]
 
 
 def _rolling_min_prev_opt(values, n):
@@ -123,6 +138,22 @@ def trend_dip(ind, i):
         return False
     return (ind.sma50[i] > ind.sma200[i] and ind.closes[i] < ind.sma20[i]
             and ind.closes[i] > ind.sma50[i])
+
+
+def make_trend_dip(fast, short):
+    """`trend_dip` with its two averages as parameters, for the stability neighbourhood.
+
+    NOT a parameter search. The registered pair is (20, 50) and it stays (20, 50) whatever
+    the neighbours score: switching to a better-scoring pair after seeing the numbers is
+    curve-fitting and would void the pre-registration. The question the neighbourhood answers
+    is only whether the result survives perturbation -- a cell that works at exactly 20/50
+    and collapses beside it is evidence AGAINST the effect, not for it."""
+    def fires(ind, i):
+        f, s = ind.sma_n(fast), ind.sma_n(short)
+        if not _ready(ind, i) or f[i] is None or s[i] is None:
+            return False
+        return (s[i] > ind.sma200[i] and ind.closes[i] < f[i] and ind.closes[i] > s[i])
+    return fires
 
 
 def squeeze(ind, i):
@@ -274,10 +305,9 @@ def date_means(exs, attr="xs_excess"):
     return [sum(by_date[d]) / len(by_date[d]) for d in sorted(by_date)]
 
 
-def t_across_dates(exs, attr="xs_excess"):
-    """t of the mean of `date_means`. None for fewer than two dates or zero variance."""
+def t_of_means(means):
+    """t of a list of per-date means. None for fewer than two dates or zero variance."""
     import math
-    means = date_means(exs, attr)
     n = len(means)
     if n < 2:
         return None
@@ -286,6 +316,44 @@ def t_across_dates(exs, attr="xs_excess"):
     if var <= 0:
         return None
     return mean / math.sqrt(var / n)
+
+
+def t_across_dates(exs, attr="xs_excess"):
+    """t of the mean of `date_means`. None for fewer than two dates or zero variance."""
+    return t_of_means(date_means(exs, attr))
+
+
+def firings_by_date(exs):
+    """How many observations the setup produced on each entry date."""
+    counts = defaultdict(int)
+    for e in exs:
+        counts[e.entry_date] += 1
+    return dict(counts)
+
+
+def permuted_firings(counts_by_date, pool_by_date, rng):
+    """One permutation: on each date the real setup fired, draw that many symbols at random,
+    without replacement, from that date's eligible members.
+
+    The clustering is held FIXED -- same dates, same count per date -- and only WHICH symbols
+    are picked is randomised. That single difference is the whole design: it isolates
+    selection from timing, because a setup that merely fires on good days scores as well as
+    the real one under this permutation, and only a setup that genuinely picks better stocks
+    on those days does not."""
+    out = {}
+    for d in sorted(counts_by_date):
+        pool = pool_by_date.get(d, ())
+        k = min(counts_by_date[d], len(pool))
+        out[d] = rng.sample(pool, k)
+    return out
+
+
+def percentile(values, p):
+    """Nearest-rank percentile of an already-sorted list."""
+    if not values:
+        return 0.0
+    k = int(round((p / 100.0) * (len(values) - 1)))
+    return values[max(0, min(len(values) - 1, k))]
 
 
 def hurdle_per_month(horizon, capital=CAPITAL, positions=POSITIONS):
@@ -353,7 +421,13 @@ def guard_holdout(confirmed):
                  "and only after a setup has passed in-sample." % HOLDOUT_START)
 
 
-def run_phase(conn, window, label, out=sys.stdout):
+Universe = namedtuple("Universe", "bars masked inds members_by_date all_dates returns")
+
+
+def load_universe(conn, window):
+    """Bars, masks, indicators, point-in-time membership and every member name-day's forward
+    return, for one window. Shared by every phase so the screen and its robustness checks are
+    measured against identical inputs rather than two loaders that could drift apart."""
     from tradebot.data.membership import MembershipError, constituents_on, load_timeline
     timeline = load_timeline("index_membership.yaml")
 
@@ -403,6 +477,32 @@ def run_phase(conn, window, label, out=sys.stdout):
                     if r is not None:
                         returns_by_key[(sym, d, h)] = r
 
+    return Universe(bars_by_symbol, masked, inds, members_by_date, all_dates, returns_by_key)
+
+
+def excesses(uni, window, name, fires, h):
+    """Every Ex this setup produces at one horizon: the forward return less each baseline."""
+    exs = []
+    for sym, bars in uni.bars.items():
+        obs = observations(sym, bars, uni.inds[sym], uni.masked.get(sym, set()),
+                           uni.members_by_date, window, (name, fires), (h,))
+        if not obs:
+            continue
+        tsb = ts_baseline(bars, window, h, uni.masked.get(sym, set()))
+        for o in obs:
+            xsb = xs_baseline(uni.returns, uni.members_by_date, o.entry_date, h)
+            if tsb is None or xsb is None:
+                continue
+            exs.append(Ex(sym, o.entry_date, h, o.ret - tsb, o.ret - xsb))
+    return exs
+
+
+def run_phase(conn, window, label, out=sys.stdout):
+    uni = load_universe(conn, window)
+    bars_by_symbol, inds = uni.bars, uni.inds
+    members_by_date, all_dates = uni.members_by_date, uni.all_dates
+    lo, hi = window
+
     rates = []
     for name, fires in SETUPS:
         fired = total = 0
@@ -431,19 +531,7 @@ def run_phase(conn, window, label, out=sys.stdout):
 
     for name, fires in setups:
         for h in HORIZONS:
-            exs = []
-            for sym, bars in bars_by_symbol.items():
-                ind = inds[sym]
-                obs = observations(sym, bars, ind, masked.get(sym, set()), members_by_date,
-                                   window, (name, fires), (h,))
-                if not obs:
-                    continue
-                tsb = ts_baseline(bars, window, h, masked.get(sym, set()))
-                for o in obs:
-                    xsb = xs_baseline(returns_by_key, members_by_date, o.entry_date, h)
-                    if tsb is None or xsb is None:
-                        continue
-                    exs.append(Ex(sym, o.entry_date, h, o.ret - tsb, o.ret - xsb))
+            exs = excesses(uni, window, name, fires, h)
             s = summarise(exs, h)
             v = verdict(s["xs_per_date"], s["xs_t"], h) if s["n"] else "no observations"
             mark = " <-- primary" if h == PRIMARY_HORIZON else ""
@@ -465,10 +553,142 @@ def run_phase(conn, window, label, out=sys.stdout):
           " itself.", file=out)
 
 
+def run_robust(conn, out=sys.stdout):
+    """Three stability checks on the one in-sample cell that cleared the bar.
+
+    STABILITY, NOT SEARCH. Nothing here can change the registered setup. If a neighbouring
+    parameter pair scores higher that is not a reason to adopt it -- adopting it after seeing
+    these numbers is curve-fitting and voids the pre-registration. The only question is
+    whether the result survives reasonable perturbation."""
+    import math
+    window, h = INSAMPLE, PRIMARY_HORIZON
+    lo, hi = window
+    uni = load_universe(conn, window)
+    exs = excesses(uni, window, "trend_dip", trend_dip, h)
+    s = summarise(exs, h)
+    headline = s["xs_per_date"]
+
+    print("swing robustness checks -- trend_dip, horizon %d, in-sample %s..%s"
+          % (h, lo, hi), file=out)
+    print("  registered cell: %d obs over %d dates, xs/date %+.3f%%, t %s"
+          % (s["n"], s["dates"], 100.0 * headline,
+             "n/a" if s["xs_t"] is None else "%.2f" % s["xs_t"]), file=out)
+    print("  these are stability checks, not a parameter search: the registered setup is"
+          " fixed at\n  fast=%d short=%d whatever the neighbourhood scores."
+          % REGISTERED_TREND_DIP, file=out)
+    print("", file=out)
+
+    # --- 1. year by year -------------------------------------------------------------
+    # The SAME observations, partitioned by entry year, so contributions sum to the headline
+    # exactly. Recomputing each year as its own window would change both baselines and answer
+    # a different question.
+    print("1. year by year (same observations partitioned by entry year)", file=out)
+    print("  %6s %8s %7s %9s %7s %12s %8s"
+          % ("year", "obs", "dates", "xs/date", "t", "contribution", "share"), file=out)
+    by_year = defaultdict(list)
+    for e in exs:
+        by_year[e.entry_date.year].append(e)
+    for y in ROBUST_YEARS:
+        ys = summarise(by_year.get(y, []), h)
+        contrib = (ys["dates"] * ys["xs_per_date"] / s["dates"]) if s["dates"] else 0.0
+        share = (100.0 * contrib / headline) if headline else 0.0
+        print("  %6d %8d %7d %+8.3f%% %7s %+11.3f%% %7.1f%%"
+              % (y, ys["n"], ys["dates"], 100.0 * ys["xs_per_date"],
+                 "n/a" if ys["xs_t"] is None else "%.2f" % ys["xs_t"],
+                 100.0 * contrib, share), file=out)
+    print("  contributions are (that year's dates / all dates) x (that year's xs/date) and"
+          " sum to the\n  headline. A single year carrying most of it means a regime"
+          " artefact, not an edge.", file=out)
+    print("", file=out)
+
+    # --- 2. parameter neighbourhood --------------------------------------------------
+    print("2. parameter neighbourhood (200-day trend filter held fixed)", file=out)
+    print("  %6s %6s %8s %7s %9s %7s  %s"
+          % ("fast", "short", "obs", "dates", "xs/date", "t", ""), file=out)
+    for fast, short in TREND_DIP_GRID:
+        g = summarise(excesses(uni, window, "trend_dip_%d_%d" % (fast, short),
+                               make_trend_dip(fast, short), h), h)
+        mark = " <-- registered" if (fast, short) == REGISTERED_TREND_DIP else ""
+        print("  %6d %6d %8d %7d %+8.3f%% %7s  %s"
+              % (fast, short, g["n"], g["dates"], 100.0 * g["xs_per_date"],
+                 "n/a" if g["xs_t"] is None else "%.2f" % g["xs_t"], mark), file=out)
+    print("  read the SHAPE, not the maximum: a plateau where neighbours behave alike is"
+          " evidence the\n  effect is real, a spike that collapses beside the registered"
+          " cell is evidence it is fitted.", file=out)
+    print("", file=out)
+
+    # --- 3. permutation, firing pattern held fixed -----------------------------------
+    print("3. permutation test -- same dates, same count per date, random symbols", file=out)
+    tsb_ok = {sym: ts_baseline(bars, window, h, uni.masked.get(sym, set())) is not None
+              for sym, bars in uni.bars.items()}
+    pool_by_date, ret_by_date, xsb_by_date = {}, {}, {}
+    for d in uni.all_dates:
+        pool = tuple(sym for sym in uni.members_by_date.get(d, ())
+                     if (sym, d, h) in uni.returns and tsb_ok.get(sym))
+        pool_by_date[d] = pool
+        ret_by_date[d] = dict((sym, uni.returns[(sym, d, h)]) for sym in pool)
+        xsb_by_date[d] = xs_baseline(uni.returns, uni.members_by_date, d, h)
+
+    counts = firings_by_date(exs)
+    # The draw pool must contain every name-day the real setup actually used, or the
+    # permutation is drawing from a different universe than the thing it is compared to.
+    fired_pairs = set((e.symbol, e.entry_date) for e in exs)
+    covered = all(sym in pool_by_date.get(d, ()) for sym, d in fired_pairs)
+    short_dates = [d for d in counts if counts[d] > len(pool_by_date.get(d, ()))]
+
+    rng = random.Random(PERM_SEED)
+    dates = sorted(counts)
+    stats, tstats = [], []
+    for _ in range(PERMUTATIONS):
+        picks = permuted_firings(counts, pool_by_date, rng)
+        dms = []
+        for d in dates:
+            syms = picks[d]
+            if not syms:
+                continue
+            rb = ret_by_date[d]
+            dms.append(sum(rb[sym] for sym in syms) / len(syms) - xsb_by_date[d])
+        stats.append(sum(dms) / len(dms) if dms else 0.0)
+        tt = t_of_means(dms)
+        tstats.append(0.0 if tt is None else tt)
+
+    ordered = sorted(stats)
+    pmean = sum(ordered) / len(ordered)
+    pvar = sum((x - pmean) ** 2 for x in ordered) / (len(ordered) - 1)
+    atleast = sum(1 for x in stats if x >= headline)
+    tbar = sum(1 for x in tstats if x >= BONFERRONI_T)
+    print("  %d permutations, seed %d, over %d entry dates"
+          % (PERMUTATIONS, PERM_SEED, len(dates)), file=out)
+    print("  every real firing name-day is inside its own date's draw pool: %s"
+          % ("yes" if covered else "NO -- DEFECT"), file=out)
+    print("  dates whose pool is smaller than the real firing count: %d" % len(short_dates),
+          file=out)
+    print("  distribution of xs/date: mean %+.3f%%  sd %.3f%%  p5 %+.3f%%  p50 %+.3f%%"
+          "  p95 %+.3f%%"
+          % (100.0 * pmean, 100.0 * math.sqrt(pvar), 100.0 * percentile(ordered, 5),
+             100.0 * percentile(ordered, 50), 100.0 * percentile(ordered, 95)), file=out)
+    print("  trend_dip xs/date %+.3f%%; permutations reaching or exceeding it: %d of %d"
+          " (%.2f%%)"
+          % (100.0 * headline, atleast, PERMUTATIONS,
+             100.0 * atleast / PERMUTATIONS), file=out)
+    print("  one-sided empirical p = (%d + 1) / (%d + 1) = %.4f"
+          % (atleast, PERMUTATIONS, (atleast + 1.0) / (PERMUTATIONS + 1.0)), file=out)
+    print("  permutations whose own t reaches %.2f: %d of %d (%.2f%%)"
+          % (BONFERRONI_T, tbar, PERMUTATIONS, 100.0 * tbar / PERMUTATIONS), file=out)
+    print("", file=out)
+    print("The permutation differs from the real setup in exactly one respect -- which"
+          " symbols are\nchosen. Same entry dates, same count per date, same eligible pool,"
+          " same forward returns,\nsame cross-sectional baseline, same horizon, same"
+          " date-weighted statistic. Costs cancel\nout of the excess, so nothing here is"
+          " measuring turnover.", file=out)
+    print("Stability, not selection: none of these three checks can change the registered"
+          " setup.", file=out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("phase", choices=["insample", "holdout"])
+    ap.add_argument("phase", choices=["insample", "robust", "holdout"])
     ap.add_argument("--db", default=DB)
     ap.add_argument("--i-am-sure", action="store_true",
                     help="required to spend the reserved holdout")
@@ -477,6 +697,8 @@ def main():
     try:
         if a.phase == "insample":
             run_phase(conn, INSAMPLE, "in-sample")
+        elif a.phase == "robust":
+            run_robust(conn)
         else:
             guard_holdout(a.i_am_sure)
             run_phase(conn, (HOLDOUT_START, date.today()), "HOLDOUT -- now spent")
