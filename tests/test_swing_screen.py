@@ -226,19 +226,37 @@ def test_summarise_reports_both_excesses_and_their_ts():
            sw.Ex("C", date(2021, 5, 1), 60, 0.03, -0.02)]
     s = sw.summarise(exs, 60)
     assert s["n"] == 3 and s["dates"] == 3
-    assert s["ts_excess"] == pytest.approx((0.02 - 0.01 + 0.03) / 3)
-    assert s["xs_excess"] == pytest.approx((0.01 + 0.03 - 0.02) / 3)
+    # one observation per date here, so the two bases must coincide
+    assert s["ts_per_obs"] == pytest.approx((0.02 - 0.01 + 0.03) / 3)
+    assert s["ts_per_date"] == pytest.approx((0.02 - 0.01 + 0.03) / 3)
+    assert s["xs_per_obs"] == pytest.approx((0.01 + 0.03 - 0.02) / 3)
+    assert s["xs_per_date"] == pytest.approx((0.01 + 0.03 - 0.02) / 3)
     assert s["xs_t"] is not None
+
+
+def test_the_two_bases_differ_when_firing_clusters_unevenly():
+    """Three observations on one date and one on another. Per-observation weights the busy
+    date three times; per-date weights it once. A screen that prints one and tests the other
+    can report a positive mean beside a negative t, which is what this guards."""
+    exs = ([sw.Ex("S%d" % k, date(2021, 3, 1), 60, 0.0, 0.09) for k in range(3)]
+           + [sw.Ex("A", date(2021, 4, 1), 60, 0.0, -0.03)])
+    s = sw.summarise(exs, 60)
+    assert s["xs_per_obs"] == pytest.approx((0.09 * 3 - 0.03) / 4)
+    assert s["xs_per_date"] == pytest.approx((0.09 - 0.03) / 2)
+    assert s["xs_per_obs"] != pytest.approx(s["xs_per_date"])
 
 
 def test_summarise_of_nothing_does_not_divide_by_zero():
     s = sw.summarise([], 60)
     assert s["n"] == 0 and s["xs_t"] is None
+    assert s["xs_per_obs"] == 0.0 and s["xs_per_date"] == 0.0
+    assert s["ts_per_obs"] == 0.0 and s["ts_per_date"] == 0.0
 
 
 def test_the_verdict_requires_both_a_positive_excess_and_the_t_bar():
-    """Pre-registered: excess > 0 AND t >= 2.64. Either alone is not a pass, and a pass is
-    separately reported as tradable only if it also clears the turnover hurdle."""
+    """Pre-registered: date-weighted excess > 0 AND t >= 2.64. Either alone is not a pass,
+    and a pass is separately reported as tradable only if it also clears the turnover
+    hurdle."""
     assert sw.verdict(0.01, 3.0, 60) == "PASS"
     assert sw.verdict(-0.01, 3.0, 60) == "fail"        # negative excess
     assert sw.verdict(0.01, 1.0, 60) == "fail"         # under the t bar

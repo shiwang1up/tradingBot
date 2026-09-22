@@ -300,29 +300,47 @@ def hurdle_per_month(horizon, capital=CAPITAL, positions=POSITIONS):
 
 
 def summarise(exs, horizon):
-    """Headline figures for one (setup, horizon) cell."""
+    """Headline figures for one (setup, horizon) cell.
+
+    BOTH weighting bases are reported, per observation and per entry date, because they are
+    different quantities and a gap between them means a few busy dates are carrying the
+    result: setups cluster, and one market-wide dip firing across forty names weighs forty
+    times in the per-observation mean and once in the per-date one. The date-weighted figure
+    is the one `t` tests and the one the pass bar is judged on -- printing one beside the
+    other's t is how a positive mean ends up next to a negative t. Same fix as
+    daily_screen.describe, which carries excess_per_trade and excess_per_date for this
+    reason."""
     n = len(exs)
     if n == 0:
-        return dict(n=0, dates=0, ts_excess=0.0, xs_excess=0.0, ts_t=None, xs_t=None,
-                    win=0.0, horizon=horizon)
-    return dict(n=n, dates=len(set(e.entry_date for e in exs)),
-                ts_excess=sum(e.ts_excess for e in exs) / n,
-                xs_excess=sum(e.xs_excess for e in exs) / n,
+        return dict(n=0, dates=0, xs_per_obs=0.0, xs_per_date=0.0, ts_per_obs=0.0,
+                    ts_per_date=0.0, ts_t=None, xs_t=None, win=0.0, horizon=horizon)
+    xs_dm = date_means(exs, "xs_excess")
+    ts_dm = date_means(exs, "ts_excess")
+    return dict(n=n, dates=len(xs_dm),
+                xs_per_obs=sum(e.xs_excess for e in exs) / n,
+                xs_per_date=sum(xs_dm) / len(xs_dm),
+                ts_per_obs=sum(e.ts_excess for e in exs) / n,
+                ts_per_date=sum(ts_dm) / len(ts_dm),
                 ts_t=t_across_dates(exs, "ts_excess"),
                 xs_t=t_across_dates(exs, "xs_excess"),
                 win=100.0 * sum(1 for e in exs if e.xs_excess > 0) / n,
                 horizon=horizon)
 
 
-def verdict(xs_excess, xs_t, horizon):
+def verdict(xs_per_date, xs_t, horizon):
     """The pre-registered bar: cross-sectional excess > 0 with t >= 2.64.
+
+    Judged on the DATE-weighted excess, because the entry date is the independent unit: one
+    market-wide dip firing a setup across forty names is one piece of evidence, not forty.
+    That is also the quantity `xs_t` tests, so the excess and its t now describe the same
+    number.
 
     Clearing the bar and clearing the COST hurdle are different questions, and collapsing
     them would hide which one we have: a real-but-too-small edge is a different finding from
     no edge at all."""
-    if xs_t is None or xs_excess <= 0 or xs_t < BONFERRONI_T:
+    if xs_t is None or xs_per_date <= 0 or xs_t < BONFERRONI_T:
         return "fail"
-    monthly = xs_excess / (horizon / 21.0)
+    monthly = xs_per_date / (horizon / 21.0)
     return "PASS" if monthly >= hurdle_per_month(horizon) else "PASS but below the cost hurdle"
 
 
@@ -404,9 +422,12 @@ def run_phase(conn, window, label, out=sys.stdout):
     print("  cost hurdle: %s" % ", ".join(
         "%dd %.3f%%/mo" % (h, 100.0 * hurdle_per_month(h)) for h in HORIZONS), file=out)
     print("", file=out)
-    print("  %-11s %5s %8s %7s %10s %8s %10s %8s  %s"
-          % ("setup", "h", "obs", "dates", "xs excess", "t", "ts excess", "t", "verdict"),
-          file=out)
+    # Per-date FIRST, because that is the unit the bar is judged on and the unit t tests;
+    # per-obs beside it so a gap between the two -- a result carried by a few busy dates --
+    # is visible in the table instead of hidden behind one averaged number.
+    print("  %-11s %5s %8s %7s %9s %9s %7s %9s %9s %7s  %s"
+          % ("setup", "h", "obs", "dates", "xs/date", "xs/obs", "t",
+             "ts/date", "ts/obs", "t", "verdict"), file=out)
 
     for name, fires in setups:
         for h in HORIZONS:
@@ -424,16 +445,20 @@ def run_phase(conn, window, label, out=sys.stdout):
                         continue
                     exs.append(Ex(sym, o.entry_date, h, o.ret - tsb, o.ret - xsb))
             s = summarise(exs, h)
-            v = verdict(s["xs_excess"], s["xs_t"], h) if s["n"] else "no observations"
+            v = verdict(s["xs_per_date"], s["xs_t"], h) if s["n"] else "no observations"
             mark = " <-- primary" if h == PRIMARY_HORIZON else ""
-            print("  %-11s %5d %8d %7d %+9.3f%% %8s %+9.3f%% %8s  %s%s"
-                  % (name, h, s["n"], s["dates"], 100.0 * s["xs_excess"],
+            print("  %-11s %5d %8d %7d %+8.3f%% %+8.3f%% %7s %+8.3f%% %+8.3f%% %7s  %s%s"
+                  % (name, h, s["n"], s["dates"],
+                     100.0 * s["xs_per_date"], 100.0 * s["xs_per_obs"],
                      "n/a" if s["xs_t"] is None else "%.2f" % s["xs_t"],
-                     100.0 * s["ts_excess"],
+                     100.0 * s["ts_per_date"], 100.0 * s["ts_per_obs"],
                      "n/a" if s["ts_t"] is None else "%.2f" % s["ts_t"], v, mark), file=out)
     print("", file=out)
-    print("Bar: cross-sectional excess > 0 with t >= %.2f at horizon %d, fixed before the run."
-          % (BONFERRONI_T, PRIMARY_HORIZON), file=out)
+    print("Bar: cross-sectional excess PER DATE > 0 with t >= %.2f at horizon %d, fixed before"
+          " the run." % (BONFERRONI_T, PRIMARY_HORIZON), file=out)
+    print("Both bases are printed: /date weights each entry date once, /obs weights each"
+          " name-day once.\nA large gap between them means a few busy dates carry the result."
+          " t tests the /date column.", file=out)
     print("t is across entry DATES, not observations: setups cluster and forty names firing on"
           " one dip\nis one piece of evidence. Costs cancel out of both excesses, so these"
           " measure selection;\nthe hurdle line above is what selection must beat to pay for"
