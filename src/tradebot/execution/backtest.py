@@ -1,5 +1,9 @@
-"""Simulated broker for backtests. Fills entries at the next bar's open; simulates
-broker-side stop/target exits against each bar's high/low."""
+"""Simulated broker for backtests. Fills entries at the next bar's open (or its close, for daily
+bars); simulates broker-side stop/target exits against each bar's high/low, and closes a position
+whose signal carried a `max_hold_bars` once it has been held that many bars.
+
+The time exit is simulation-only: no live broker holds a timed order, so a daily cadence in paper
+or live would need a runner that closes the position itself. Nothing here does that today."""
 from __future__ import annotations
 
 import logging
@@ -40,16 +44,23 @@ def check_exit(pos: Position, c: Candle) -> tuple[str, float] | None:
 
 class BacktestBroker:
     def __init__(self, capital: float, slippage_pct: float, mis_leverage: float,
-                 entry_buffer_pct: float | None = None, charges: ChargesConfig | None = None):
+                 entry_buffer_pct: float | None = None, charges: ChargesConfig | None = None,
+                 fill_on_close: bool = False):
         """entry_buffer_pct mirrors the live marketable limit: an entry whose next open is beyond
         signal_price * (1 +/- buffer) is left unfilled, exactly as the live order would be.
         None disables the check. charges=None means a free broker (tests); the CLI always passes
-        cfg.charges."""
+        cfg.charges.
+
+        fill_on_close fills a pending entry at the bar's close instead of its open, for daily
+        bars: Groww's daily open is synthetic for much of the history (it carries the previous
+        close forward), and the daily screens all work on closes. Defaults to False, so every
+        intraday path is unchanged."""
         self.cash = float(capital)
         self.slip = slippage_pct / 100.0
         self.lev = mis_leverage
         self.buffer = None if entry_buffer_pct is None else entry_buffer_pct / 100.0
         self._charges_cfg = charges
+        self._fill_on_close = fill_on_close
         self._pending: dict[str, ApprovedOrder] = {}
         self._positions: dict[str, Position] = {}
         self.closed: list[Position] = []
@@ -80,16 +91,20 @@ class BacktestBroker:
         self._pending = {o.signal.symbol: o for o in pending}
         self.closed = []
 
-    def _beyond_buffer(self, sig, open_price: float) -> bool:
+    def _beyond_buffer(self, sig, ref: float) -> bool:
+        """`ref` is the price the entry would fill at, which is the bar's open intraday and its
+        close in daily mode. It must be the same price the fill uses: judging the buffer against
+        the open while filling at the close would admit exactly the runaway entries it rejects."""
         if self.buffer is None:
             return False
         if sig.direction == "LONG":
-            return open_price > sig.entry_price * (1 + self.buffer)
-        return open_price < sig.entry_price * (1 - self.buffer)
+            return ref > sig.entry_price * (1 + self.buffer)
+        return ref < sig.entry_price * (1 - self.buffer)
 
     def on_bar(self, ts: int, candles: dict[str, Candle]) -> list[BrokerEvent]:
-        """Fill every pending entry at this bar's open, then close every open position whose stop or
-        target this bar hits. A close is contained per position: one whose exit price is bad (see
+        """Fill every pending entry at this bar's open (its close when `fill_on_close`), then close
+        every open position whose stop or target this bar hits, and after that any whose hold has
+        run out. A close is contained per position: one whose exit price is bad (see
         `_close`) is logged at error level and left open for the caller to retry, while every other
         fill and close on this bar still happens and is still returned."""
         events: list[BrokerEvent] = []
@@ -100,23 +115,33 @@ class BacktestBroker:
                 events.append(Unfilled(order, ts, "no_candle"))
                 continue
             sig = order.signal
-            if self._beyond_buffer(sig, c.open):
+            ref = c.close if self._fill_on_close else c.open  # one reference price for both checks below
+            if self._beyond_buffer(sig, ref):
                 events.append(Unfilled(order, ts, "beyond_buffer"))
                 continue
-            price = self._entry_price(sig.direction, c.open)
+            price = self._entry_price(sig.direction, ref)
             pos = Position(sym, sig.product, sig.direction, order.quantity, price, sig.stop_price,
-                           sig.target_price, ts, order.client_id, sig.strategy)
+                           sig.target_price, ts, order.client_id, sig.strategy,
+                           max_hold_bars=sig.max_hold_bars)
             self._positions[sym] = pos
             events.append(Filled(pos, order, ts))
         for sym, pos in list(self._positions.items()):
             c = candles.get(sym)
             if c is None:
                 continue
+            if pos.opened_ts != ts:
+                # The entry bar does not count: max_hold_bars is bars held AFTER the fill. Bars with
+                # no candle for this symbol are skipped here, so a data hole never ages a position.
+                pos.bars_held += 1
             hit = check_exit(pos, c)
             if hit is None:
-                continue
-            reason, level = hit
-            price = self._exit_price(pos.direction, level) if reason == "STOP" else level
+                # After the stop/target check, so a bar that does both is a stop, not a time exit.
+                if pos.max_hold_bars is None or pos.bars_held < pos.max_hold_bars:
+                    continue
+                reason, level = "TIME_EXIT", c.close
+            else:
+                reason, level = hit
+            price = self._exit_price(pos.direction, level) if reason in ("STOP", "TIME_EXIT") else level
             try:
                 self._close(pos, ts, price, reason)
             except ValueError as e:

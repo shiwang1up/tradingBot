@@ -260,7 +260,10 @@ def backtest(cfg: Config, start: datetime, end: datetime, strategy_name: str, ru
     log_path = setup_logging(cfg.paths.logs, run_id=run_id)
     strategy = build_strategy(strategy_name, strategy_params(cfg.strategy, strategy_name))
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
-                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges,
+                            # daily bars fill at the close: Groww's daily open is synthetic for much
+                            # of the history, and the screens this is compared against use closes
+                            fill_on_close=cfg.execution.interval_minutes >= 1440)
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
     clock = SessionClock(cfg.session, interval)
     ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
@@ -395,7 +398,10 @@ def paper(cfg: Config, strategy_name: str, run_id: Optional[str], ai_filter: Opt
                            index_symbol=cfg.data.index_symbol if index_live else "")
     strategy = build_strategy(strategy_name, params)
     broker = BacktestBroker(cfg.capital, cfg.execution.slippage_pct, cfg.risk.mis_leverage,
-                            cfg.execution.entry_buffer_pct, charges=cfg.charges)
+                            cfg.execution.entry_buffer_pct, charges=cfg.charges,
+                            # daily bars fill at the close: Groww's daily open is synthetic for much
+                            # of the history, and the screens this is compared against use closes
+                            fill_on_close=cfg.execution.interval_minutes >= 1440)
     ai_cfg = dc_replace(cfg.ai, filter=ai_filter) if ai_filter else cfg.ai
     ai = build_filter(ai_cfg, cfg.secrets.anthropic_api_key, repo=repo, clock=clock)
     engine = PaperEngine(dc_replace(cfg, ai=ai_cfg), repo, source, [strategy], broker, ai, clock, lots, run_id,
