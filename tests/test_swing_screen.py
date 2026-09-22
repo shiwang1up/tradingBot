@@ -146,3 +146,40 @@ def test_observations_carry_symbol_date_horizon_and_return():
     assert o.symbol == "AAA" and o.horizon == 20
     assert o.entry_date in [b.date for b in bars]
     assert isinstance(o.ret, float)
+
+
+def test_time_series_baseline_is_the_mean_hold_in_that_symbol():
+    """Every eligible entry in the window, held h days. A steady 1%-a-bar riser held 2 bars
+    returns 2.01% from any entry, so the mean is that."""
+    closes = [100.0 * (1.01 ** i) for i in range(230)]
+    bars = _bars(closes)
+    b = sw.ts_baseline(bars, (bars[200].date, bars[229].date), 2, set())
+    assert b == pytest.approx(1.01 ** 2 - 1.0)
+
+
+def test_time_series_baseline_skips_masked_windows():
+    closes = [100.0 * (1.01 ** i) for i in range(230)]
+    bars = _bars(closes)
+    clean = sw.ts_baseline(bars, (bars[200].date, bars[229].date), 2, set())
+    masked = sw.ts_baseline(bars, (bars[200].date, bars[229].date), 2, {bars[210].date})
+    assert clean == pytest.approx(masked)     # same value, but computed over fewer holds
+    assert sw.ts_baseline(bars, (bars[200].date, bars[202].date), 2, {bars[201].date}) is None
+
+
+def test_cross_sectional_baseline_is_the_mean_over_that_days_members():
+    """Two members on the date, one returning 10% and one 0%, gives 5%."""
+    rets = {("AAA", date(2021, 3, 1), 20): 0.10, ("BBB", date(2021, 3, 1), 20): 0.0}
+    members = {date(2021, 3, 1): ("AAA", "BBB")}
+    assert sw.xs_baseline(rets, members, date(2021, 3, 1), 20) == pytest.approx(0.05)
+
+
+def test_cross_sectional_baseline_covers_only_that_days_members():
+    """A symbol not in the index that day must not enter the comparison, or the baseline is
+    computed over a universe you could not have chosen from."""
+    rets = {("AAA", date(2021, 3, 1), 20): 0.10, ("ZZZ", date(2021, 3, 1), 20): 1.00}
+    members = {date(2021, 3, 1): ("AAA",)}
+    assert sw.xs_baseline(rets, members, date(2021, 3, 1), 20) == pytest.approx(0.10)
+
+
+def test_cross_sectional_baseline_is_none_without_members():
+    assert sw.xs_baseline({}, {}, date(2021, 3, 1), 20) is None

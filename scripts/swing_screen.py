@@ -229,6 +229,37 @@ def observations(symbol, bars, ind, masked, members_by_date, window, setup, hori
     return out
 
 
+def ts_baseline(bars, window, h, masked):
+    """Mean h-day close-to-close return of this symbol, entered on every eligible date in the
+    window. Answers: is this a good MOMENT to buy this stock?
+
+    Indian large caps rose over this period, so any rule that buys shows a positive return
+    from drift alone; only the excess over this is evidence about timing."""
+    lo, hi = window
+    rs = []
+    for i in range(len(bars)):
+        if not (lo <= bars[i].date <= hi):
+            continue
+        j = i + h
+        if j < len(bars) and bars[j].date <= hi and hold_is_clean(bars, i, h, masked):
+            r = forward_return(bars, i, h)
+            if r is not None:
+                rs.append(r)
+    return (sum(rs) / len(rs)) if rs else None
+
+
+def xs_baseline(returns_by_key, members_by_date, d, h):
+    """Equal-weight forward return of every index member on `d` at horizon `h`. Answers: is
+    this a better STOCK to buy today than the others?
+
+    This is the decision-relevant comparison when choosing a few names on a morning, and it
+    removes market-wide moves on that date automatically -- a setup that beats the
+    time-series baseline but not this one is firing on days everything rose."""
+    rs = [returns_by_key[(s, d, h)] for s in members_by_date.get(d, ())
+          if (s, d, h) in returns_by_key]
+    return (sum(rs) / len(rs)) if rs else None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
