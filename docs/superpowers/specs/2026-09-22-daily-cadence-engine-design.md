@@ -55,8 +55,15 @@ At `interval_minutes >= 1440`:
 
 - one bar per trading day, stamped 00:00 IST, matching how daily candles are already stored
 - `no_new_entries_after` and `square_off` do not apply and are not consulted
-- `is_square_off_bar` is always False
+- `is_square_off_bar` and `square_off_due` are always False
 - `in_session` is true for any bar whose date is a trading day
+- `entries_allowed` is true for any bar whose date is a trading day
+
+**The last two are not cosmetic and an earlier draft missed them.** Daily bars are stamped 00:00
+IST, which is BEFORE `session.open` at 09:15. Every window check in this class is of the form
+`open_ts(d) <= ts < something`, so on a daily bar all of them are false: `in_session` would reject
+every bar and `entries_allowed` would permit no entry ever. Relaxing only the constructor's
+validation would produce an engine that runs, consumes every bar, and silently never trades.
 
 Below 1440 nothing changes at all. The 60 and 240 minute refusals stay as they are: they are
 genuine misconfigurations for an intraday session, not cases this spec needs.
@@ -92,9 +99,33 @@ slippage in the pessimistic direction and it is the honest construction availabl
 
 ## 6. Costs
 
-Daily mode uses the CNC delivery schedule, not the MIS one: STT on both sides, the DP charge on
-each sell, no intraday brokerage discount. `execution/charges.py` already carries both; this is a
-matter of selecting by product, which the position already records.
+Daily mode uses the CNC delivery schedule, not the MIS one. **`execution/charges.py` does NOT
+already carry it** — an earlier draft of this spec said it did, and that was wrong. The module's
+own docstring says "charges on one closed INTRADAY trade" and it contains no mention of CNC or
+delivery. The delivery schedule exists only in `scripts/daily_screen.py`, as script constants.
+
+The three differences, and why the error would have mattered:
+
+| | intraday (`charges.py`) | delivery (`daily_screen.py`) |
+|---|---|---|
+| STT | 0.025%, sell side only | **0.1%, BOTH sides** |
+| stamp duty | 0.003% buy | 0.015% buy |
+| DP charge | none | **Rs 15.34 per sell** |
+
+brokerage (0.1%, floor 5, cap 20), exchange (0.00297%), SEBI (0.0001%) and GST (18%) are the same.
+
+Charging a daily CNC backtest at intraday rates understates a round trip by about 0.31% on a
+12,500 position. At 60-day holds that is roughly 0.11%/mo against the 0.216%/mo edge `trend_dip`
+currently shows — **half the edge, given away by a wrong default.** A backtest that flattering
+would have looked tradable when it is not.
+
+So this task must ADD a delivery schedule: new fields on `ChargesConfig` with the values above as
+defaults, and `position_charges` selecting by the position's product. The intraday path must be
+untouched and its existing tests must still pass unchanged.
+
+The script constants and the config defaults will then state the same rates in two places. They
+are not unified here because doing so would change `daily_screen.py`, whose committed results
+depend on those exact numbers. A comment in each points at the other.
 
 Slippage stays configurable and defaults to the existing `slippage_pct`. Per-name liquidity tiers
 from `data/liquidity.py` are NOT wired here — that matters for a 200-name universe and belongs
