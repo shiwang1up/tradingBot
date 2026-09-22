@@ -218,3 +218,28 @@ def test_the_hurdle_is_per_month_not_per_trade():
     """A 60-day hold turns over about 4.2 times a year, so its annual cost spread over
     twelve months is much smaller than one round trip."""
     assert sw.hurdle_per_month(60) < sw.round_trip_cost(sw.CAPITAL / sw.POSITIONS)
+
+
+def test_summarise_reports_both_excesses_and_their_ts():
+    exs = [sw.Ex("A", date(2021, 3, 1), 60, 0.02, 0.01),
+           sw.Ex("B", date(2021, 4, 1), 60, -0.01, 0.03),
+           sw.Ex("C", date(2021, 5, 1), 60, 0.03, -0.02)]
+    s = sw.summarise(exs, 60)
+    assert s["n"] == 3 and s["dates"] == 3
+    assert s["ts_excess"] == pytest.approx((0.02 - 0.01 + 0.03) / 3)
+    assert s["xs_excess"] == pytest.approx((0.01 + 0.03 - 0.02) / 3)
+    assert s["xs_t"] is not None
+
+
+def test_summarise_of_nothing_does_not_divide_by_zero():
+    s = sw.summarise([], 60)
+    assert s["n"] == 0 and s["xs_t"] is None
+
+
+def test_the_verdict_requires_both_a_positive_excess_and_the_t_bar():
+    """Pre-registered: excess > 0 AND t >= 2.64. Either alone is not a pass, and a pass is
+    separately reported as tradable only if it also clears the turnover hurdle."""
+    assert sw.verdict(0.01, 3.0, 60) == "PASS"
+    assert sw.verdict(-0.01, 3.0, 60) == "fail"        # negative excess
+    assert sw.verdict(0.01, 1.0, 60) == "fail"         # under the t bar
+    assert sw.verdict(0.0001, 3.0, 60) == "PASS but below the cost hurdle"

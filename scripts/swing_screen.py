@@ -298,6 +298,33 @@ def hurdle_per_month(horizon, capital=CAPITAL, positions=POSITIONS):
     return rt * rotations_per_year / 12.0
 
 
+def summarise(exs, horizon):
+    """Headline figures for one (setup, horizon) cell."""
+    n = len(exs)
+    if n == 0:
+        return dict(n=0, dates=0, ts_excess=0.0, xs_excess=0.0, ts_t=None, xs_t=None,
+                    win=0.0, horizon=horizon)
+    return dict(n=n, dates=len(set(e.entry_date for e in exs)),
+                ts_excess=sum(e.ts_excess for e in exs) / n,
+                xs_excess=sum(e.xs_excess for e in exs) / n,
+                ts_t=t_across_dates(exs, "ts_excess"),
+                xs_t=t_across_dates(exs, "xs_excess"),
+                win=100.0 * sum(1 for e in exs if e.xs_excess > 0) / n,
+                horizon=horizon)
+
+
+def verdict(xs_excess, xs_t, horizon):
+    """The pre-registered bar: cross-sectional excess > 0 with t >= 2.64.
+
+    Clearing the bar and clearing the COST hurdle are different questions, and collapsing
+    them would hide which one we have: a real-but-too-small edge is a different finding from
+    no edge at all."""
+    if xs_t is None or xs_excess <= 0 or xs_t < BONFERRONI_T:
+        return "fail"
+    monthly = xs_excess / (horizon / 21.0)
+    return "PASS" if monthly >= hurdle_per_month(horizon) else "PASS but below the cost hurdle"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
