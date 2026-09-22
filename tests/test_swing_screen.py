@@ -243,3 +243,14 @@ def test_the_verdict_requires_both_a_positive_excess_and_the_t_bar():
     assert sw.verdict(-0.01, 3.0, 60) == "fail"        # negative excess
     assert sw.verdict(0.01, 1.0, 60) == "fail"         # under the t bar
     assert sw.verdict(0.0001, 3.0, 60) == "PASS but below the cost hurdle"
+
+
+def test_the_holdout_phase_refuses_without_the_explicit_flag():
+    """2024 onward is reserved. It must not be spendable by typing the wrong word."""
+    with pytest.raises(SystemExit) as e:
+        sw.guard_holdout(confirmed=False)
+    assert "reserved" in str(e.value).lower()
+
+
+def test_the_holdout_guard_allows_an_explicit_confirmation():
+    sw.guard_holdout(confirmed=True)        # must not raise

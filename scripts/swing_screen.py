@@ -33,6 +33,7 @@ This reads the database read-only and writes nothing.
 import argparse
 import importlib.util
 import random
+import sqlite3
 import sys
 from collections import defaultdict, namedtuple
 from datetime import date
@@ -325,13 +326,137 @@ def verdict(xs_excess, xs_t, horizon):
     return "PASS" if monthly >= hurdle_per_month(horizon) else "PASS but below the cost hurdle"
 
 
+def guard_holdout(confirmed):
+    """2024-01-01 onward is reserved and unspent. Looking at it before a setup passes
+    in-sample turns the only honest out-of-sample test this project has into another
+    in-sample one, and it cannot be un-looked-at."""
+    if not confirmed:
+        sys.exit("the holdout from %s is RESERVED and unspent. Pass --i-am-sure to spend it, "
+                 "and only after a setup has passed in-sample." % HOLDOUT_START)
+
+
+def run_phase(conn, window, label, out=sys.stdout):
+    from tradebot.data.membership import MembershipError, constituents_on, load_timeline
+    timeline = load_timeline("index_membership.yaml")
+
+    all_symbols = sorted(set(timeline.anchor) |
+                         set(s for e in timeline.events for s in (e.include + e.exclude)) |
+                         set(c for _, c in timeline.aliases))
+    series = load_series(conn, all_symbols)
+    # gap_vol needs volume and daily_screen.Bar does not carry it. Join on DATE, not on
+    # position: zipping two orderings assumes they agree, and a single missing bar would
+    # then shift every volume by one day without any error.
+    bars_by_symbol = {}
+    for sym, bs in series.items():
+        vol_by_date = {}
+        for ts, v in conn.execute(
+                "SELECT ts, v FROM candles WHERE symbol=? AND interval=1440", (sym,)):
+            vol_by_date[date.fromtimestamp(ts + daily_screen.IST_OFFSET)] = v or 0
+        bars_by_symbol[sym] = [Bar(b.date, b.open, b.high, b.low, b.close,
+                                   vol_by_date.get(b.date, 0)) for b in bs]
+
+    masked = {s: gap_mask(series[s], mask_days=0) for s in series}
+    inds = {s: Indicators(bars_by_symbol[s]) for s in bars_by_symbol}
+
+    lo, hi = window
+    all_dates = sorted(set(b.date for bs in bars_by_symbol.values() for b in bs
+                           if lo <= b.date <= hi))
+    members_by_date = {}
+    for d in all_dates:
+        try:
+            members_by_date[d] = constituents_on(timeline, d)
+        except MembershipError:
+            # Only "outside the timeline's coverage" is an expected miss. Catching every
+            # exception here would swallow a broken count invariant, which is the one error
+            # this whole dataset exists to surface.
+            members_by_date[d] = ()
+
+    # forward returns for every member name-day, so the cross-sectional baseline can be built
+    returns_by_key = {}
+    for sym, bars in bars_by_symbol.items():
+        idx = {b.date: i for i, b in enumerate(bars)}
+        for d in all_dates:
+            i = idx.get(d)
+            if i is None or not is_member(members_by_date, sym, d):
+                continue
+            for h in HORIZONS:
+                if hold_is_clean(bars, i, h, masked.get(sym, set())):
+                    r = forward_return(bars, i, h)
+                    if r is not None:
+                        returns_by_key[(sym, d, h)] = r
+
+    rates = []
+    for name, fires in SETUPS:
+        fired = total = 0
+        for sym, bars in bars_by_symbol.items():
+            ind = inds[sym]
+            for i, b in enumerate(bars):
+                if lo <= b.date <= hi and is_member(members_by_date, sym, b.date):
+                    total += 1
+                    fired += bool(fires(ind, i))
+        rates.append(fired / float(total) if total else 0.0)
+    mean_rate = sum(rates) / len(rates) if rates else 0.01
+    setups = list(SETUPS) + [("random", make_random(mean_rate))]
+
+    print("swing setup screen -- %s, %s..%s" % (label, lo, hi), file=out)
+    print("  %d symbols, %d dates, mean firing rate %.2f%%"
+          % (len(bars_by_symbol), len(all_dates), 100.0 * mean_rate), file=out)
+    print("  cost hurdle: %s" % ", ".join(
+        "%dd %.3f%%/mo" % (h, 100.0 * hurdle_per_month(h)) for h in HORIZONS), file=out)
+    print("", file=out)
+    print("  %-11s %5s %8s %7s %10s %8s %10s %8s  %s"
+          % ("setup", "h", "obs", "dates", "xs excess", "t", "ts excess", "t", "verdict"),
+          file=out)
+
+    for name, fires in setups:
+        for h in HORIZONS:
+            exs = []
+            for sym, bars in bars_by_symbol.items():
+                ind = inds[sym]
+                obs = observations(sym, bars, ind, masked.get(sym, set()), members_by_date,
+                                   window, (name, fires), (h,))
+                if not obs:
+                    continue
+                tsb = ts_baseline(bars, window, h, masked.get(sym, set()))
+                for o in obs:
+                    xsb = xs_baseline(returns_by_key, members_by_date, o.entry_date, h)
+                    if tsb is None or xsb is None:
+                        continue
+                    exs.append(Ex(sym, o.entry_date, h, o.ret - tsb, o.ret - xsb))
+            s = summarise(exs, h)
+            v = verdict(s["xs_excess"], s["xs_t"], h) if s["n"] else "no observations"
+            mark = " <-- primary" if h == PRIMARY_HORIZON else ""
+            print("  %-11s %5d %8d %7d %+9.3f%% %8s %+9.3f%% %8s  %s%s"
+                  % (name, h, s["n"], s["dates"], 100.0 * s["xs_excess"],
+                     "n/a" if s["xs_t"] is None else "%.2f" % s["xs_t"],
+                     100.0 * s["ts_excess"],
+                     "n/a" if s["ts_t"] is None else "%.2f" % s["ts_t"], v, mark), file=out)
+    print("", file=out)
+    print("Bar: cross-sectional excess > 0 with t >= %.2f at horizon %d, fixed before the run."
+          % (BONFERRONI_T, PRIMARY_HORIZON), file=out)
+    print("t is across entry DATES, not observations: setups cluster and forty names firing on"
+          " one dip\nis one piece of evidence. Costs cancel out of both excesses, so these"
+          " measure selection;\nthe hurdle line above is what selection must beat to pay for"
+          " itself.", file=out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("phase", choices=["insample", "holdout"])
     ap.add_argument("--db", default=DB)
+    ap.add_argument("--i-am-sure", action="store_true",
+                    help="required to spend the reserved holdout")
     a = ap.parse_args()
-    sys.exit("phase %s is not implemented yet" % a.phase)
+    conn = sqlite3.connect("file:%s?mode=ro" % a.db, uri=True)
+    try:
+        if a.phase == "insample":
+            run_phase(conn, INSAMPLE, "in-sample")
+        else:
+            guard_holdout(a.i_am_sure)
+            run_phase(conn, (HOLDOUT_START, date.today()), "HOLDOUT -- now spent")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
