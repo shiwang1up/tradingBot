@@ -71,14 +71,37 @@ made the result interpretable. Any setup that cannot beat `random` here is noise
 Adding a setup after seeing results invalidates the correction in section 6. If one is added, the
 whole grid is rerun and the bar moves.
 
-## 4. Horizons
+## 4. Horizons, and why they are long
 
-2, 5, 10 and 20 trading days, exit at the close of the horizon's last day. No stops, no targets,
-no discretion. This measures whether the SETUP predicts, uncorrupted by exit design — the ORB
-diagnostic showed how badly exit questions can be confused with entry questions.
+**20, 60 and 120 trading days. The primary cell is 60.** Exit at the close of the horizon's last
+day. No stops, no targets, no discretion — this measures whether the SETUP predicts, uncorrupted
+by exit design, since the ORB diagnostic showed how easily an exit question gets mistaken for an
+entry question.
 
-**The primary cell is horizon 10** (about two calendar weeks), fixed here in advance. The other
-three are descriptive and carry no pass bar.
+This spec originally set horizons at 2/5/10/20 with 10 as primary, matching the "2-3 or even
+15-20 days" the idea was framed around. **That was arithmetically unwinnable and the correction
+matters more than any setup definition here.** Costs scale with turnover, so the holding period
+sets the hurdle before any signal is considered. On 1 lakh across eight positions, with CNC
+delivery and 5 bps a side:
+
+| hold | cost/yr | excess/month needed to break even |
+|---|---|---|
+| 5d | 34.3% | 2.860% |
+| 10d | 17.2% | 1.430% |
+| 20d | 8.6% | 0.715% |
+| 40d | 4.3% | 0.358% |
+| **60d** | **2.9%** | **0.238%** |
+| 120d | 1.4% | 0.119% |
+
+Cross-sectional momentum on this universe measured +0.187%/mo. A genuine published anomaly runs
+0.3-0.8%/mo. **A 10-day hold demands roughly double the best documented effects**, so no signal
+can clear it and testing there answers nothing. A 60-day hold demands 0.238%/mo, which is inside
+the range real effects occupy.
+
+The implication is uncomfortable and worth stating: the shorter the intended hold, the larger the
+edge must be, and short-horizon edges are exactly the ones most competed away. Every result this
+project has produced is consistent with that. 20 days is kept as the shortest cell precisely
+because it is near the edge of viability and its failure would be informative.
 
 ## 5. Two baselines, because they answer different questions
 
@@ -102,7 +125,11 @@ still worse than random. Both are printed; the pass bar is on excess.
 
 ## 6. The pass bar, fixed here
 
-**Excess over the CROSS-SECTIONAL baseline > 0, with t >= 2.64, at horizon 10.**
+**Excess over the CROSS-SECTIONAL baseline > 0, with t >= 2.64, at horizon 60.**
+
+The excess must also exceed the 0.238%/mo break-even hurdle from section 4 to be tradable, but
+that is a SECOND question reported separately: the bar above is about whether the signal exists,
+and a real-but-too-small edge is a different finding from no edge at all.
 
 t is computed **across entry dates, not across observations**. Setups cluster — one market-wide
 dip fires `pullback` on forty symbols the same morning — so observations are not independent and
