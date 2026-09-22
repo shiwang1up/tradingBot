@@ -183,3 +183,38 @@ def test_cross_sectional_baseline_covers_only_that_days_members():
 
 def test_cross_sectional_baseline_is_none_without_members():
     assert sw.xs_baseline({}, {}, date(2021, 3, 1), 20) is None
+
+
+def test_t_is_computed_across_dates_not_observations():
+    """Forty names firing on one dip is ONE observation, not forty. Counting them
+    separately inflates t by about the square root of the cluster size, which is how the
+    last screen produced a positive mean beside a negative t."""
+    one_day = [sw.Ex("S%d" % k, date(2021, 3, 1), 60, 0.05, 0.05) for k in range(40)]
+    two_more = [sw.Ex("A", date(2021, 4, 1), 60, -0.05, -0.05),
+                sw.Ex("A", date(2021, 5, 1), 60, -0.04, -0.04)]
+    t = sw.t_across_dates(one_day + two_more)
+    assert t is not None and t < 1.0, "clustered day must not dominate"
+    assert sw.t_across_dates(one_day) is None        # a single date has no variance
+
+
+def test_date_means_average_within_a_date_first():
+    exs = [sw.Ex("A", date(2021, 3, 1), 60, 0.10, 0.10),
+           sw.Ex("B", date(2021, 3, 1), 60, 0.00, 0.00),
+           sw.Ex("C", date(2021, 4, 1), 60, 0.04, 0.04)]
+    assert sw.date_means(exs) == pytest.approx([0.05, 0.04])
+
+
+def test_the_hurdle_scales_with_turnover():
+    """Cost per year is the round trip times the rotations per year, so a longer hold is a
+    lower bar. This is the single biggest lever in the design."""
+    h20 = sw.hurdle_per_month(20)
+    h60 = sw.hurdle_per_month(60)
+    h120 = sw.hurdle_per_month(120)
+    assert h20 > h60 > h120
+    assert h60 == pytest.approx(0.00238, abs=2e-4)
+
+
+def test_the_hurdle_is_per_month_not_per_trade():
+    """A 60-day hold turns over about 4.2 times a year, so its annual cost spread over
+    twelve months is much smaller than one round trip."""
+    assert sw.hurdle_per_month(60) < sw.round_trip_cost(sw.CAPITAL / sw.POSITIONS)

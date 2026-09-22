@@ -260,6 +260,44 @@ def xs_baseline(returns_by_key, members_by_date, d, h):
     return (sum(rs) / len(rs)) if rs else None
 
 
+Ex = namedtuple("Ex", "symbol entry_date horizon ts_excess xs_excess")
+
+
+def date_means(exs, attr="xs_excess"):
+    """Per-entry-date means, sorted for determinism. Observations sharing a date are averaged
+    into one before any statistic sees them: setups cluster, and one market-wide dip firing a
+    setup across forty names is one piece of evidence, not forty."""
+    by_date = defaultdict(list)
+    for e in exs:
+        by_date[e.entry_date].append(getattr(e, attr))
+    return [sum(by_date[d]) / len(by_date[d]) for d in sorted(by_date)]
+
+
+def t_across_dates(exs, attr="xs_excess"):
+    """t of the mean of `date_means`. None for fewer than two dates or zero variance."""
+    import math
+    means = date_means(exs, attr)
+    n = len(means)
+    if n < 2:
+        return None
+    mean = sum(means) / n
+    var = sum((m - mean) ** 2 for m in means) / (n - 1)
+    if var <= 0:
+        return None
+    return mean / math.sqrt(var / n)
+
+
+def hurdle_per_month(horizon, capital=CAPITAL, positions=POSITIONS):
+    """Monthly excess a system must clear just to pay for its own turnover.
+
+    Cost scales with how often you trade, so the holding period fixes this before any signal
+    is considered: 20 days needs 0.715%/mo, 60 needs 0.238%, 120 needs 0.119%. Published
+    anomalies run 0.3-0.8%/mo, which is why the primary horizon is 60 and not 10."""
+    rt = round_trip_cost(capital / float(positions))
+    rotations_per_year = 252.0 / float(horizon)
+    return rt * rotations_per_year / 12.0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
