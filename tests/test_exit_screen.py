@@ -235,3 +235,66 @@ def test_returns_are_net_of_costs():
     cost = ex.round_trip_cost()
     assert cost > 0.0, "the fixture proves nothing if the cost model itself charges nothing"
     assert hold.ret == pytest.approx(raw_ratio - cost)
+
+
+def test_paired_diffs_averages_within_a_date_before_differencing():
+    """paired_diffs must average several observations on the same entry date into one number
+    BEFORE differencing against the incumbent -- that is the property the date-clustered t
+    depends on: one busy date is one piece of evidence, not several.
+
+    paired_diffs() internally asserts every registered challenger cell reports the same entry
+    dates as hold60 (that is what observations()'s drop is supposed to guarantee), so Obs are
+    supplied here for all six cells across two entry dates. Only hold60 and stop2atr carry
+    values that matter to this test; the other four challengers are given hold60's own values so
+    their diff is trivially zero and they exist only to satisfy that internal invariant.
+    """
+    d1, d2 = date(2020, 1, 6), date(2020, 1, 7)
+    obs = []
+    # hold60: two observations on d1 (must collapse to one mean of 0.03) and one on d2 (0.10).
+    obs += [ex.Obs("AAA", d1, "hold60", 0.02), ex.Obs("BBB", d1, "hold60", 0.04),
+            ex.Obs("AAA", d2, "hold60", 0.10)]
+    # stop2atr: two observations on d1 (mean 0.06) and one on d2 (0.20).
+    obs += [ex.Obs("AAA", d1, "stop2atr", 0.05), ex.Obs("BBB", d1, "stop2atr", 0.07),
+            ex.Obs("AAA", d2, "stop2atr", 0.20)]
+    # The other four challengers mirror hold60 exactly, on the same two dates, so their diff is
+    # zero and they contribute nothing but a matching date set.
+    for cell in ("stop3atr", "stop4atr", "trail3atr", "target2r_stop2atr"):
+        obs += [ex.Obs("AAA", d1, cell, 0.02), ex.Obs("BBB", d1, cell, 0.04),
+                ex.Obs("AAA", d2, cell, 0.10)]
+
+    out = ex.paired_diffs(obs)
+
+    assert out["stop2atr"] == pytest.approx([0.03, 0.10]), (
+        "d1: challenger mean 0.06 - incumbent mean 0.03 = 0.03; "
+        "d2: 0.20 - 0.10 = 0.10; sorted date order, d1 before d2")
+    for cell in ("stop3atr", "stop4atr", "trail3atr", "target2r_stop2atr"):
+        assert out[cell] == pytest.approx([0.0, 0.0])
+
+
+def test_a_challenger_needs_both_a_positive_mean_and_the_bonferroni_t():
+    assert ex.verdict(mean_diff=0.01, t=3.0) == "PASS"
+    assert ex.verdict(mean_diff=0.01, t=2.0) == "fail"       # t below 2.58
+    assert ex.verdict(mean_diff=-0.01, t=3.0) == "fail"      # beats on t, loses on sign
+    assert ex.verdict(mean_diff=0.01, t=2.58) == "PASS"      # the boundary is inclusive
+
+
+def test_a_missing_t_is_a_fail_not_a_crash():
+    """t_of_means returns None for fewer than two dates or zero variance. A cell that cannot be
+    judged has not cleared the bar."""
+    assert ex.verdict(mean_diff=0.01, t=None) == "fail"
+
+
+def test_the_incumbent_is_not_judged_against_itself():
+    """hold60's paired difference with itself is identically zero; printing 'fail' beside it would
+    read as evidence against the design that actually passed the entry screen."""
+    assert ex.verdict_for_cell("hold60", mean_diff=0.0, t=0.0) == "incumbent"
+
+
+def test_the_holdout_guard_refuses_without_the_flag():
+    with pytest.raises(SystemExit) as e:
+        ex.guard_holdout(False)
+    assert "RESERVED" in str(e.value)
+
+
+def test_the_holdout_guard_allows_with_the_flag():
+    ex.guard_holdout(True)          # must not raise

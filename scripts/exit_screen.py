@@ -23,7 +23,10 @@ cancels out of a paired comparison, and it is not fixed here.
 
 This reads the database read-only and writes nothing.
 """
+import argparse
 import importlib.util
+import sqlite3
+import sys
 from collections import namedtuple
 from datetime import date
 from pathlib import Path
@@ -223,3 +226,100 @@ def paired_diffs(obs):
         challenger_means = date_means(challenger, "ret")
         out[cell] = [c - h for c, h in zip(challenger_means, incumbent_means)]
     return out
+
+
+def verdict(mean_diff, t):
+    """A challenger beats the incumbent only on BOTH counts. The bar is 2.58, Bonferroni for five
+    challengers at alpha 0.05, and it is not to be relaxed after the numbers are seen.
+
+    `t` is None whenever `t_of_means` cannot compute one -- fewer than two entry dates, or zero
+    variance across them. That cell has not cleared the bar either; it has not been measured well
+    enough to say, which is a "fail" for the purpose of deciding what to trade, not a crash.
+    """
+    if t is None:
+        return "fail"
+    return "PASS" if (mean_diff > 0 and t >= BONFERRONI_T) else "fail"
+
+
+def verdict_for_cell(cell, mean_diff, t):
+    """hold60's paired difference with itself is identically zero by construction. Running it
+    through `verdict` would print 'fail' beside the design that actually passed the entry
+    screen, which reads as evidence against it. Label the incumbent instead of judging it."""
+    return "incumbent" if cell == INCUMBENT else verdict(mean_diff, t)
+
+
+def guard_holdout(confirmed):
+    """2024-01-01 onward is reserved and unspent. Looking at it before a cell passes in-sample
+    turns the only honest out-of-sample test this project has into another in-sample one, and it
+    cannot be un-looked-at."""
+    if not confirmed:
+        sys.exit("the holdout from %s is RESERVED and unspent. Pass --i-am-sure to spend it, "
+                 "and only after a cell has passed in-sample." % HOLDOUT_START)
+
+
+def run_phase(conn, window, label, out=sys.stdout):
+    """One row per cell: observations, entry dates, mean net return per trade, mean paired
+    difference per date against hold60, its t, and the verdict. hold60 itself is printed with its
+    own trade-level figures but no self-comparison -- see verdict_for_cell."""
+    uni = load_universe(conn, window)
+    lo, hi = window
+    obs = observations(uni, window)
+    diffs = paired_diffs(obs)
+
+    print("exit screen -- %s, %s..%s" % (label, lo, hi), file=out)
+    print("  entry: trend_dip, fixed and not varied here -- only the exit changes", file=out)
+    print("", file=out)
+    print("  %-19s %8s %7s %10s %10s %7s  %s"
+          % ("cell", "obs", "dates", "ret/trade", "diff/date", "t", "verdict"), file=out)
+
+    for cell in EXITS:
+        cell_obs = [o for o in obs if o.cell == cell]
+        n = len(cell_obs)
+        dates = len(set(o.entry_date for o in cell_obs))
+        ret_per_trade = (sum(o.ret for o in cell_obs) / n) if n else 0.0
+        if cell == INCUMBENT:
+            mean_diff, t = 0.0, None
+        else:
+            cell_diffs = diffs.get(cell, [])
+            mean_diff = (sum(cell_diffs) / len(cell_diffs)) if cell_diffs else 0.0
+            t = t_of_means(cell_diffs)
+        v = verdict_for_cell(cell, mean_diff, t)
+        diff_col = "n/a" if cell == INCUMBENT else "%+9.3f%%" % (100.0 * mean_diff)
+        t_col = "n/a" if t is None else "%.2f" % t
+        mark = "  <-- incumbent" if cell == INCUMBENT else ""
+        print("  %-19s %8d %7d %+9.3f%% %10s %7s  %s%s"
+              % (cell, n, dates, 100.0 * ret_per_trade, diff_col, t_col, v, mark), file=out)
+
+    print("", file=out)
+    print("Bar (fixed in advance, not relaxed after the numbers are seen): a challenger's mean"
+          " paired\nper-date difference against hold60 must be positive AND its t >= %.2f --"
+          " Bonferroni for five\nchallengers at alpha 0.05." % BONFERRONI_T, file=out)
+    print("", file=out)
+    print("DISCLOSURE: hold60 versus stop2atr has already been seen informally, before this"
+          " screen was\nwritten (+3.97% vs +1.30% mean per trade over 112 backtest trades)."
+          " That cell is CONFIRMATORY,\nnot exploratory -- it re-measures a comparison already"
+          " made, properly this time. stop3atr,\nstop4atr, trail3atr and target2r_stop2atr are"
+          " genuinely untested.", file=out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("phase", choices=["insample", "holdout"])
+    ap.add_argument("--db", default=swing_screen.DB)
+    ap.add_argument("--i-am-sure", action="store_true",
+                    help="required to spend the reserved holdout")
+    a = ap.parse_args()
+    conn = sqlite3.connect("file:%s?mode=ro" % a.db, uri=True)
+    try:
+        if a.phase == "insample":
+            run_phase(conn, INSAMPLE, "in-sample")
+        else:
+            guard_holdout(a.i_am_sure)
+            run_phase(conn, (HOLDOUT_START, date.today()), "HOLDOUT -- now spent")
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
