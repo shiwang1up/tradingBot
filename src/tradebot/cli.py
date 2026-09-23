@@ -18,7 +18,7 @@ import requests
 from tradebot.ai.claude_client import ClaudeClient, ClaudeReviewError
 from tradebot.ai.filter import AIFilterAborted, build_filter
 from tradebot.ai.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT, render_candidates
-from tradebot.config import Config, load_config
+from tradebot.config import ChargesConfig, Config, load_config
 from tradebot.data.historical import CHUNK_DAYS, HistoricalSource, fetch_incremental
 from tradebot.data.instruments import download_instruments, load_instruments, resolve_universe
 from tradebot.data.live import LiveBarSource
@@ -30,7 +30,7 @@ from tradebot.engine.paper import PaperEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.execution.groww_adapter import GrowwAdapter, is_non_retryable
 from tradebot.brokers import load_brokers
-from tradebot.report.benchmark import build_benchmark
+from tradebot.report.benchmark import Benchmark, build_benchmark
 from tradebot.report.compare import Prices, build_compare, format_compare
 from tradebot.report.hurdle import hurdle_per_month, round_trip_fraction
 from tradebot.report.summary import build_summary, format_summary
@@ -137,13 +137,23 @@ def _with_index(cfg: Config, symbols: list, first: bool = True) -> list:
     return [idx] + list(symbols) if first else list(symbols) + [idx]
 
 
-def _benchmark_for(repo: Repo, cfg: Config, run_id: str):
+def _benchmark_for(repo: Repo, cfg: Config, run_id: str) -> Optional[Benchmark]:
     """Equal-weight buy & hold over the run's own window, or None when it cannot be built.
 
-    The universe comes from the config this command was given, not from the run's stored config, so
-    reporting an old run against a since-edited universe.yaml benchmarks it against a basket it
-    never faced. The rendered line names the counts, which makes a mismatch visible; recording the
-    resolved symbol list on the run would fix it properly and is a schema change.
+    `capital`, `charges` and `interval` all come from the run's OWN stored config, not the config
+    this command was given: both sides of the comparison must pay the same rates and be scaled to
+    the same capital, or the printed figure changes depending on which config file the reader
+    happened to type -- exactly what happened before this was fixed (a stale `charges.dp_charge`
+    in one config vs. the run's actual `groww` schedule moved the total by hundreds of rupees). A
+    malformed or pre-benchmark config_json blob (missing keys, not even a dict) is reported as no
+    benchmark rather than crashing the whole report -- same contract as compare.py's
+    `_compat_warnings` on this same column.
+
+    The universe is the one exception: it genuinely cannot be recovered from the run (only the
+    resolved symbol list would let it be, and that is not stored -- a schema change), so it still
+    comes from the command's own config. Reporting an old run against a since-edited universe.yaml
+    therefore benchmarks it against a basket it never faced. The rendered line names the counts,
+    which makes a mismatch visible.
     """
     days = repo.daily_pnl(run_id)
     if not days:
@@ -151,11 +161,17 @@ def _benchmark_for(repo: Repo, cfg: Config, run_id: str):
     run = repo.get_run(run_id)
     if run is None:
         return None
-    interval = json.loads(run["config_json"])["execution"]["interval_minutes"]
+    try:
+        run_cfg = json.loads(run["config_json"])
+        interval = run_cfg["execution"]["interval_minutes"]
+        capital = run_cfg["capital"]
+        charges = ChargesConfig(**run_cfg["charges"])
+    except (TypeError, ValueError, KeyError):
+        return None
     symbols = list(load_universe(cfg.paths.universe).symbols)
     lo = ist_epoch(date.fromisoformat(days[0]["date"]), "00:00")
     hi = ist_epoch(date.fromisoformat(days[-1]["date"]), "23:59")
-    return build_benchmark(repo.load_candles(symbols, interval, lo, hi), cfg.capital, cfg.charges)
+    return build_benchmark(repo.load_candles(symbols, interval, lo, hi), capital, charges)
 
 
 def _resolve_and_login(cfg: Config, adapter, note: str = "") -> tuple:

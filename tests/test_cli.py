@@ -942,3 +942,49 @@ def test_a_run_with_no_daily_rows_omits_the_block_instead_of_erroring(tmp_path):
                                         "report", "--run", "empty1"])
     assert rep.exit_code == 0, rep.output
     assert "Benchmark" not in rep.output
+
+
+def test_benchmark_uses_the_runs_own_charges_not_the_command_configs(tmp_path):
+    """Regression guard: the same run reported through two config files that disagree only on
+    charges must print the identical benchmark. capital, charges and interval come from the run's
+    own stored config, not from whichever file --config happens to name -- both sides of the
+    comparison must pay the same rates, and a citable figure cannot depend on the reader's config."""
+    cfg = make_config(tmp_path, charges={"enabled": True, "dp_charge": 15.34})
+    (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A, B]\n")
+    repo = Repo(connect(cfg.paths.db))
+    days = [date(2026, 9, 14), date(2026, 9, 15)]
+    repo.insert_candles(synth_candles("A", days) + synth_candles("B", days, phase=4.0, seed=99), interval=5)
+    repo.conn.close()
+    r = CliRunner()
+    cfg_path = str(tmp_path / "config.yaml")
+    assert r.invoke(cli.main, ["--config", cfg_path, "backtest", "--start", "2026-09-14",
+                               "--end", "2026-09-15", "--run-id", "bm3"]).exit_code == 0
+    rep_a = r.invoke(cli.main, ["--config", cfg_path, "report", "--run", "bm3"])
+    assert rep_a.exit_code == 0, rep_a.output
+
+    other_path = tmp_path / "config-other.yaml"
+    raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    raw["charges"] = {"enabled": True, "dp_charge": 99.0}  # deliberately far from the run's own 15.34
+    other_path.write_text(yaml.safe_dump(raw))
+    rep_b = r.invoke(cli.main, ["--config", str(other_path), "report", "--run", "bm3"])
+    assert rep_b.exit_code == 0, rep_b.output
+
+    def _benchmark_line(output):
+        return next(line for line in output.splitlines() if line.startswith("Benchmark"))
+
+    assert _benchmark_line(rep_a.output) == _benchmark_line(rep_b.output)
+
+
+def test_a_run_with_malformed_config_json_omits_the_benchmark_instead_of_crashing(tmp_path):
+    """Fix 2: a run's config_json can be unparseable (or predate this feature). The report must not
+    crash on it -- just omit the benchmark block, the same contract compare.py's _compat_warnings
+    already applies to this same column."""
+    cfg = _setup(tmp_path)
+    repo = Repo(connect(cfg.paths.db))
+    repo.create_run("badjson1", "backtest", 0, "not json")
+    repo.upsert_daily_pnl("badjson1", "2026-09-14", 0.0, 0.0, 0, 0)
+    repo.conn.close()
+    rep = CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"),
+                                        "report", "--run", "badjson1"])
+    assert rep.exit_code == 0, rep.output
+    assert "Benchmark" not in rep.output
