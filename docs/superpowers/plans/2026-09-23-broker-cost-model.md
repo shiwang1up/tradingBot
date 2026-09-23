@@ -859,6 +859,22 @@ def round_trip_cost(position_value=POSITION_VALUE, broker=SCREEN_BROKER):
 
 Add `from pathlib import Path` to the imports if it is not already there.
 
+**Amendment, after Task 4's code review (2026-09-23).** `scripts/swing_screen.py:359` defines its
+own `hurdle_per_month(horizon, capital, positions)` as `round_trip_cost(...) * (252/horizon) / 12`,
+which is algebraically identical to `tradebot.report.hurdle.hurdle_per_month` since 252/12 = 21.
+Two independently maintained copies of the same arithmetic under the same name is the drift this
+plan exists to eliminate, so this task unifies it too:
+
+- `swing_screen.hurdle_per_month(horizon, capital, positions)` keeps its signature and its
+  docstring, and its body becomes a call to `tradebot.report.hurdle.hurdle_per_month` on the
+  fraction from `round_trip_cost(capital / positions)`.
+- Its printed hurdle line must stay `20d 0.715%/mo, 60d 0.238%/mo, 120d 0.119%/mo`. Those are
+  `legacy` figures and remain correct because the screens pin to `legacy`; if they move, STOP.
+- Add a test asserting the two implementations agree at h=20, 60 and 120 on a lakh across eight
+  positions, so they cannot drift again.
+
+That makes this task's delta +4 rather than +3 against its stated expectation.
+
 - [ ] **Step 4: Run**
 
 `.venv/bin/pytest tests/test_daily_screen.py -q`, then `.venv/bin/pytest -q` → the Task 1 baseline
