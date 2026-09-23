@@ -85,6 +85,7 @@ class PathsConfig:
     instruments: str
     kill_switch: str
     universe: str
+    brokers: str = "brokers.yaml"
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,10 @@ class ChargesConfig:
     """Groww intraday equity schedule. ``*_pct`` fields are human percents of order value.
     Every field has a default, so the section may be left out of config.yaml."""
     enabled: bool = True
+    # Empty means "use the rate fields on this dataclass", which is what every config in this
+    # repository did before brokers.yaml existed. A name selects a schedule from paths.brokers and
+    # replaces every rate below. See docs/superpowers/specs/2026-09-22-broker-cost-model-design.md.
+    broker: str = ""
     brokerage_pct: float = 0.1         # per order ...
     brokerage_max: float = 20.0        # ... capped at this many rupees
     brokerage_min: float = 5.0         # ... and floored at this
@@ -266,6 +271,29 @@ def _validate(cfg: "Config") -> None:
             raise ValueError(f"config.yaml {msg}")
 
 
+def _apply_broker(charges: "ChargesConfig", brokers_path: str, raw: dict) -> "ChargesConfig":
+    """Replace every rate on `charges` with the named schedule's, keeping `enabled` and `broker`.
+
+    Imported here rather than at module scope: tradebot.brokers imports ChargesConfig from this
+    module, and a top-level import would be circular.
+    """
+    from tradebot.brokers import BrokerScheduleError, load_brokers
+    given = set((raw.get("charges") or {})) - {"broker", "enabled"}
+    if given:
+        raise ValueError(
+            f"config.yaml charges: {sorted(given)} cannot be set alongside 'broker': the schedule "
+            f"supplies every rate. Remove them, or drop 'broker' and set them all yourself.")
+    try:
+        brokers = load_brokers(brokers_path)
+    except BrokerScheduleError as e:
+        raise ValueError(f"config.yaml charges.broker: {e}") from e
+    if charges.broker not in brokers:
+        raise ValueError(f"config.yaml charges.broker: unknown broker {charges.broker!r}; "
+                         f"brokers.yaml has {sorted(brokers)}")
+    return dataclasses.replace(brokers[charges.broker].charges,
+                               enabled=charges.enabled, broker=charges.broker)
+
+
 def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Path] = ".env") -> Config:
     p = Path(path)
     if not p.exists():
@@ -306,6 +334,8 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         charges=_optional_section(raw, "charges", ChargesConfig),
         regime=_optional_section(raw, "regime", RegimeConfig),
     )
+    if cfg.charges.broker:
+        cfg = dataclasses.replace(cfg, charges=_apply_broker(cfg.charges, cfg.paths.brokers, raw))
     _validate(cfg)
     return cfg
 
