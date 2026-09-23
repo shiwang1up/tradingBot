@@ -425,18 +425,48 @@ Append to `tests/test_cli.py`, following that file's existing `CliRunner` patter
 ```python
 def test_report_prints_a_benchmark(tmp_path):
     """The whole point: a report must say what not selecting would have returned."""
-    # build a run in a tmp database with two symbols and a handful of daily candles, then
-    # `report --run <id>` and assert "Benchmark" and "selecting" appear in the output.
-    raise NotImplementedError("fill in using this module's existing CliRunner + repo fixtures")
+    _setup(tmp_path)
+    r = CliRunner()
+    cfg = str(tmp_path / "config.yaml")
+    assert r.invoke(cli.main, ["--config", cfg, "backtest", "--start", "2026-09-14",
+                               "--end", "2026-09-15", "--run-id", "bm1"]).exit_code == 0
+    rep = r.invoke(cli.main, ["--config", cfg, "report", "--run", "bm1"])
+    assert rep.exit_code == 0, rep.output
+    assert "Benchmark" in rep.output and "selecting" in rep.output
+    assert "of 2 names" in rep.output, "the two-name universe from _setup"
+
+
+def test_the_backtest_command_prints_it_too(tmp_path):
+    """Both format_summary sites, not just report."""
+    _setup(tmp_path)
+    res = CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"), "backtest",
+                                        "--start", "2026-09-14", "--end", "2026-09-15",
+                                        "--run-id", "bm2"])
+    assert res.exit_code == 0, res.output
+    assert "Benchmark" in res.output
+
+
+def test_a_run_with_no_daily_rows_omits_the_block_instead_of_erroring(tmp_path):
+    """There is no window to price a basket over. Omit it rather than print a zero that reads like
+    a real result, and above all do not crash the report."""
+    cfg = _setup(tmp_path)
+    repo = Repo(connect(cfg.paths.db))
+    repo.create_run("empty1", "backtest", 0, '{"execution": {"interval_minutes": 5}}')
+    repo.conn.close()
+    rep = CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"),
+                                        "report", "--run", "empty1"])
+    assert rep.exit_code == 0, rep.output
+    assert "Benchmark" not in rep.output
 ```
 
-**Read `tests/test_cli.py` and build this on its existing fixtures** — it already creates runs in a
-temporary database for the `report` tests. The placeholder is deliberate: this plan has not read
-that file's fixtures and inventing names would send you chasing code that does not exist. If its
-harness cannot express a run with daily candles, say so and report NEEDS_CONTEXT rather than
-building a parallel one.
+**Correction (2026-09-23): the placeholder is resolved.** `tests/test_cli.py` already has
+`_setup(tmp_path)` at line 20 — it calls `make_config(tmp_path)`, writes a two-symbol
+`universe.yaml` (`[A, B]`), inserts 5-minute `synth_candles` for both over 2026-09-14/15 and
+returns the config. `test_backtest_then_report` shows the `CliRunner` pattern. `Repo`, `connect`,
+`CliRunner` and `cli` are already imported there. `BASE_CONFIG` capital is 100,000, so a two-name
+basket slices at 50,000 and both names are affordable.
 
-- [ ] **Step 2: Run to verify it fails** — `NotImplementedError`, then a real failure once written.
+- [ ] **Step 2: Run to verify they fail** — the three tests fail once `_benchmark_for` does not exist yet.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -496,7 +526,7 @@ argument.
 
 - [ ] **Step 4: Run**
 
-`.venv/bin/pytest -q` → the Task 2 count plus however many tests you added. Report the real number.
+`.venv/bin/pytest -q` → **825 passed** (822 plus three). Report the real number if it differs.
 
 - [ ] **Step 5: Confirm the fixture did not move**
 
