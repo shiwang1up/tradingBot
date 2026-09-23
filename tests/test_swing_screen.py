@@ -220,10 +220,29 @@ def test_the_hurdle_is_per_month_not_per_trade():
     assert sw.hurdle_per_month(60) < sw.round_trip_cost(sw.CAPITAL / sw.POSITIONS)
 
 
+def test_swing_screens_hurdle_delegates_to_the_canonical_one(monkeypatch):
+    """swing_screen.hurdle_per_month must actually CALL tradebot.report.hurdle.hurdle_per_month,
+    not merely happen to agree with it: 252.0/12.0 == 21.0 exactly in IEEE-754, so a purely
+    numeric comparison against the old hand-rolled `rt * 252.0/horizon / 12.0` cannot tell the
+    two apart -- it is bit-identical and would pass even if the delegation were reverted. Patch
+    the canonical function with a sentinel and confirm swing_screen returns exactly what it
+    returns, called with the (fraction, horizon) the delegation is supposed to pass through."""
+    import tradebot.report.hurdle as hurdle_mod
+    calls = []
+
+    def fake_hurdle_per_month(fraction, hold_days):
+        calls.append((fraction, hold_days))
+        return 999.0
+
+    monkeypatch.setattr(hurdle_mod, "hurdle_per_month", fake_hurdle_per_month)
+    assert sw.hurdle_per_month(60) == 999.0
+    assert calls == [(sw.round_trip_cost(sw.CAPITAL / sw.POSITIONS), 60)]
+
+
 def test_swing_screens_hurdle_agrees_with_the_canonical_one():
-    """swing_screen's own hurdle_per_month is algebraically identical to
-    tradebot.report.hurdle.hurdle_per_month (252/12 == 21), so the two must never drift apart. A
-    lakh across eight positions, at every registered horizon."""
+    """A numeric cross-check alongside the delegation proof above, at every registered horizon.
+    On its own this would not catch a reverted delegation (see the test above), but it is a
+    useful sanity check that the real (undoubled) call produces the expected number."""
     from tradebot.report.hurdle import hurdle_per_month as canonical_hurdle_per_month
     fraction = sw.round_trip_cost(sw.CAPITAL / sw.POSITIONS)
     for h in (20, 60, 120):

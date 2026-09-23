@@ -56,6 +56,8 @@ Bar = namedtuple("Bar", "date open high low close")
 
 def round_trip_cost(position_value=POSITION_VALUE, broker=SCREEN_BROKER):
     """Round-trip cost as a FRACTION of position value: charges plus slippage on both opens."""
+    # Local import: this script is loaded by path, not as a package, so it carries no tradebot.*
+    # import at module scope -- unlike config.py's local imports, this isn't dodging a cycle.
     from tradebot.report.hurdle import round_trip_fraction
     from tradebot.brokers import load_brokers
     root = Path(__file__).resolve().parent.parent
@@ -413,7 +415,9 @@ CAVEATS = (
     "Caveats: universe.yaml is today's constituent list, so six years of it is survivorship-biased;\n"
     "trade-level expectancy ignores capital, overlapping positions and position sizing;\n"
     "one parameter set per system, fixed in the spec before any daily candle was stored;\n"
-    "the charge rates are from the spec and have not been checked against Groww's pricing page."
+    "verified charge rates exist for Groww and Zerodha in brokers.yaml, with their source and the\n"
+    "date checked; this screen deliberately pins to the legacy schedule instead so every figure\n"
+    "already published reproduces, which means its costs are NOT what a trade costs today."
 )
 
 
