@@ -367,6 +367,20 @@ Add to `scripts/exit_screen.py`:
   cells. If any cell returns `None`, **drop the observation from every cell** — that is what keeps
   them paired. Record `(symbol, entry_date, cell, net_return)` where the net return is
   `exit_price / entry_close - 1 - round_trip_cost(...)`.
+
+  **This drop is load-bearing and was verified necessary after Task 1 landed.** The rules do NOT
+  agree among themselves about when an outcome is measurable. On a series that ends before the
+  horizon but where a stop triggers early, `stop2atr`, `stop3atr`, `trail3atr` and
+  `target2r_stop2atr` all return a real `Exit` while `hold60` and `stop4atr` return `None` —
+  confirmed by running them. Without the drop those observations would enter the challenger cells
+  and not the incumbent, so the paired difference would compare a stopped trade against nothing and
+  the whole method would silently break at the end of every symbol's history.
+
+  Task 1's `test_every_cell_agrees_on_when_there_is_no_measurable_outcome` overclaims: it proves
+  agreement only on flat bars where nothing triggers early. **Rename it to
+  `test_every_cell_agrees_when_nothing_triggers_before_the_end_of_the_data`** and add a sibling
+  asserting the disagreement case above explicitly, so the next reader learns the invariant lives
+  in `observations()` and not in the rules.
 - `paired_diffs(obs)`: per entry date, the mean challenger return minus the mean `hold60` return,
   one number per (cell, date).
 
