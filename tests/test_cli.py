@@ -58,6 +58,39 @@ def test_report_estimates_charges_for_a_row_that_predates_them(tmp_path):
     assert charges_line.split()[1] != "0.00"
 
 
+def test_hurdle_prints_a_row_per_slot_count_and_a_column_per_broker(tmp_path):
+    make_config(tmp_path)
+    res = _invoke(tmp_path, "hurdle", "--capital", "100000", "--slots", "4,8")
+    assert res.exit_code == 0, res.output
+    lines = res.output.splitlines()
+    header = next(ln for ln in lines if ln.strip().startswith("slots"))
+    assert "groww" in header and "zerodha" in header
+    assert any(ln.strip().startswith("4 ") for ln in lines)
+    assert any(ln.strip().startswith("8 ") for ln in lines)
+
+
+def test_hurdle_capital_defaults_to_the_configs_capital(tmp_path):
+    make_config(tmp_path)  # BASE_CONFIG capital is 100,000
+    res = _invoke(tmp_path, "hurdle")
+    assert res.exit_code == 0, res.output
+    assert "100,000 fully deployed" in res.output
+
+
+def test_hurdle_unknown_broker_names_the_bad_name_and_the_available_schedules(tmp_path):
+    make_config(tmp_path)
+    res = _invoke(tmp_path, "hurdle", "--broker", "nope")
+    assert res.exit_code == 1
+    assert "nope" in res.output
+    assert "groww" in res.output and "zerodha" in res.output
+
+
+def test_hurdle_bad_slots_names_the_option(tmp_path):
+    make_config(tmp_path)
+    res = _invoke(tmp_path, "hurdle", "--slots", "abc")
+    assert res.exit_code == 1
+    assert "--slots" in res.output
+
+
 def test_backtest_without_data_fails_clearly(tmp_path):
     cfg = make_config(tmp_path)
     (tmp_path / "universe.yaml").write_text("exchange: NSE\nsymbols: [A]\n")

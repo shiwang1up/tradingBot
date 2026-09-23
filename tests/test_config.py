@@ -242,8 +242,11 @@ def test_shipped_configs_carry_the_charges_block(tmp_path):
         cfg = load_config(root / name, tmp_path / "nonexistent.env")
         assert "charges" in cfg.raw, name
         assert cfg.charges.enabled is True, name
-        # the shipped block names every field so a rate correction can't silently drop a key
-        assert set(cfg.raw["charges"]) == {f.name for f in dataclasses.fields(ChargesConfig)}, name
+        # the shipped block names every rate so a correction can't silently drop a key, and these
+        # three deliberately do NOT select a broker: they carry explicit rates. config-daily.yaml
+        # is the opposite case and is checked separately.
+        assert set(cfg.raw["charges"]) == {f.name for f in dataclasses.fields(ChargesConfig)} - {"broker"}, name
+        assert "broker" not in cfg.raw["charges"], name
 
 
 def test_resolved_config_records_charges(tmp_path):
@@ -312,3 +315,51 @@ def test_min_risk_fraction_defaults_and_is_validated(tmp_path):
     for name in ("config.yaml", "config-15m.yaml", "config-orb.yaml"):
         cfg = load_config(root / name, tmp_path / "nonexistent.env")
         assert cfg.risk.min_risk_fraction == 0.5, name
+
+
+def test_an_unset_broker_leaves_every_rate_at_its_default(tmp_path):
+    """Every config in the repository omits it today, and must be charged exactly as before."""
+    from tradebot.config import ChargesConfig
+    cfg = make_config(tmp_path)
+    assert cfg.charges.broker == ""
+    assert cfg.charges.dp_charge == ChargesConfig().dp_charge
+
+
+def test_selecting_a_broker_replaces_the_rates(tmp_path):
+    cfg = make_config(tmp_path, charges={"broker": "groww"})
+    assert cfg.charges.dp_charge == pytest.approx(23.60)
+    assert cfg.charges.brokerage_max == pytest.approx(20.0)
+
+
+def test_selecting_zerodha_zeroes_the_brokerage(tmp_path):
+    cfg = make_config(tmp_path, charges={"broker": "zerodha"})
+    assert cfg.charges.brokerage_pct == 0.0
+    assert cfg.charges.dp_charge == pytest.approx(15.34)
+
+
+def test_enabled_is_kept_from_the_config_not_the_schedule(tmp_path):
+    """The schedule holds rates; whether charges apply at all is the run's decision."""
+    cfg = make_config(tmp_path, charges={"broker": "groww", "enabled": False})
+    assert cfg.charges.enabled is False
+    assert cfg.charges.dp_charge == pytest.approx(23.60)
+
+
+def test_an_unknown_broker_names_the_ones_that_exist(tmp_path):
+    with pytest.raises(ValueError) as e:
+        make_config(tmp_path, charges={"broker": "hdfcsec"})
+    assert "hdfcsec" in str(e.value) and "groww" in str(e.value)
+
+
+def test_a_broker_and_an_explicit_rate_together_is_an_error(tmp_path):
+    """Silently letting one win would make the effective rate unreadable from the config."""
+    with pytest.raises(ValueError) as e:
+        make_config(tmp_path, charges={"broker": "groww", "dp_charge": 1.0})
+    assert "dp_charge" in str(e.value)
+
+
+def test_the_daily_config_is_charged_a_real_broker():
+    """config-daily.yaml is the only CNC config, so it is the only one the DP fee reaches. Charged
+    at the shipped default it paid Zerodha's 15.34 while assuming Groww's brokerage."""
+    cfg = load_config("config-daily.yaml")
+    assert cfg.charges.broker == "groww"
+    assert cfg.charges.dp_charge == pytest.approx(23.60)

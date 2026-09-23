@@ -85,13 +85,25 @@ class PathsConfig:
     instruments: str
     kill_switch: str
     universe: str
+    brokers: str = "brokers.yaml"
 
 
 @dataclass(frozen=True)
 class ChargesConfig:
-    """Groww intraday equity schedule. ``*_pct`` fields are human percents of order value.
-    Every field has a default, so the section may be left out of config.yaml."""
+    """One broker's charge schedule. ``*_pct`` fields are human percents of order value.
+    Every field has a default, so the section may be left out of config.yaml -- but those defaults
+    are the `legacy` schedule and match no real broker; see the comment on the delivery fields."""
     enabled: bool = True
+    # Empty means "use the rate fields on this dataclass", which is what every config in this
+    # repository did before brokers.yaml existed. A name selects a schedule from paths.brokers and
+    # replaces every rate below. See docs/superpowers/specs/2026-09-22-broker-cost-model-design.md.
+    #
+    # It is a PROVENANCE LABEL that load_config keeps in step with the rates, not an invariant
+    # anything enforces afterwards. dataclasses.replace(cfg.charges, dp_charge=...) will happily
+    # leave the name saying "groww" over rates that are no longer Groww's -- which is the same
+    # defect this field exists to prevent, just moved from a config file into a Python process.
+    # If you must override a rate after load, clear `broker` in the same call.
+    broker: str = ""
     brokerage_pct: float = 0.1         # per order ...
     brokerage_max: float = 20.0        # ... capped at this many rupees
     brokerage_min: float = 5.0         # ... and floored at this
@@ -99,6 +111,15 @@ class ChargesConfig:
     exchange_txn_pct: float = 0.00297  # NSE, both sides
     sebi_pct: float = 0.0001           # both sides
     stamp_buy_pct: float = 0.003       # buy side only
+    # Delivery (CNC) differs from intraday in exactly three ways. These defaults are the `legacy`
+    # schedule in brokers.yaml -- Groww's brokerage with ZERODHA's DP fee, which is what this
+    # repository shipped before anyone checked a pricing page, and so matches no real broker. They
+    # are kept as the defaults only so results published before the correction still reproduce.
+    # For what a trade actually costs, set `charges.broker` (see brokers.yaml) rather than editing
+    # these. The screens in scripts/ read the same file and pin to `legacy` deliberately.
+    delivery_stt_pct: float = 0.1       # both sides, against 0.025% sell-side intraday
+    delivery_stamp_buy_pct: float = 0.015   # buy side, against 0.003% intraday
+    dp_charge: float = 15.34            # depository, flat, per sell
     gst_pct: float = 18.0              # on brokerage + exchange txn + SEBI
 
 
@@ -260,6 +281,29 @@ def _validate(cfg: "Config") -> None:
             raise ValueError(f"config.yaml {msg}")
 
 
+def _apply_broker(charges: "ChargesConfig", brokers_path: str, raw: dict) -> "ChargesConfig":
+    """Replace every rate on `charges` with the named schedule's, keeping `enabled` and `broker`.
+
+    Imported here rather than at module scope: tradebot.brokers imports ChargesConfig from this
+    module, and a top-level import would be circular.
+    """
+    from tradebot.brokers import BrokerScheduleError, load_brokers
+    given = set((raw.get("charges") or {})) - {"broker", "enabled"}
+    if given:
+        raise ValueError(
+            f"config.yaml charges: {sorted(given)} cannot be set alongside 'broker': the schedule "
+            f"supplies every rate. Remove them, or drop 'broker' and set them all yourself.")
+    try:
+        brokers = load_brokers(brokers_path)
+    except BrokerScheduleError as e:
+        raise ValueError(f"config.yaml charges.broker: {e}") from e
+    if charges.broker not in brokers:
+        raise ValueError(f"config.yaml charges.broker: unknown broker {charges.broker!r}; "
+                         f"brokers.yaml has {sorted(brokers)}")
+    return dataclasses.replace(brokers[charges.broker].charges,
+                               enabled=charges.enabled, broker=charges.broker)
+
+
 def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Path] = ".env") -> Config:
     p = Path(path)
     if not p.exists():
@@ -300,6 +344,8 @@ def load_config(path: Union[str, Path] = "config.yaml", env_path: Union[str, Pat
         charges=_optional_section(raw, "charges", ChargesConfig),
         regime=_optional_section(raw, "regime", RegimeConfig),
     )
+    if cfg.charges.broker:
+        cfg = dataclasses.replace(cfg, charges=_apply_broker(cfg.charges, cfg.paths.brokers, raw))
     _validate(cfg)
     return cfg
 

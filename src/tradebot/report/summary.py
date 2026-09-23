@@ -89,7 +89,7 @@ def _max_drawdown(increments) -> float:
 
 
 def row_charges(r, schedule: Optional[ChargesConfig]) -> Tuple[float, bool, bool]:
-    """(charges, estimated, unknown) for one closed position row. A NULL charges means charges were
+    """(charges, estimated, unknown) for one closed position row, charged on the row's own product. A NULL charges means charges were
     not recorded for this row; with no schedule (or a disabled one) it is treated as 0.0,
     unestimated, same as before charges existed. A row closed without a price (exit_price is None)
     predates a price rather than having a bad one, so it is not "unknown" either. A row whose
@@ -101,7 +101,10 @@ def row_charges(r, schedule: Optional[ChargesConfig]) -> Tuple[float, bool, bool
     if schedule is None or not schedule.enabled or r["exit_price"] is None:
         return 0.0, False, False
     try:
-        return position_charges(r["direction"], r["avg_price"], r["exit_price"], r["qty"], schedule), True, False
+        # product, as in BacktestBroker._close: an estimate at intraday rates for a delivery row
+        # would make the report disagree with the run that recorded it.
+        return (position_charges(r["direction"], r["avg_price"], r["exit_price"], r["qty"], schedule,
+                                 product=r["product"]), True, False)
     except ValueError as e:
         log.warning("position %s: could not estimate charges: %s: %s", r["id"], type(e).__name__, e)
         return 0.0, False, True

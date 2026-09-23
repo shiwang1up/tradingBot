@@ -261,8 +261,10 @@ CAVEATS = (
     "falling are absent (biases against the bottom group); the net direction is unknown and could\n"
     "be material, and cannot be fixed without a point-in-time constituent list.\n"
     "Monthly observations are few for a t. The window is one long bull market plus two corrections.\n"
-    "Costs assume the delivery schedule in the spec, unverified against Groww's pricing page, and\n"
-    "are charged at the portfolio's real per-position value (1 lakh split across the basket), but\n"
+    "Costs come from brokers.yaml pinned to the `legacy` schedule, so this figure reproduces as\n"
+    "published. legacy matches no real broker (Groww brokerage, Zerodha DP fee); verified Groww\n"
+    "and Zerodha rates live in the same file, and `tradebot hurdle` prints what they imply. Costs\n"
+    "are charged at the portfolio's real per-position value (1 lakh split across the basket), and\n"
     "they ignore market impact and lot sizes."
 )
 

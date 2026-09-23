@@ -33,8 +33,12 @@ Survivorship bias: `universe.yaml` is today's constituent list, so backtests ove
 
 ## Charges
 
-Backtest and paper results are net of brokerage and statutory charges (`charges:` in the config,
-Groww intraday equity rates; check them against Groww's pricing page). `pnl` in the database stays
+Backtest and paper results are net of brokerage and statutory charges (`charges:` in the config).
+Rates live in `brokers.yaml`, one entry per broker, each carrying the `verified_on` date and the
+`source` URL it was checked against -- a schedule without them fails to load. Select one with
+`charges.broker: groww`; leave it unset and the dataclass defaults apply, which are the `legacy`
+schedule and match no real broker. `tradebot hurdle` prints what a round trip costs per broker and
+the excess-per-month a strategy must beat to pay for it. `pnl` in the database stays
 gross; `positions.charges` holds the cost. Reports print gross, charges, net and `R on risk`: net PnL
 over rupees at risk, all trades pooled. That is the figure to judge a run by; the per-trade `Avg R`
 is dominated by scrap-sized trades. Runs stored before the charges model are estimated after the fact

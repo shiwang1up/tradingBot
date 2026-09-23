@@ -123,6 +123,9 @@ def build_strategy(name: str, params: dict) -> Strategy:
     if name == "pullback":
         from tradebot.strategy.pullback import PullbackStrategy  # local import, as for confluence
         return PullbackStrategy(params)
+    if name == "trend_dip":
+        from tradebot.strategy.trend_dip import TrendDipStrategy  # local import, as for confluence
+        return TrendDipStrategy(params)
     if name == "orb":
         from tradebot.strategy.orb import OrbStrategy  # local import, as for confluence
         return OrbStrategy(params)

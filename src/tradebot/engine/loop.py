@@ -72,6 +72,14 @@ class Engine:
         self.run_id = run_id
         self.mode = mode
         self.interval_sec = cfg.execution.interval_minutes * 60
+        if clock.daily:
+            # MIS on a daily bar has no meaning: _end_day's safety net squares the position off on
+            # the bar that opened it, and the run then reports plausible numbers for trades that
+            # were never held. Refuse at construction rather than produce silent nonsense.
+            intraday = sorted(s.name for s in strategies if getattr(s, "product", None) == "MIS")
+            if intraday:
+                raise ValueError(f"{', '.join(intraday)}: product MIS is meaningless on a daily bar - the "
+                                 f"position would be squared off on the bar that opened it; use CNC")
         self._history: dict[str, deque[Candle]] = {}
         self._indicators: dict[str, IndicatorSet] = {}  # shared technical context, one set per symbol
         self._indicator_params = validate_indicator_params(cfg.strategy.get("indicators"))  # fail at start, not mid-run
@@ -106,7 +114,12 @@ class Engine:
                         d, len(leftovers))
             self._record(leftovers)
         # Entries queued on the last bar must not fill against tomorrow's open on a stale signal.
-        self._record(self.broker.cancel_pending(ts, "day_end"))
+        # Not in daily mode: there one bar IS one day, so this would cancel every entry on the bar
+        # it was placed and nothing could ever fill. The staleness this guards against is the
+        # seventeen hours between 15:10 and the next 09:15; the gap between daily bar i and bar
+        # i+1 is exactly the one-day fill delay daily mode intends.
+        if not self.clock.daily:
+            self._record(self.broker.cancel_pending(ts, "day_end"))
         self._write_daily_row(d)
 
     def _write_daily_row(self, d: date) -> None:
@@ -243,7 +256,11 @@ class Engine:
         self._observe(candles)
 
         self._record(self.broker.on_bar(ts, candles))
-        if not self._day.squared_off and self.clock.square_off_due(ts):
+        # In daily mode there is no intraday square-off: a CNC position is meant to survive the
+        # close, which is the whole point. `square_off_due` already returns False on a daily
+        # clock, so this gate is explicit rather than load-bearing - it says the skip is intended,
+        # not an emergent consequence a later refactor could quietly undo.
+        if not self.clock.daily and not self._day.squared_off and self.clock.square_off_due(ts):
             # Latched per day only once every intraday position is gone: a symbol with no candle at
             # the square-off bar closes at its last known price, and anything still open is retried.
             self._record(self.broker.square_off(ts, candles, last_prices=self._last_close))

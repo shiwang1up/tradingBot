@@ -1,4 +1,5 @@
-# 15-minute variant of config.yaml: same database, universe and risk; only the interval and the strategy differ.
+# Daily-cadence config: one bar a day, delivery (CNC), positions held across days.
+# Differs from config.yaml only where the cadence forces it; see the comments below.
 capital: 100000
 
 risk:
@@ -13,6 +14,14 @@ risk:
   adopted_stop_pct: 1.5       # fallback stop for orphaned positions (live)
 
 strategy:
+  trend_dip:                    # the only setup of six that cleared the swing screen's pre-registered bar
+    sma_fast: 20                # 20/50/200 and the 60-bar hold were fixed BEFORE the screen ran.
+    sma_mid: 50                 # The grid showed neighbours scoring higher; adopting one now would be
+    sma_slow: 200               # curve-fitting and would invalidate the measurement. Do not tune.
+    atr_period: 20
+    atr_stop_mult: 2.0          # not part of the screen, which was unstopped; see the module docstring
+    max_hold_bars: 60           # trading days, the screen's horizon; closed by the broker's time exit
+    product: CNC
   ema_rsi:
     fast: 9
     slow: 21
@@ -37,15 +46,6 @@ strategy:
     reward_risk: 2.0
     min_stop_pct: 0.1
     product: MIS
-  pullback:                   # pullback to EMA20 in an EMA20/EMA50 trend; see the 2026-09-15 pullback spec
-    ema_fast: 20
-    ema_slow: 50
-    atr_period: 14
-    max_pullback_bars: 8      # a pullback older than this is spent without a trade
-    reward_risk: 2.0
-    min_stop_pct: 0.1         # skip a stop closer than this % of price
-    max_stop_atr: 3.0         # skip a stop further than this many ATRs
-    product: MIS
   indicators:                 # shared technical set (also feeds the AI filter's context)
     ema_fast: 20
     ema_slow: 50
@@ -69,41 +69,38 @@ ai:
 
 execution:
   slippage_pct: 0.05           # percent: 0.05 = 5 bps
-  entry_buffer_pct: 0.1       # marketable limit buffer (live)
+  # 3.0, not the intraday 0.1: the buffer is a marketable-limit guard sized for a 5-minute bar.
+  # A daily entry fills at the NEXT DAY'S CLOSE, and measured over 2022 on this universe a 0.1%
+  # buffer rejected 48.5% of long entries (5,874 of 12,111 close-to-close pairs moved more than
+  # 0.1% up) -- ordinary days, not runaways. At 3.0% it rejects 5.0% (601 of 12,111).
+  entry_buffer_pct: 3.0
   bar_deadline_sec: 60
-  interval_minutes: 15
+  interval_minutes: 1440      # one bar a day; SessionClock switches to daily mode at >= 1440
 
-charges:                        # Groww intraday equity; check against groww.in/pricing before trusting results
+charges:
   enabled: true
-  brokerage_pct: 0.1            # per order, percent of order value ...
-  brokerage_max: 20.0           # ... capped at this many rupees
-  brokerage_min: 5.0            # ... and floored at this
-  stt_sell_pct: 0.025           # sell side only
-  exchange_txn_pct: 0.00297     # NSE, both sides
-  sebi_pct: 0.0001              # both sides
-  stamp_buy_pct: 0.003          # buy side only
-  # the CNC fields below are carried for schema completeness; unused at this intraday interval
-  delivery_stt_pct: 0.1         # CNC only: both sides, against 0.025% sell-side intraday
-  delivery_stamp_buy_pct: 0.015 # CNC only: buy side, against 0.003% intraday
-  dp_charge: 15.34              # CNC only: depository, flat, per sell
-  gst_pct: 18.0                 # on brokerage + exchange txn + SEBI
+  # Rates come from brokers.yaml, verified 2026-09-22 against groww.in/pricing. Setting any rate
+  # here alongside `broker` is refused: with both present the effective rate is not readable from
+  # this file, which is how the shipped schedule came to pair Groww's brokerage with Zerodha's DP
+  # fee for the whole life of the project.
+  broker: groww
 
 regime:                         # longs only while the index is above its EMA, shorts only while at or below
   enabled: false
   source: index                 # index | composite (equal-weight mean of universe returns; needs no index data)
-  ema_period: 20                # bars of execution.interval_minutes
+  ema_period: 20                # bars of execution.interval_minutes (days here)
 
-session:
-  open: "09:15"
+session:                        # unchanged from config.yaml; in daily mode the clock consults
+  open: "09:15"                 # only is_trading_day, not this intra-session window
   close: "15:30"
-  square_off: "15:10"          # on 15-minute bars the square-off bar is 14:45, so positions are flattened at its close, 15:00
-  no_new_entries_after: "14:45" # last signal bar opens 14:30; its order fills at the 14:45 open
+  square_off: "15:10"
+  no_new_entries_after: "14:45"
   holidays: []                # ISO dates, e.g. "2026-10-02"
 
 data:
   official_fetch_concurrency: 5
   bar_grace_sec: 5              # paper: wait this long after the boundary before fetching the closed bar
-  warmup_bars: 300              # paper: stored bars replayed per symbol before the first live bar (~12 sessions of 15-minute bars)
+  warmup_bars: 300              # paper: unused here, daily paper trading is not implemented
   index_symbol: NIFTY           # fetched and stored with the universe; feeds the regime filter, never traded
 
 paths:

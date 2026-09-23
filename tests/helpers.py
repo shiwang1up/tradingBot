@@ -4,6 +4,7 @@
 drive a real BacktestEngine through."""
 import math
 from datetime import date
+from pathlib import Path
 
 import yaml
 
@@ -46,6 +47,7 @@ def make_config(tmp_path, **overrides) -> Config:
         "db": str(tmp_path / "tradebot.db"), "logs": str(tmp_path / "logs"),
         "instruments": str(tmp_path / "instruments.csv"), "kill_switch": str(tmp_path / "KILL"),
         "universe": str(tmp_path / "universe.yaml"),
+        "brokers": str(Path(__file__).resolve().parents[1] / "brokers.yaml"),
     }
     for key, val in overrides.items():          # e.g. risk={"max_open_positions": 1}
         raw[key] = {**(raw.get(key) or {}), **val} if isinstance(val, dict) else val

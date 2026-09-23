@@ -61,6 +61,7 @@ class Signal:
     product: Product
     bar_ts: int
     priority: float = 0.0  # ranks same-bar signals when slots are short; higher first, then symbol
+    max_hold_bars: int | None = None  # close after this many bars; None (every intraday signal) never times out
 
     def __post_init__(self) -> None:
         if not (isinstance(self.priority, (int, float)) and not isinstance(self.priority, bool)
@@ -95,13 +96,15 @@ class Position:
     strategy: str
     closed_ts: int | None = None
     exit_price: float | None = None
-    exit_reason: str | None = None  # "STOP" | "TARGET" | "SQUARE_OFF" | "FLATTEN"
+    exit_reason: str | None = None  # "STOP" | "TARGET" | "SQUARE_OFF" | "FLATTEN" | "TIME_EXIT"
     pnl: float | None = None
     charges: float | None = None  # None while open; a float once closed; 0.0 (not None) when the broker
     # has no fee schedule -- the database treats NULL as "predates the charges model"
     fill_status: str = "full"  # "full" | "partial"
     adopted: bool = False
     db_id: int | None = None
+    max_hold_bars: int | None = None  # carried from the signal; only BacktestBroker acts on it
+    bars_held: int = 0  # bars this position has been seen on since its entry bar
 
     def unrealised(self, last_price: float) -> float:
         if self.direction == "LONG":
