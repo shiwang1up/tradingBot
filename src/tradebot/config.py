@@ -90,8 +90,9 @@ class PathsConfig:
 
 @dataclass(frozen=True)
 class ChargesConfig:
-    """Groww intraday equity schedule. ``*_pct`` fields are human percents of order value.
-    Every field has a default, so the section may be left out of config.yaml."""
+    """One broker's charge schedule. ``*_pct`` fields are human percents of order value.
+    Every field has a default, so the section may be left out of config.yaml -- but those defaults
+    are the `legacy` schedule and match no real broker; see the comment on the delivery fields."""
     enabled: bool = True
     # Empty means "use the rate fields on this dataclass", which is what every config in this
     # repository did before brokers.yaml existed. A name selects a schedule from paths.brokers and
@@ -110,9 +111,12 @@ class ChargesConfig:
     exchange_txn_pct: float = 0.00297  # NSE, both sides
     sebi_pct: float = 0.0001           # both sides
     stamp_buy_pct: float = 0.003       # buy side only
-    # Delivery (CNC) differs from intraday in exactly three ways. Rates duplicated in
-    # scripts/daily_screen.py as module constants; that script's committed results depend on
-    # those exact numbers, so the two are deliberately not unified. Keep them in step.
+    # Delivery (CNC) differs from intraday in exactly three ways. These defaults are the `legacy`
+    # schedule in brokers.yaml -- Groww's brokerage with ZERODHA's DP fee, which is what this
+    # repository shipped before anyone checked a pricing page, and so matches no real broker. They
+    # are kept as the defaults only so results published before the correction still reproduce.
+    # For what a trade actually costs, set `charges.broker` (see brokers.yaml) rather than editing
+    # these. The screens in scripts/ read the same file and pin to `legacy` deliberately.
     delivery_stt_pct: float = 0.1       # both sides, against 0.025% sell-side intraday
     delivery_stamp_buy_pct: float = 0.015   # buy side, against 0.003% intraday
     dp_charge: float = 15.34            # depository, flat, per sell

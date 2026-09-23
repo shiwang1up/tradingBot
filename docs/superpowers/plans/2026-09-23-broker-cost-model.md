@@ -859,7 +859,7 @@ def round_trip_cost(position_value=POSITION_VALUE, broker=SCREEN_BROKER):
 
 Add `from pathlib import Path` to the imports if it is not already there.
 
-**Amendment, after Task 4's code review (2026-09-23).** `scripts/swing_screen.py:359` defines its
+**Amendment to Task 5, raised by Task 4's code review (2026-09-23).** `scripts/swing_screen.py:359` defines its
 own `hurdle_per_month(horizon, capital, positions)` as `round_trip_cost(...) * (252/horizon) / 12`,
 which is algebraically identical to `tradebot.report.hurdle.hurdle_per_month` since 252/12 = 21.
 Two independently maintained copies of the same arithmetic under the same name is the drift this
