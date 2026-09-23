@@ -105,6 +105,21 @@ def test_an_exit_past_the_end_of_the_series_is_none():
     assert ex.EXITS["hold60"](bars, 0, atr=5.0, horizon=60) is None
 
 
+def _dip_then_flat_bars():
+    """A steady uptrend that dips to sit between SMA20 and SMA50 at bar 229 -- the same fixture
+    shape trend_dip's own unit test in test_swing_screen.py uses -- then keeps rising calmly for
+    exactly 60 more bars, so hold60's horizon lands on the series' last bar and every cell falls
+    through to a real exit with nothing to drop. The complement of the fixture in
+    test_an_observation_any_cell_cannot_resolve_is_dropped_from_all_of_them below, where the
+    series ends BEFORE the horizon instead."""
+    closes = [100.0 + i * 0.5 for i in range(230)]
+    probe = ex.Indicators(_bars(closes))
+    dipped = closes[:]
+    dipped[229] = (probe.sma20[229] + probe.sma50[229]) / 2.0
+    tail = [dipped[229] + 0.5 * k for k in range(1, 61)]
+    return _bars(dipped + tail)
+
+
 def test_every_cell_in_the_registered_grid_is_present():
     assert set(ex.EXITS) == {"hold60", "stop2atr", "stop3atr", "stop4atr",
                              "trail3atr", "target2r_stop2atr"}
@@ -112,9 +127,111 @@ def test_every_cell_in_the_registered_grid_is_present():
     assert ex.BONFERRONI_T == pytest.approx(2.58)
 
 
-def test_every_cell_agrees_on_when_there_is_no_measurable_outcome():
-    """If one cell can resolve a signal another cannot, the comparison stops being paired and the
-    per-date difference compares different trades."""
+def test_every_cell_agrees_when_nothing_triggers_before_the_end_of_the_data():
+    """On flat bars nothing triggers early, so every rule falls through to the same
+    end-of-series None. This is NOT the general invariant -- the rules disagree with each other
+    once something triggers early enough that some can resolve and others cannot; that case is
+    exercised in test_an_observation_any_cell_cannot_resolve_is_dropped_from_all_of_them below.
+    The general invariant (an unresolvable name-day is dropped from every cell) lives in
+    observations(), not here."""
     bars = _bars([100.0] * 10)
     for name, rule in ex.EXITS.items():
         assert rule(bars, 0, atr=5.0, horizon=60) is None, name
+
+
+def test_every_cell_reports_the_same_entries():
+    """The pairing IS the method. If cells ever see different entries, the per-date difference is
+    comparing different trades and the t is meaningless."""
+    bars = _dip_then_flat_bars()
+    ind = ex.Indicators(bars)
+    uni = ex.swing_screen.Universe(
+        bars={"AAA": bars, "BBB": bars}, masked={"AAA": set(), "BBB": set()},
+        inds={"AAA": ind, "BBB": ind}, members_by_date={b.date: ("AAA", "BBB") for b in bars},
+        all_dates=[b.date for b in bars], returns={})
+    window = (bars[0].date, bars[-1].date)
+
+    obs = ex.observations(uni, window)
+    assert obs, "the fixture must produce at least one observation, or this proves nothing"
+
+    entries_by_cell = {}
+    for o in obs:
+        entries_by_cell.setdefault(o.cell, set()).add((o.symbol, o.entry_date))
+    assert set(entries_by_cell) == set(ex.EXITS), "every registered cell must report something"
+    common = next(iter(entries_by_cell.values()))
+    for cell, entries in entries_by_cell.items():
+        assert entries == common, "%s saw a different set of entries than the rest" % cell
+    assert common == {("AAA", bars[229].date), ("BBB", bars[229].date)}
+
+
+def test_an_observation_any_cell_cannot_resolve_is_dropped_from_all_of_them():
+    """The rules disagree near the end of a series: a stop can trigger where the 60-bar hold has
+    no outcome. Keeping those would compare a stopped trade against nothing."""
+    closes = [100.0 + i * 0.5 for i in range(230)]
+    probe = ex.Indicators(_bars(closes))
+    dipped = closes[:]
+    dipped[229] = (probe.sma20[229] + probe.sma50[229]) / 2.0
+    prefix = _bars(dipped)
+    ind = ex.Indicators(prefix)
+    assert ex.trend_dip(ind, 229), "fixture must fire trend_dip, or this proves nothing"
+    atr = ind.atr20[229]
+    entry_close = prefix[229].close
+    # Between the 3x and 4x ATR stop levels: breaches stop2atr/stop3atr/trail3atr/target's stop,
+    # but not stop4atr -- and the series ends right there, one bar later, well short of bar 60.
+    crash_low = entry_close - 3.5 * atr
+    crash = ex.Bar(prefix[-1].date + timedelta(days=1), entry_close, entry_close * 1.001,
+                   crash_low, crash_low, 1000)
+    bars = prefix + [crash]
+
+    # The fixture must actually reproduce the rules' disagreement, or the rest proves nothing.
+    outcomes = {name: rule(bars, 229, atr=atr, horizon=60) for name, rule in ex.EXITS.items()}
+    assert outcomes["hold60"] is None and outcomes["stop4atr"] is None, (
+        "these two must have no measurable outcome this close to the end of the series")
+    assert outcomes["stop2atr"] is not None and outcomes["stop3atr"] is not None
+    assert outcomes["trail3atr"] is not None and outcomes["target2r_stop2atr"] is not None
+
+    ind_full = ex.Indicators(bars)
+    uni = ex.swing_screen.Universe(
+        bars={"AAA": bars}, masked={"AAA": set()}, inds={"AAA": ind_full},
+        members_by_date={b.date: ("AAA",) for b in bars}, all_dates=[b.date for b in bars],
+        returns={})
+    window = (bars[0].date, bars[-1].date)
+    assert ex.observations(uni, window) == [], (
+        "four of six cells could resolve this name-day; keeping it anywhere unpairs the cells")
+
+
+def test_a_signal_whose_hold_spans_a_corporate_action_is_dropped_from_every_cell():
+    """An unadjusted split makes the return fiction wherever it lands. Dropping it from one cell
+    and not another would silently unpair them."""
+    bars = _dip_then_flat_bars()
+    ind = ex.Indicators(bars)
+    entry_date = bars[229].date
+    masked_date = bars[229 + 30].date       # well inside the hold, entry (229) to horizon (289)
+    uni = ex.swing_screen.Universe(
+        bars={"AAA": bars, "BBB": bars}, masked={"AAA": {masked_date}, "BBB": set()},
+        inds={"AAA": ind, "BBB": ind}, members_by_date={b.date: ("AAA", "BBB") for b in bars},
+        all_dates=[b.date for b in bars], returns={})
+    window = (bars[0].date, bars[-1].date)
+
+    obs = ex.observations(uni, window)
+    aaa_cells = {o.cell for o in obs if o.symbol == "AAA" and o.entry_date == entry_date}
+    bbb_cells = {o.cell for o in obs if o.symbol == "BBB" and o.entry_date == entry_date}
+    assert aaa_cells == set(), "the masked symbol's entry must be gone from EVERY cell, not some"
+    assert bbb_cells == set(ex.EXITS), "an unrelated, unmasked symbol's entry must be unaffected"
+
+
+def test_returns_are_net_of_costs():
+    """The screen's figures must be comparable with the entry screen's, which charges the same."""
+    bars = _dip_then_flat_bars()
+    ind = ex.Indicators(bars)
+    uni = ex.swing_screen.Universe(
+        bars={"AAA": bars}, masked={"AAA": set()}, inds={"AAA": ind},
+        members_by_date={b.date: ("AAA",) for b in bars}, all_dates=[b.date for b in bars],
+        returns={})
+    window = (bars[0].date, bars[-1].date)
+
+    obs = ex.observations(uni, window)
+    hold = next(o for o in obs if o.cell == "hold60")
+    raw_ratio = bars[229 + 60].close / bars[229].close - 1.0
+    cost = ex.round_trip_cost()
+    assert cost > 0.0, "the fixture proves nothing if the cost model itself charges nothing"
+    assert hold.ret == pytest.approx(raw_ratio - cost)
