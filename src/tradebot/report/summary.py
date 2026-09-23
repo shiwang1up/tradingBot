@@ -128,7 +128,7 @@ def _day_t(day_pnls: list) -> Tuple[float, Optional[float]]:
 
 
 def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = None,
-                  since_ts: Optional[int] = None) -> Summary:
+                  since_ts: Optional[int] = None, *, benchmark: Optional[Benchmark] = None) -> Summary:
     """`since_ts`, when given, scores only positions opened at or after it and only daily rows dated
     on or after its IST date - so a filter-on run's warm-up days (rejected regime_not_ready, not on
     the strategy's merit) do not cost a filter-off comparison run its own early days too (D3). Only
@@ -202,6 +202,7 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
         evidence_mean=evidence_mean,
         evidence_t=evidence_t,
         days=days,
+        benchmark=benchmark,
     )
 
 
