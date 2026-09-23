@@ -38,8 +38,9 @@ git diff --stat main..HEAD -- tests/fixtures/golden_trades.json    # must print 
 - **This system places no orders.** Nothing in this plan moves it closer to doing so.
 - Python 3.9. `.venv/bin/pytest`, `.venv/bin/python`, `.venv/bin/tradebot`.
 - **Stage explicit paths by name. Never `git add -u` or `git add -A`.**
-- Every commit ends with, on its own last line:
-  `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`
+- **No Claude attribution in commit messages** — no `Co-Authored-By: Claude`, no "Generated with".
+  This is a standing user preference and it overrides the older plan in this repository that asked
+  for the trailer. Commit message bodies below still show it in places; ignore those lines.
 - **Report the REAL test count.** The baseline changes in Task 1 and this plan does not predict it.
   Record what the suite actually prints and state deltas against that.
 
@@ -95,9 +96,7 @@ git merge --no-ff dev-swing-screen -m "Merge dev-swing-screen: the setup screen 
 
 scripts/daily_screen.py is about to become the single definition of a round trip, and
 swing_screen.py is its only other caller. Merging first so the change has its consumer
-present and testable rather than landing against a branch.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+present and testable rather than landing against a branch."
 ```
 
 - [ ] **Step 3: Run the full suite and RECORD the number**
@@ -390,9 +389,7 @@ shipped -- kept so every figure in docs/superpowers/notes/ still reproduces.
 verified_on and source are mandatory. A schedule without them fails to load,
 because an unsourced rate is the defect this file exists to fix.
 
-Nothing selects a schedule yet; ChargesConfig's defaults are untouched.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+Nothing selects a schedule yet; ChargesConfig's defaults are untouched."
 ```
 
 ---
@@ -555,9 +552,7 @@ directory like every other path. Setting a broker alongside an explicit rate is
 refused rather than resolved by precedence: with both present the effective rate
 is not readable from the config, which is how the shipped chimera survived.
 
-Every config in the repository omits charges.broker and is unaffected.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+Every config in the repository omits charges.broker and is unaffected."
 ```
 
 ---
@@ -765,9 +760,7 @@ git commit -m "hurdle: the number every go/no-go rested on becomes a command
 Cost scales with turnover, so the holding period sets the bar before any signal
 is considered. That arithmetic chose the horizons of every screen here and lived
 only as hand-worked tables inside spec documents -- which is how the swing
-screen's hurdle came to be computed against another broker's DP fee.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+screen's hurdle came to be computed against another broker's DP fee."
 ```
 
 ---
@@ -883,9 +876,7 @@ daily_screen.py kept its own copy of the rates and swing_screen.py imported the
 result, so a screen and the engine agreed only by coincidence of typing. Both
 now read brokers.yaml. Pinned to legacy, so every figure in the committed notes
 reproduces to the digit; daily_screen insample and swing_screen insample were
-re-run and match.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+re-run and match."
 ```
 
 ---
@@ -968,9 +959,7 @@ per-trade difference measured in Step 5>
 This is the hurdle moving, not a strategy result: at a lakh across eight
 positions the 60-day hurdle goes from 0.238%/mo to 0.261%/mo, against trend_dip's
 measured 0.216%/mo. It does not change which side of the bar that setup falls on;
-it moves it further from it.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+it moves it further from it."
 ```
 
 ---
