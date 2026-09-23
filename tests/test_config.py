@@ -355,3 +355,11 @@ def test_a_broker_and_an_explicit_rate_together_is_an_error(tmp_path):
     with pytest.raises(ValueError) as e:
         make_config(tmp_path, charges={"broker": "groww", "dp_charge": 1.0})
     assert "dp_charge" in str(e.value)
+
+
+def test_the_daily_config_is_charged_a_real_broker():
+    """config-daily.yaml is the only CNC config, so it is the only one the DP fee reaches. Charged
+    at the shipped default it paid Zerodha's 15.34 while assuming Groww's brokerage."""
+    cfg = load_config("config-daily.yaml")
+    assert cfg.charges.broker == "groww"
+    assert cfg.charges.dp_charge == pytest.approx(23.60)

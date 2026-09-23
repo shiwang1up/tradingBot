@@ -77,20 +77,13 @@ execution:
   bar_deadline_sec: 60
   interval_minutes: 1440      # one bar a day; SessionClock switches to daily mode at >= 1440
 
-charges:                        # CNC positions are charged the delivery schedule below; check groww.in/pricing
+charges:
   enabled: true
-  brokerage_pct: 0.1            # per order, percent of order value ...
-  brokerage_max: 20.0           # ... capped at this many rupees
-  brokerage_min: 5.0            # ... and floored at this
-  stt_sell_pct: 0.025           # sell side only
-  exchange_txn_pct: 0.00297     # NSE, both sides
-  sebi_pct: 0.0001              # both sides
-  stamp_buy_pct: 0.003          # buy side only
-  # the CNC fields below are the ones a daily run actually pays
-  delivery_stt_pct: 0.1         # CNC: both sides, against 0.025% sell-side intraday
-  delivery_stamp_buy_pct: 0.015 # CNC: buy side, against 0.003% intraday
-  dp_charge: 15.34              # CNC: depository, flat, per sell
-  gst_pct: 18.0                 # on brokerage + exchange txn + SEBI
+  # Rates come from brokers.yaml, verified 2026-09-22 against groww.in/pricing. Setting any rate
+  # here alongside `broker` is refused: with both present the effective rate is not readable from
+  # this file, which is how the shipped schedule came to pair Groww's brokerage with Zerodha's DP
+  # fee for the whole life of the project.
+  broker: groww
 
 regime:                         # longs only while the index is above its EMA, shorts only while at or below
   enabled: false
