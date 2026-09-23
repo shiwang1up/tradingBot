@@ -369,7 +369,19 @@ def load_brokers(path: Union[str, Path] = "brokers.yaml") -> Dict[str, Broker]:
     return out
 ```
 
-- [ ] **Step 5: Run**
+- [ ] **Amendment, after code review (2026-09-23).** The Step 4 code above has two defects; the shipped
+implementation fixes both and `brokers.yaml` needed no change:
+
+1. `float(v)` escapes as a bare `ValueError` naming neither file, schedule nor key. Wrap it so a
+   non-numeric rate raises `BrokerScheduleError` naming all three.
+2. A schedule carrying `verified_on` and `source` but missing rate keys loads silently and inherits
+   `ChargesConfig`'s defaults — which ARE the chimera this file exists to eliminate. Every rate
+   field is now required; a partial schedule raises, listing the missing keys.
+
+Three tests cover them: a non-numeric value naming schedule and key, one missing key named, and
+several missing keys all named. Expected count becomes the baseline **+13**, not +10.
+
+**Step 5: Run**
 
 `.venv/bin/pytest tests/test_brokers.py -q` → all pass.
 Then `.venv/bin/pytest -q` → the Task 1 baseline **+10**.
