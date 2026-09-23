@@ -96,6 +96,12 @@ class ChargesConfig:
     # Empty means "use the rate fields on this dataclass", which is what every config in this
     # repository did before brokers.yaml existed. A name selects a schedule from paths.brokers and
     # replaces every rate below. See docs/superpowers/specs/2026-09-22-broker-cost-model-design.md.
+    #
+    # It is a PROVENANCE LABEL that load_config keeps in step with the rates, not an invariant
+    # anything enforces afterwards. dataclasses.replace(cfg.charges, dp_charge=...) will happily
+    # leave the name saying "groww" over rates that are no longer Groww's -- which is the same
+    # defect this field exists to prevent, just moved from a config file into a Python process.
+    # If you must override a rate after load, clear `broker` in the same call.
     broker: str = ""
     brokerage_pct: float = 0.1         # per order ...
     brokerage_max: float = 20.0        # ... capped at this many rupees
