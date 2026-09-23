@@ -38,6 +38,7 @@ from typing import Optional, Tuple
 from tradebot.config import ChargesConfig
 from tradebot.engine.clock import date_of
 from tradebot.execution.charges import position_charges
+from tradebot.report.benchmark import Benchmark
 from tradebot.store.repo import Repo
 
 log = logging.getLogger("tradebot.report")
@@ -77,6 +78,7 @@ class Summary:
     evidence_mean: float = 0.0       # mean net PnL per such day
     evidence_t: Optional[float] = None  # None when fewer than 2 days or no variance
     days: list = field(default_factory=list)
+    benchmark: Optional["Benchmark"] = None   # equal-weight buy & hold over the same window
 
 
 def _max_drawdown(increments) -> float:
@@ -126,7 +128,7 @@ def _day_t(day_pnls: list) -> Tuple[float, Optional[float]]:
 
 
 def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = None,
-                  since_ts: Optional[int] = None) -> Summary:
+                  since_ts: Optional[int] = None, *, benchmark: Optional[Benchmark] = None) -> Summary:
     """`since_ts`, when given, scores only positions opened at or after it and only daily rows dated
     on or after its IST date - so a filter-on run's warm-up days (rejected regime_not_ready, not on
     the strategy's merit) do not cost a filter-off comparison run its own early days too (D3). Only
@@ -200,6 +202,7 @@ def build_summary(repo: Repo, run_id: str, schedule: Optional[ChargesConfig] = N
         evidence_mean=evidence_mean,
         evidence_t=evidence_t,
         days=days,
+        benchmark=benchmark,
     )
 
 
@@ -276,6 +279,21 @@ def format_summary(s: Summary) -> str:
         f"Gross PnL             {s.gross_pnl:,.2f}   after slippage, before charges",
         f"Charges               {s.charges:,.2f}{charges_note}",
         f"Total PnL             {s.total_pnl:,.2f}   net",
+    ]
+    if s.benchmark is not None:
+        b = s.benchmark
+        verdict = "beat" if s.total_pnl > b.net else "lost to"
+        held = f"{b.names_held} of {b.names_held + b.names_skipped} names"
+        lines.append(f"Benchmark             {b.net:,.2f}   equal-weight buy & hold, {held}, "
+                     f"net of one round trip")
+        if b.names_skipped:
+            # Not a footnote: at a 2,000 slice this drops the highest-priced names, and a basket
+            # presented as "the universe" while holding four fifths of it would be its own lie.
+            lines.append(f"                      {b.names_skipped} name(s) skipped: one share cost "
+                         f"more than the {b.slice_value:,.0f} slice")
+        lines.append(f"Strategy vs benchmark {s.total_pnl - b.net:+,.2f}   "
+                     f"selecting {verdict} not selecting")
+    lines += [
         f"Avg R (per trade)     {s.avg_r:.2f}   (over {s.r_trades} of {s.trades} trades with non-zero risk)",
         f"R on risk             {s.r_on_risk:.2f}   net PnL / rupees at risk, pooled over the same {s.r_trades} trades",
         f"Avg win / avg loss    {avg_line}",

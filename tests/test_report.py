@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from tradebot.report.summary import Summary, build_summary, format_summary
@@ -478,3 +480,49 @@ def test_row_charges_estimates_a_cnc_row_at_delivery_rates(repo):
     assert cnc > mis
     assert cnc == pytest.approx(position_charges("LONG", 100.0, 102.0, 100, schedule, product="CNC"))
     assert mis == pytest.approx(position_charges("LONG", 100.0, 102.0, 100, schedule, product="MIS"))
+
+
+def test_a_summary_without_a_benchmark_renders_exactly_as_before(repo):
+    """Every existing caller passes none. The block must be absent, not empty or zeroed."""
+    _seed(repo)
+    text = format_summary(build_summary(repo, "r1"))
+    assert "Benchmark" not in text
+    assert "selecting" not in text
+
+
+def test_the_benchmark_block_renders_when_present(repo):
+    from tradebot.report.benchmark import Benchmark
+    _seed(repo)
+    b = Benchmark(gross=100_693.20, charges=1_663.49, net=99_029.71,
+                  names_held=39, names_skipped=11, slice_value=2_000.0)
+    text = format_summary(replace(build_summary(repo, "r1"), benchmark=b))
+    assert "99,029.71" in text
+    assert "39 of 50 names" in text
+    assert "11 name(s) skipped" in text, "the skipped count must be visible, not silently dropped"
+
+
+def test_the_verdict_says_which_side_won(repo):
+    from tradebot.report.benchmark import Benchmark
+    _seed(repo)
+    base = build_summary(repo, "r1")
+    b = Benchmark(1.0, 0.0, 99_029.71, 39, 11, 2_000.0)
+    assert "lost to not selecting" in format_summary(replace(base, total_pnl=14_043.25, benchmark=b))
+    assert "beat not selecting" in format_summary(replace(base, total_pnl=200_000.0, benchmark=b))
+
+
+def test_the_difference_is_strategy_minus_benchmark(repo):
+    from tradebot.report.benchmark import Benchmark
+    _seed(repo)
+    s = replace(build_summary(repo, "r1"), total_pnl=14_043.25,
+                benchmark=Benchmark(1.0, 0.0, 99_029.71, 39, 11, 2_000.0))
+    assert "-84,986.46" in format_summary(s)
+
+
+def test_a_benchmark_with_nothing_skipped_omits_the_skipped_line(repo):
+    """A basket that bought everything should not print a '0 name(s) skipped' line."""
+    from tradebot.report.benchmark import Benchmark
+    _seed(repo)
+    text = format_summary(replace(build_summary(repo, "r1"),
+                                  benchmark=Benchmark(1.0, 0.0, 500.0, 50, 0, 2_000.0)))
+    assert "skipped" not in text
+    assert "50 of 50 names" in text

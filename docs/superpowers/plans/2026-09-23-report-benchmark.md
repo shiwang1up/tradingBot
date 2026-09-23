@@ -256,6 +256,12 @@ def build_benchmark(candles: Iterable[Candle], capital: float,
                      names_skipped=skipped, slice_value=slice_value)
 ```
 
+**Amendment after implementation (2026-09-23).** `test_a_falling_basket_is_negative` as printed
+above passes `charges=None` and then asserts `b.net < b.gross`. `round_trip_charges` returns 0.0
+for a None schedule by contract, so net equals gross and the assertion cannot be satisfied by any
+implementation. Pass `charges=CFG` in that one test; `gross` is unaffected by charges, so no other
+assertion moves.
+
 - [ ] **Step 4: Run**
 
 `.venv/bin/pytest tests/test_benchmark.py -q` → 9 passed.
@@ -297,28 +303,31 @@ the existing report tests are the guard.
 Append to `tests/test_report.py`:
 
 ```python
-def test_a_summary_without_a_benchmark_renders_exactly_as_before(tmp_path):
+def test_a_summary_without_a_benchmark_renders_exactly_as_before(repo):
+    _seed(repo)
     """Every existing caller passes none. The block must be absent, not empty or zeroed."""
-    s = _summary_for_rendering()          # see note below
+    s = build_summary(repo, "r1")          # see note below
     text = format_summary(s)
     assert "Benchmark" not in text
     assert "selecting" not in text
 
 
-def test_the_benchmark_block_renders_when_present(tmp_path):
+def test_the_benchmark_block_renders_when_present(repo):
+    _seed(repo)
     from tradebot.report.benchmark import Benchmark
     b = Benchmark(gross=100_693.20, charges=1_663.49, net=99_029.71,
                   names_held=39, names_skipped=11, slice_value=2_000.0)
-    s = replace(_summary_for_rendering(), benchmark=b)
+    s = replace(build_summary(repo, "r1"), benchmark=b)
     text = format_summary(s)
     assert "99,029.71" in text
     assert "39 of 50 names" in text or "39" in text
     assert "11" in text, "the skipped count must be visible, not silently dropped"
 
 
-def test_the_verdict_says_which_side_won():
+def test_the_verdict_says_which_side_won(repo):
+    _seed(repo)
     from tradebot.report.benchmark import Benchmark
-    base = _summary_for_rendering()
+    base = build_summary(repo, "r1")
     losing = replace(base, total_pnl=14_043.25,
                      benchmark=Benchmark(1.0, 0.0, 99_029.71, 39, 11, 2_000.0))
     winning = replace(base, total_pnl=200_000.0,
@@ -327,17 +336,20 @@ def test_the_verdict_says_which_side_won():
     assert "beat not selecting" in format_summary(winning)
 
 
-def test_the_difference_is_strategy_minus_benchmark():
+def test_the_difference_is_strategy_minus_benchmark(repo):
+    _seed(repo)
     from tradebot.report.benchmark import Benchmark
-    s = replace(_summary_for_rendering(), total_pnl=14_043.25,
+    s = replace(build_summary(repo, "r1"), total_pnl=14_043.25,
                 benchmark=Benchmark(1.0, 0.0, 99_029.71, 39, 11, 2_000.0))
     assert "-84,986.46" in format_summary(s)
 ```
 
-**Read `tests/test_report.py` first.** It already builds `Summary` objects for rendering tests —
-use whatever it uses and name the helper accordingly instead of adding `_summary_for_rendering`; the
-placeholder name above marks the one thing this plan cannot know without reading that file. Add
-`from dataclasses import replace` to its imports if absent.
+**Correction (2026-09-23): `_summary_for_rendering` does not exist and must not be created.**
+`tests/test_report.py` has a module-level `_seed(repo)` that populates a `repo` fixture (defined in
+`tests/conftest.py`, an in-memory database) with run `"r1"`, and every rendering test then calls
+`format_summary(build_summary(repo, "r1"))`. Build the four tests on that: take `_seed(repo)`, then
+`build_summary(repo, "r1")`, then `dataclasses.replace(...)` to attach a `Benchmark`. Each test
+takes `repo` as its argument. Add `from dataclasses import replace` to the file's imports.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -413,18 +425,48 @@ Append to `tests/test_cli.py`, following that file's existing `CliRunner` patter
 ```python
 def test_report_prints_a_benchmark(tmp_path):
     """The whole point: a report must say what not selecting would have returned."""
-    # build a run in a tmp database with two symbols and a handful of daily candles, then
-    # `report --run <id>` and assert "Benchmark" and "selecting" appear in the output.
-    raise NotImplementedError("fill in using this module's existing CliRunner + repo fixtures")
+    _setup(tmp_path)
+    r = CliRunner()
+    cfg = str(tmp_path / "config.yaml")
+    assert r.invoke(cli.main, ["--config", cfg, "backtest", "--start", "2026-09-14",
+                               "--end", "2026-09-15", "--run-id", "bm1"]).exit_code == 0
+    rep = r.invoke(cli.main, ["--config", cfg, "report", "--run", "bm1"])
+    assert rep.exit_code == 0, rep.output
+    assert "Benchmark" in rep.output and "selecting" in rep.output
+    assert "of 2 names" in rep.output, "the two-name universe from _setup"
+
+
+def test_the_backtest_command_prints_it_too(tmp_path):
+    """Both format_summary sites, not just report."""
+    _setup(tmp_path)
+    res = CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"), "backtest",
+                                        "--start", "2026-09-14", "--end", "2026-09-15",
+                                        "--run-id", "bm2"])
+    assert res.exit_code == 0, res.output
+    assert "Benchmark" in res.output
+
+
+def test_a_run_with_no_daily_rows_omits_the_block_instead_of_erroring(tmp_path):
+    """There is no window to price a basket over. Omit it rather than print a zero that reads like
+    a real result, and above all do not crash the report."""
+    cfg = _setup(tmp_path)
+    repo = Repo(connect(cfg.paths.db))
+    repo.create_run("empty1", "backtest", 0, '{"execution": {"interval_minutes": 5}}')
+    repo.conn.close()
+    rep = CliRunner().invoke(cli.main, ["--config", str(tmp_path / "config.yaml"),
+                                        "report", "--run", "empty1"])
+    assert rep.exit_code == 0, rep.output
+    assert "Benchmark" not in rep.output
 ```
 
-**Read `tests/test_cli.py` and build this on its existing fixtures** — it already creates runs in a
-temporary database for the `report` tests. The placeholder is deliberate: this plan has not read
-that file's fixtures and inventing names would send you chasing code that does not exist. If its
-harness cannot express a run with daily candles, say so and report NEEDS_CONTEXT rather than
-building a parallel one.
+**Correction (2026-09-23): the placeholder is resolved.** `tests/test_cli.py` already has
+`_setup(tmp_path)` at line 20 — it calls `make_config(tmp_path)`, writes a two-symbol
+`universe.yaml` (`[A, B]`), inserts 5-minute `synth_candles` for both over 2026-09-14/15 and
+returns the config. `test_backtest_then_report` shows the `CliRunner` pattern. `Repo`, `connect`,
+`CliRunner` and `cli` are already imported there. `BASE_CONFIG` capital is 100,000, so a two-name
+basket slices at 50,000 and both names are affordable.
 
-- [ ] **Step 2: Run to verify it fails** — `NotImplementedError`, then a real failure once written.
+- [ ] **Step 2: Run to verify they fail** — the three tests fail once `_benchmark_for` does not exist yet.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -484,7 +526,7 @@ argument.
 
 - [ ] **Step 4: Run**
 
-`.venv/bin/pytest -q` → the Task 2 count plus however many tests you added. Report the real number.
+`.venv/bin/pytest -q` → **825 passed** (822 plus three). Report the real number if it differs.
 
 - [ ] **Step 5: Confirm the fixture did not move**
 
