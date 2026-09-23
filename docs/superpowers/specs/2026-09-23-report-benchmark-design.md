@@ -61,7 +61,14 @@ Given a run, the symbols its universe held, its capital, its bar interval and it
    a rare edge case.** At 100,000 across 50 names the slice is 2,000, and eleven of `universe.yaml`'s
    fifty names trade above that — BAJFINANCE alone opened the window near 7,650. So the basket
    actually holds **39 of 50 names**, and the ones it drops are systematically the highest-priced.
-   That biases the benchmark in a direction nobody has measured.
+
+   **Measured 2026-09-23, and the direction is favourable to the strategy.** On `daily-perf-groww`,
+   whole-share truncation costs the benchmark **−28,304, or 22%** of what a fractional-share basket
+   would have returned (+99,030 against +127,333). The 11 skipped names averaged **+57%** over the
+   window — well short of the 39 held names' +150%, but far better than the 0% their idle cash
+   earned, so stranding their slice is a real drag. The printed Benchmark is therefore a
+   **conservative floor**: it cannot flatter the basket at the strategy's expense, only the
+   reverse. Anyone citing it should know the honest gap is wider than the line shows.
 
    Fractional shares would remove the problem and are not available on NSE, so whole shares is the
    realistic model and the distortion is real rather than an artefact. The response is to make it
