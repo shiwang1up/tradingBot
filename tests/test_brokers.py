@@ -90,3 +90,73 @@ def test_verified_on_is_exposed_so_a_stale_rate_can_be_found():
     from datetime import date
     assert load_brokers("brokers.yaml")["groww"].verified_on == date(2026, 9, 22)
     assert "groww.in" in load_brokers("brokers.yaml")["groww"].source
+
+
+def test_a_non_numeric_rate_value_names_the_schedule_and_key(tmp_path):
+    """A bare ValueError from float() would name neither the file, the schedule, nor the key --
+    every other error path in this loader does all three, so this one must too."""
+    p = tmp_path / "b.yaml"
+    p.write_text(textwrap.dedent("""
+        acme:
+          verified_on: 2026-09-22
+          source: https://example.com
+          brokerage_pct: twenty
+          brokerage_max: 20.0
+          brokerage_min: 5.0
+          stt_sell_pct: 0.025
+          exchange_txn_pct: 0.00297
+          sebi_pct: 0.0001
+          stamp_buy_pct: 0.003
+          delivery_stt_pct: 0.1
+          delivery_stamp_buy_pct: 0.015
+          dp_charge: 15.34
+          gst_pct: 18.0
+    """))
+    with pytest.raises(BrokerScheduleError) as e:
+        load_brokers(p)
+    assert "acme" in str(e.value) and "brokerage_pct" in str(e.value)
+
+
+def test_a_schedule_missing_one_rate_key_names_it(tmp_path):
+    """A schedule with provenance but a missing rate would silently inherit ChargesConfig's
+    default for that rate -- the Groww-brokerage/Zerodha-DP chimera this file exists to
+    eliminate -- while still claiming verified_on/source cover the whole schedule."""
+    p = tmp_path / "b.yaml"
+    p.write_text(textwrap.dedent("""
+        acme:
+          verified_on: 2026-09-22
+          source: https://example.com
+          brokerage_pct: 0.1
+          brokerage_max: 20.0
+          brokerage_min: 5.0
+          stt_sell_pct: 0.025
+          exchange_txn_pct: 0.00297
+          sebi_pct: 0.0001
+          stamp_buy_pct: 0.003
+          delivery_stt_pct: 0.1
+          delivery_stamp_buy_pct: 0.015
+          gst_pct: 18.0
+    """))
+    with pytest.raises(BrokerScheduleError) as e:
+        load_brokers(p)
+    assert "acme" in str(e.value) and "dp_charge" in str(e.value)
+
+
+def test_a_schedule_missing_several_rate_keys_names_all_of_them(tmp_path):
+    """The missing-key error must list every absent rate, not just the first, so a partial
+    schedule can be completed in one pass instead of failing once per key."""
+    p = tmp_path / "b.yaml"
+    p.write_text(textwrap.dedent("""
+        acme:
+          verified_on: 2026-09-22
+          source: https://example.com
+          brokerage_pct: 0.1
+          brokerage_max: 20.0
+          brokerage_min: 5.0
+    """))
+    with pytest.raises(BrokerScheduleError) as e:
+        load_brokers(p)
+    msg = str(e.value)
+    for missing in ("stt_sell_pct", "exchange_txn_pct", "sebi_pct", "stamp_buy_pct",
+                    "delivery_stt_pct", "delivery_stamp_buy_pct", "dp_charge", "gst_pct"):
+        assert missing in msg, missing

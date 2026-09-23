@@ -55,10 +55,23 @@ def load_brokers(path: Union[str, Path] = "brokers.yaml") -> Dict[str, Broker]:
         unknown = sorted(set(rates) - set(_RATE_FIELDS))
         if unknown:
             raise BrokerScheduleError(f"{p}: schedule '{name}' has unknown keys: {unknown}")
+        missing = sorted(set(_RATE_FIELDS) - set(rates))
+        if missing:
+            raise BrokerScheduleError(
+                f"{p}: schedule '{name}' is missing rate keys: {missing}. A schedule must state "
+                f"every rate it claims to have verified, or it silently inherits ChargesConfig's "
+                f"defaults for the rest -- the chimera this file exists to eliminate.")
         verified = entry["verified_on"]
         if not isinstance(verified, date):
             raise BrokerScheduleError(
                 f"{p}: schedule '{name}' verified_on must be an unquoted ISO date, got {verified!r}")
+        numeric_rates = {}
+        for k, v in rates.items():
+            try:
+                numeric_rates[k] = float(v)
+            except (TypeError, ValueError) as e:
+                raise BrokerScheduleError(
+                    f"{p}: schedule '{name}' key '{k}' must be a number, got {v!r}") from e
         out[name] = Broker(name=name, verified_on=verified, source=str(entry["source"]),
-                           charges=ChargesConfig(**{k: float(v) for k, v in rates.items()}))
+                           charges=ChargesConfig(**numeric_rates))
     return out
