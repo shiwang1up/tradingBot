@@ -28,7 +28,9 @@ from tradebot.engine.loop import BacktestEngine
 from tradebot.engine.paper import PaperEngine
 from tradebot.execution.backtest import BacktestBroker
 from tradebot.execution.groww_adapter import GrowwAdapter, is_non_retryable
+from tradebot.brokers import load_brokers
 from tradebot.report.compare import Prices, build_compare, format_compare
+from tradebot.report.hurdle import hurdle_per_month, round_trip_fraction
 from tradebot.report.summary import build_summary, format_summary
 from tradebot.store.db import SchemaVersionError, connect
 from tradebot.store.repo import Repo
@@ -293,6 +295,50 @@ def report(cfg: Config, run_id: Optional[str], compare) -> None:
         click.echo(format_compare(build_compare(repo, compare[0], compare[1], _prices(cfg), cfg.charges)))
         return
     click.echo(format_summary(build_summary(repo, run_id, cfg.charges)))
+
+
+@main.command()
+@click.option("--capital", type=float, default=None, help="Defaults to the config's capital.")
+@click.option("--slots", default="2,3,4,5,8", help="Comma-separated concurrent position counts.")
+@click.option("--hold", type=int, default=60, show_default=True, help="Hold in trading days.")
+@click.option("--slippage", type=float, default=0.05, show_default=True, help="Percent per side.")
+@click.option("--broker", "broker_names", default=None,
+              help="Comma-separated schedules from brokers.yaml. Defaults to all of them.")
+@click.pass_obj
+def hurdle(cfg: Config, capital: Optional[float], slots: str, hold: int, slippage: float,
+           broker_names: Optional[str]) -> None:
+    """What a round trip costs, and the excess per month a strategy must beat to pay for it."""
+    capital = capital if capital is not None else cfg.capital
+    if capital <= 0:
+        raise click.ClickException("--capital must be greater than 0")
+    try:
+        counts = [int(s) for s in slots.split(",") if s.strip()]
+    except ValueError:
+        raise click.ClickException(f"--slots: expected comma-separated integers, got {slots!r}")
+    if not counts or any(c <= 0 for c in counts):
+        raise click.ClickException("--slots must be positive integers")
+    brokers = load_brokers(cfg.paths.brokers)
+    names = [n.strip() for n in broker_names.split(",")] if broker_names else sorted(brokers)
+    unknown = [n for n in names if n not in brokers]
+    if unknown:
+        raise click.ClickException(f"unknown broker(s) {unknown}; brokers.yaml has {sorted(brokers)}")
+    click.echo(f"{capital:,.0f} fully deployed, {hold}-day hold, {slippage}% slippage per side")
+    for n in names:
+        b = brokers[n]
+        click.echo(f"  {n} (verified {b.verified_on}, {b.source})")
+    click.echo()
+    click.echo(f"{'slots':>6} {'position':>10} " + " ".join(f"{n:>12}" for n in names))
+    for c in counts:
+        v = capital / c
+        cells = []
+        for n in names:
+            frac = round_trip_fraction(v, brokers[n].charges, slippage)
+            cells.append(f"{100 * hurdle_per_month(frac, hold):>11.3f}%")
+        click.echo(f"{c:>6} {v:>10,.0f} " + " ".join(cells))
+    click.echo()
+    click.echo("Excess per month a strategy must beat to pay for itself. For reference, the only "
+               "setup in this repository to clear a pre-registered statistical bar (trend_dip, "
+               "h=60) measured 0.216%/mo in-sample, and its holdout is unspent.")
 
 
 def _estimate_candidate(cfg: Config, r, window) -> Candidate:
