@@ -220,6 +220,16 @@ def test_the_hurdle_is_per_month_not_per_trade():
     assert sw.hurdle_per_month(60) < sw.round_trip_cost(sw.CAPITAL / sw.POSITIONS)
 
 
+def test_swing_screens_hurdle_agrees_with_the_canonical_one():
+    """swing_screen's own hurdle_per_month is algebraically identical to
+    tradebot.report.hurdle.hurdle_per_month (252/12 == 21), so the two must never drift apart. A
+    lakh across eight positions, at every registered horizon."""
+    from tradebot.report.hurdle import hurdle_per_month as canonical_hurdle_per_month
+    fraction = sw.round_trip_cost(sw.CAPITAL / sw.POSITIONS)
+    for h in (20, 60, 120):
+        assert sw.hurdle_per_month(h) == pytest.approx(canonical_hurdle_per_month(fraction, h))
+
+
 def test_summarise_reports_both_excesses_and_their_ts():
     exs = [sw.Ex("A", date(2021, 3, 1), 60, 0.02, 0.01),
            sw.Ex("B", date(2021, 4, 1), 60, -0.01, 0.03),

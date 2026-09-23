@@ -362,9 +362,9 @@ def hurdle_per_month(horizon, capital=CAPITAL, positions=POSITIONS):
     Cost scales with how often you trade, so the holding period fixes this before any signal
     is considered: 20 days needs 0.715%/mo, 60 needs 0.238%, 120 needs 0.119%. Published
     anomalies run 0.3-0.8%/mo, which is why the primary horizon is 60 and not 10."""
+    from tradebot.report.hurdle import hurdle_per_month as canonical_hurdle_per_month
     rt = round_trip_cost(capital / float(positions))
-    rotations_per_year = 252.0 / float(horizon)
-    return rt * rotations_per_year / 12.0
+    return canonical_hurdle_per_month(rt, horizon)
 
 
 def summarise(exs, horizon):

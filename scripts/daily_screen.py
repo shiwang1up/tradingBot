@@ -30,6 +30,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict, namedtuple
 from datetime import date, timedelta
+from pathlib import Path
 
 DB = "data/tradebot.db"
 INTERVAL = 1440
@@ -42,35 +43,24 @@ GAP_THRESHOLD = 0.20                    # an overnight move this large is an una
 GAP_MASK_DAYS = 200                     # ... and the 200-day average is unusable for this long after it
 INTRABAR_THRESHOLD = 0.35               # see gap_mask: only applied when the open is synthetic
 
-# Groww DELIVERY (CNC) schedule on an assumed position value, plus slippage. CHECK THESE against
-# groww.in/pricing before trusting any figure computed from them.
+# Rates come from brokers.yaml, which records where each was verified and when. The screens pin to
+# `legacy` -- Groww's brokerage with Zerodha's DP fee, the schedule this repository shipped before
+# anyone checked -- so every figure already committed to docs/superpowers/notes/ reproduces to the
+# digit. It corresponds to no real broker. Pass broker="groww" for what a trade actually costs.
 POSITION_VALUE = 25_000.0
-BROKERAGE_PCT, BROKERAGE_MIN, BROKERAGE_MAX = 0.1, 5.0, 20.0
-STT_PCT = 0.1                           # both sides on delivery
-EXCHANGE_PCT = 0.00297
-SEBI_PCT = 0.0001
-STAMP_BUY_PCT = 0.015
-GST_PCT = 18.0
-DP_CHARGE = 15.34                       # depository, per sell
 SLIPPAGE_PCT = 0.05                     # each side, against the trade
+SCREEN_BROKER = "legacy"
 
 Bar = namedtuple("Bar", "date open high low close")
 
 
-def round_trip_cost(position_value=POSITION_VALUE):
+def round_trip_cost(position_value=POSITION_VALUE, broker=SCREEN_BROKER):
     """Round-trip cost as a FRACTION of position value: charges plus slippage on both opens."""
-    def brokerage(v):
-        return min(max(v * BROKERAGE_PCT / 100.0, BROKERAGE_MIN), BROKERAGE_MAX)
-
-    v = position_value
-    brok = brokerage(v) * 2
-    stt = v * STT_PCT / 100.0 * 2
-    exch = v * EXCHANGE_PCT / 100.0 * 2
-    sebi = v * SEBI_PCT / 100.0 * 2
-    stamp = v * STAMP_BUY_PCT / 100.0
-    gst = (brok + exch + sebi) * GST_PCT / 100.0
-    charges = brok + stt + exch + sebi + stamp + gst + DP_CHARGE
-    return charges / v + 2 * SLIPPAGE_PCT / 100.0
+    from tradebot.report.hurdle import round_trip_fraction
+    from tradebot.brokers import load_brokers
+    root = Path(__file__).resolve().parent.parent
+    schedule = load_brokers(root / "brokers.yaml")[broker].charges
+    return round_trip_fraction(position_value, schedule, SLIPPAGE_PCT)
 
 
 def load_series(conn, symbols):

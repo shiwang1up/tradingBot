@@ -23,9 +23,10 @@ def _bars(rows):
 def test_round_trip_cost_is_hand_worked():
     """25,000 position, Groww delivery: brokerage 20 x 2 = 40; STT 0.1% x 2 = 50; exchange
     0.00297% x 2 = 1.485; SEBI 0.0001% x 2 = 0.05; stamp 0.015% buy = 3.75;
-    GST 18% x (40 + 1.485 + 0.05) = 7.4763; DP 15.34. Charges 118.1013 = 0.472405% of 25,000.
-    Plus 0.05% slippage each side = 0.1%. Total 0.5724052% exactly."""
-    assert ds.round_trip_cost() == pytest.approx(0.005724052, abs=1e-9)
+    GST 18% x (40 + 1.485 + 0.05) = 7.4763; DP 15.34. Charges 118.1013, rounded to the nearest
+    paise by the shared engine (tradebot.execution.charges.round_trip_charges) to 118.10 =
+    0.4724% of 25,000. Plus 0.05% slippage each side = 0.1%. Total 0.5724% exactly."""
+    assert ds.round_trip_cost() == pytest.approx(0.005724, abs=1e-9)
 
 
 def test_gap_mask_covers_the_gap_day_and_the_days_after_it():
@@ -427,6 +428,32 @@ def test_gaps_masked_line_is_scoped_to_the_window(tmp_path):
     line = next(l for l in text.splitlines() if l.startswith("corporate-action gaps masked"))
     assert "A" not in line
     assert "B 201 dates" in line       # the gap day itself plus 200 trading days after it
+
+
+def test_round_trip_cost_still_matches_the_constants_the_notes_were_computed_from():
+    """The committed screen results in docs/superpowers/notes/ were computed at these exact
+    numbers. 0.572% on a 25,000 position is quoted verbatim in the 2026-09-20 daily screen note."""
+    assert ds.round_trip_cost(25_000.0) == pytest.approx(0.00572, abs=5e-6)
+
+
+def test_the_default_position_value_is_unchanged():
+    assert ds.round_trip_cost() == pytest.approx(ds.round_trip_cost(25_000.0))
+
+
+def test_a_named_broker_can_be_asked_for_and_groww_costs_more_than_legacy():
+    """legacy carries Zerodha's DP fee; Groww's is 8.26 dearer, so the real Groww cost is higher."""
+    assert ds.round_trip_cost(25_000.0, broker="groww") > ds.round_trip_cost(25_000.0)
+
+
+def test_the_screen_and_the_engine_cannot_disagree():
+    """The whole point of the task: one definition. The screen's fraction times the position value
+    must equal what the engine would charge for the same round trip, slippage aside."""
+    from tradebot.brokers import load_brokers
+    from tradebot.execution.charges import round_trip_charges
+    v = 25_000.0
+    engine = round_trip_charges(v, v, load_brokers("brokers.yaml")["legacy"].charges, product="CNC")
+    screen = (ds.round_trip_cost(v) - 2 * ds.SLIPPAGE_PCT / 100.0) * v
+    assert screen == pytest.approx(engine, abs=0.01)
 
 
 def test_run_phase_prints_a_block_per_system(tmp_path):
