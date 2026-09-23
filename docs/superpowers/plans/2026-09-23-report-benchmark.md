@@ -256,6 +256,12 @@ def build_benchmark(candles: Iterable[Candle], capital: float,
                      names_skipped=skipped, slice_value=slice_value)
 ```
 
+**Amendment after implementation (2026-09-23).** `test_a_falling_basket_is_negative` as printed
+above passes `charges=None` and then asserts `b.net < b.gross`. `round_trip_charges` returns 0.0
+for a None schedule by contract, so net equals gross and the assertion cannot be satisfied by any
+implementation. Pass `charges=CFG` in that one test; `gross` is unaffected by charges, so no other
+assertion moves.
+
 - [ ] **Step 4: Run**
 
 `.venv/bin/pytest tests/test_benchmark.py -q` → 9 passed.
@@ -297,28 +303,31 @@ the existing report tests are the guard.
 Append to `tests/test_report.py`:
 
 ```python
-def test_a_summary_without_a_benchmark_renders_exactly_as_before(tmp_path):
+def test_a_summary_without_a_benchmark_renders_exactly_as_before(repo):
+    _seed(repo)
     """Every existing caller passes none. The block must be absent, not empty or zeroed."""
-    s = _summary_for_rendering()          # see note below
+    s = build_summary(repo, "r1")          # see note below
     text = format_summary(s)
     assert "Benchmark" not in text
     assert "selecting" not in text
 
 
-def test_the_benchmark_block_renders_when_present(tmp_path):
+def test_the_benchmark_block_renders_when_present(repo):
+    _seed(repo)
     from tradebot.report.benchmark import Benchmark
     b = Benchmark(gross=100_693.20, charges=1_663.49, net=99_029.71,
                   names_held=39, names_skipped=11, slice_value=2_000.0)
-    s = replace(_summary_for_rendering(), benchmark=b)
+    s = replace(build_summary(repo, "r1"), benchmark=b)
     text = format_summary(s)
     assert "99,029.71" in text
     assert "39 of 50 names" in text or "39" in text
     assert "11" in text, "the skipped count must be visible, not silently dropped"
 
 
-def test_the_verdict_says_which_side_won():
+def test_the_verdict_says_which_side_won(repo):
+    _seed(repo)
     from tradebot.report.benchmark import Benchmark
-    base = _summary_for_rendering()
+    base = build_summary(repo, "r1")
     losing = replace(base, total_pnl=14_043.25,
                      benchmark=Benchmark(1.0, 0.0, 99_029.71, 39, 11, 2_000.0))
     winning = replace(base, total_pnl=200_000.0,
@@ -327,17 +336,20 @@ def test_the_verdict_says_which_side_won():
     assert "beat not selecting" in format_summary(winning)
 
 
-def test_the_difference_is_strategy_minus_benchmark():
+def test_the_difference_is_strategy_minus_benchmark(repo):
+    _seed(repo)
     from tradebot.report.benchmark import Benchmark
-    s = replace(_summary_for_rendering(), total_pnl=14_043.25,
+    s = replace(build_summary(repo, "r1"), total_pnl=14_043.25,
                 benchmark=Benchmark(1.0, 0.0, 99_029.71, 39, 11, 2_000.0))
     assert "-84,986.46" in format_summary(s)
 ```
 
-**Read `tests/test_report.py` first.** It already builds `Summary` objects for rendering tests —
-use whatever it uses and name the helper accordingly instead of adding `_summary_for_rendering`; the
-placeholder name above marks the one thing this plan cannot know without reading that file. Add
-`from dataclasses import replace` to its imports if absent.
+**Correction (2026-09-23): `_summary_for_rendering` does not exist and must not be created.**
+`tests/test_report.py` has a module-level `_seed(repo)` that populates a `repo` fixture (defined in
+`tests/conftest.py`, an in-memory database) with run `"r1"`, and every rendering test then calls
+`format_summary(build_summary(repo, "r1"))`. Build the four tests on that: take `_seed(repo)`, then
+`build_summary(repo, "r1")`, then `dataclasses.replace(...)` to attach a `Benchmark`. Each test
+takes `repo` as its argument. Add `from dataclasses import replace` to the file's imports.
 
 - [ ] **Step 2: Run to verify they fail**
 
