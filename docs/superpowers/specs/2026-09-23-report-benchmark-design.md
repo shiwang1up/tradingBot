@@ -53,9 +53,20 @@ Given a run, the symbols its universe held, its capital, its bar interval and it
    real cost of running the bot. Deriving the window from the first and last trade instead would
    hand the strategy the more flattering comparison, and `daily-perf-groww` shows the gap is
    material — its traded span starts ten months after its run window.
-2. **Per name:** `capital / N`, where N is the number of symbols priced at both ends. Buy at the
-   first stored close at or after the window start; sell at the last stored close at or before the
-   window end. **Whole shares only**; the remainder stays in cash and earns nothing.
+2. **Per name:** `capital / N`, where N is the number of symbols with at least two candles in the
+   window. Buy at the first stored close; sell at the last. **Whole shares only**; the remainder
+   stays in cash and earns nothing.
+
+   **A name whose single share costs more than the slice cannot be bought at all, and this is not
+   a rare edge case.** At 100,000 across 50 names the slice is 2,000, and eleven of `universe.yaml`'s
+   fifty names trade above that — BAJFINANCE alone opened the window near 7,650. So the basket
+   actually holds **39 of 50 names**, and the ones it drops are systematically the highest-priced.
+   That biases the benchmark in a direction nobody has measured.
+
+   Fractional shares would remove the problem and are not available on NSE, so whole shares is the
+   realistic model and the distortion is real rather than an artefact. The response is to make it
+   loud: the report prints how many names were held and how many could not be bought. A quietly
+   39-name basket presented as "the universe" would be its own small lie.
 3. **Costs:** one CNC round trip per name through `round_trip_charges` at the run's own schedule,
    so both sides of the comparison pay the same rates. A basket is not free, and pretending it is
    would understate the bar the strategy has to clear.
@@ -69,7 +80,8 @@ The result is net rupees, alongside the count of names actually held.
 Three lines, after the existing `Total PnL`. These are the real figures for `daily-perf-groww`,
 computed while writing this spec:
 
-    Benchmark             +99,029.71   equal-weight buy & hold, 50 names, net of one round trip
+    Benchmark             +99,029.71   equal-weight buy & hold, 39 of 50 names, net of one round trip
+                                       11 names skipped: one share cost more than the 2,000 slice
     Strategy vs benchmark -84,986.46   selecting lost to not selecting
 
 Worth noting what that costs line does: 100,000 across 50 names is 2,000 a name, where the flat
@@ -109,7 +121,10 @@ Out of scope: rebalancing, cap weighting, an actual index tracker (no index cand
 ## 7. Testing
 
 - A basket of one name over a two-bar window is the whole calculation by hand: shares, charges, net.
-- A name priced at only one end is excluded, and the capital split reflects the reduced count.
+- A name with fewer than two candles in the window is excluded, and the capital split reflects the
+  reduced count.
+- A name whose price exceeds the slice is counted as skipped, contributes no gross and no charges,
+  and its slice stays in cash. The skipped count reaches the rendered output.
 - Whole-share truncation leaves the remainder in cash — a name at a price that does not divide the
   slice evenly must not silently round up.
 - The charge schedule reaches it: the same basket under `groww` and under `zerodha` costs different
