@@ -54,3 +54,8 @@ def test_a_zero_or_negative_hold_raises():
 def test_a_zero_or_negative_position_raises():
     with pytest.raises(ValueError):
         round_trip_fraction(0.0, GROWW, slippage_pct=0.05)
+
+
+def test_negative_slippage_raises():
+    with pytest.raises(ValueError):
+        round_trip_fraction(12_500.0, GROWW, slippage_pct=-0.01)

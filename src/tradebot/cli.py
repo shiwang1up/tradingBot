@@ -336,9 +336,10 @@ def hurdle(cfg: Config, capital: Optional[float], slots: str, hold: int, slippag
             cells.append(f"{100 * hurdle_per_month(frac, hold):>11.3f}%")
         click.echo(f"{c:>6} {v:>10,.0f} " + " ".join(cells))
     click.echo()
-    click.echo("Excess per month a strategy must beat to pay for itself. For reference, the only "
-               "setup in this repository to clear a pre-registered statistical bar (trend_dip, "
-               "h=60) measured 0.216%/mo in-sample, and its holdout is unspent.")
+    click.echo("Excess per month a strategy must beat to pay for itself. As measured 2026-09-22, "
+               "the only setup in this repository to clear a pre-registered statistical bar "
+               "(trend_dip, h=60) scored 0.216%/mo in-sample against this hurdle, holdout unspent "
+               "-- see docs/superpowers/specs/2026-09-22-broker-cost-model-design.md section 1.")
 
 
 def _estimate_candidate(cfg: Config, r, window) -> Candidate:
