@@ -1,0 +1,63 @@
+# Charge schedules, one per broker. Selected by `charges.broker` in a config file.
+#
+# Every entry MUST carry verified_on and source: the defect this file fixes is that the shipped
+# rates were typed from a spec and never checked against a pricing page. See
+# docs/superpowers/specs/2026-09-22-broker-cost-model-design.md.
+#
+# The DP charge is stated GST-INCLUSIVE. charges.py computes GST on brokerage + exchange + SEBI and
+# then adds dp_charge untaxed. Adding dp_charge to the GST base would double-tax it.
+#
+# The statutory rates (STT, stamp duty, SEBI, exchange transaction charge, GST) are set by the
+# government and the exchange and are identical for every broker. Only brokerage and the DP fee
+# differ. groww.in/pricing gives the NSE transaction charge as 0.00297% and zerodha.com/charges
+# gives 0.00307%; it is an exchange-set rate and cannot differ by broker, so one page is stale. The
+# gap is 0.0001% of turnover, about 2.5 paise on a 25,000 round trip, and is immaterial to every
+# decision this repository makes. Both use 0.00297%.
+
+groww:
+  verified_on: 2026-09-22
+  source: https://groww.in/pricing
+  brokerage_pct: 0.1          # "20 or 0.1% per executed order, whichever is lower, minimum 5"
+  brokerage_max: 20.0
+  brokerage_min: 5.0
+  stt_sell_pct: 0.025         # intraday, sell side
+  exchange_txn_pct: 0.00297
+  sebi_pct: 0.0001
+  stamp_buy_pct: 0.003        # intraday, buy side
+  delivery_stt_pct: 0.1       # delivery, both sides
+  delivery_stamp_buy_pct: 0.015
+  dp_charge: 23.60            # depository 3.5 + Groww 16.5 = 20.00, +18% GST
+  gst_pct: 18.0
+
+zerodha:
+  verified_on: 2026-09-22
+  source: https://zerodha.com/charges
+  brokerage_pct: 0.0          # "Zero Brokerage" on equity delivery
+  brokerage_max: 0.0
+  brokerage_min: 0.0
+  stt_sell_pct: 0.025
+  exchange_txn_pct: 0.00297
+  sebi_pct: 0.0001
+  stamp_buy_pct: 0.003
+  delivery_stt_pct: 0.1
+  delivery_stamp_buy_pct: 0.015
+  dp_charge: 15.34            # CDSL 3.5 + Zerodha 9.5 + GST 2.34
+  gst_pct: 18.0
+
+legacy:
+  verified_on: 2026-09-22     # the date the chimera was IDENTIFIED, not a rate anyone verified
+  source: docs/superpowers/specs/2026-09-22-broker-cost-model-design.md
+  # NOT A REAL BROKER. Groww's brokerage with Zerodha's DP fee -- the schedule this repository
+  # shipped before the rates were checked. It exists so every figure already committed to
+  # docs/superpowers/notes/ reproduces exactly. Do not use it for a new decision.
+  brokerage_pct: 0.1
+  brokerage_max: 20.0
+  brokerage_min: 5.0
+  stt_sell_pct: 0.025
+  exchange_txn_pct: 0.00297
+  sebi_pct: 0.0001
+  stamp_buy_pct: 0.003
+  delivery_stt_pct: 0.1
+  delivery_stamp_buy_pct: 0.015
+  dp_charge: 15.34
+  gst_pct: 18.0
